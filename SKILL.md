@@ -9,7 +9,7 @@ description: 在 macOS 上用桌面看板诊断内存压力、安全回收有闲
 
 ## 桌面可视化
 
-用户需要随时查看资源时，运行 `python3 widget/build.py`，生成 `~/Applications/资源看板.app`。它是只读菜单栏App和可置顶小窗，每15秒采样；不启动清理、不改变调度。已有同名App时构建器保留并要求另选输出；核实本任务生成物后再更新。详细行为见 [桌面组件](docs/widget.md)。
+用户需要随时查看资源时，运行 `python3 widget/build.py`，生成 `~/Applications/资源看板.app`。它是菜单栏App和可置顶小窗，每15秒只采样状态；用户可手动扫描分类、查看预览并确认调用现有dev-storage/dev-memory清理，不改变调度。全局唤起默认⌃⌥⌘S，注册冲突时自动选择备用组合。已有同名App时构建器保留并要求另选输出；核实本任务生成物后再更新。详细行为见 [桌面组件](docs/widget.md)。
 
 ## 首次使用
 
