@@ -4,7 +4,7 @@
 
 ## 原始输入
 
-[逐字原始输入](menubar-presence.raw-input.md)，本轮 RAW-01。
+[逐字原始输入](menubar-presence.raw-input.md)，本轮 RAW-01～02。
 
 ## 行为
 
@@ -16,8 +16,8 @@
 
 | ID | 级 | Given | When | Then | 落点 | 状态 | 证据 |
 |---|---|---|---|---|---|---|---|
-| AC-06 | [核] | 安装新版App，包括曾经显示/置顶的窗口偏好 | 首次启动或退出后重启 | 面板默认隐藏、无焦点抢占，仅保留菜单栏小图标；右键可退出 | mac原生 | ✅ | auto: 实际AppDelegate启动断言window.isVisible=false、isRestorable=false、accessory与图标配置；ui: 原生NSStatusBarButton组件窗口右键菜单、选择退出；menu-bar-presence |
-| AC-07 | [核] | App后台运行，面板隐藏 | 左键图标或全局快捷键；关闭后再次唤出 | 两种入口均可显示同一面板，关闭不结束后台，不自动扫描或清理 | mac原生 | ✅ | ui: 安装版从TextEdit快捷键打开、关闭后重开；组件真实NSStatusBarButton左键打开；auto: 原位按钮performClick/close两轮；panel-reveal |
+| AC-06 | [核] | 安装新版App，包括曾经显示/置顶的窗口偏好 | 首次启动或退出后重启 | 面板默认隐藏、无焦点抢占，仅保留菜单栏小图标；右键可退出 | mac原生 | ✅ | ui: 用户授权原生UI自动化，安装版冷启动及再次open后AX窗口数均为0、图标24×24；组件真实NSStatusBarButton右键菜单及退出；menu-bar-presence |
+| AC-07 | [核] | App后台运行，面板隐藏 | 左键图标或全局快捷键；关闭后再次唤出 | 两种入口均可显示同一面板，关闭不结束后台，不自动扫描或清理 | mac原生 | ✅ | ui: 安装版其他App前台时系统HID快捷键两轮窗口0→1；实际菜单栏图标AXPress关闭/重开两轮；原生AX读回与窗口截图；panel-reveal |
 
 ## 测试
 
@@ -31,4 +31,6 @@
 
 ## 证据边界
 
-桌面执行器无法读取隐藏App的系统菜单栏extras。组件验证使用实际AppDelegate和真实NSStatusBarButton：先原位核对启动隐藏、窗口不恢复及按钮两轮打开/关闭，再将测试进程自己的按钮移到可抓取窗口，保留原target/action/event mask，通过computer-use真实左右键观察生产Dashboard和菜单，并选择退出。不是用渲染图或假回调替代。实际系统菜单栏位置/遮挡/命中没有直接覆盖；组件移位后的重复左键未稳定复现，不计作通过，重复唤出由原位按钮断言及安装版快捷键实测支持。没有清理真实缓存、关闭开发后台或修改调度。
+早期CUA观察可能由旧版reopen自动显示窗口干扰，不作为严格全局按键证据。用户于2026-10-23明确授权“允许，补完验证”后，原生自动化直接读取安装进程的AXExtrasMenuBar/AXWindows，以系统HID键盘事件验证其他App前台时的快捷键，以真实系统图标AXPress验证两轮打开/关闭，并用WindowServer窗口截图、冷启动与再次open后的零窗口读回复核。
+
+右键菜单及退出另由同源原生组件验证：实际AppDelegate先核对启动与原位按钮两轮开关，再把测试进程的真实NSStatusBarButton移到可抓取窗口，保留原target/action/event mask，用computer-use真实右键观察菜单并选退出。不是用渲染图或假回调替代。系统级鼠标像素坐标命中不计作通过；移位后的重复左键未稳定复现也不计作通过，改由实际系统图标AXPress和原生HID全局键复核。没有清理真实缓存、关闭开发后台或修改调度。
