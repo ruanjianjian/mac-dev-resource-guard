@@ -174,11 +174,7 @@ struct Overview: View {
             }
         }
     }
-    private func togglePin() {
-        model.pinned.toggle()
-        UserDefaults.standard.set(model.pinned, forKey: "pinned")
-        (NSApp.delegate as? AppDelegate)?.window.level = model.pinned ? .floating : .normal
-    }
+
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -254,7 +250,12 @@ if CommandLine.arguments.contains("--self-test") {
     require(!stale.canClean)
     let failed = BackendReply(status: "busy", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
     require(!failed.canClean)
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, global shortcut conflict fallback")
+    require(try! testHomeArgument(["app"]) == nil)
+    require(try! testHomeArgument(["app", "--test-home", "/fixture"]) == "/fixture")
+    for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
+        do { _ = try testHomeArgument(args); require(false) } catch { }
+    }
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection")
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate(); app.delegate = delegate

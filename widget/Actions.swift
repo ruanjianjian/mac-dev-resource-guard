@@ -30,6 +30,14 @@ func byteCount(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
+func testHomeArgument(_ arguments: [String]) throws -> String? {
+    guard let index = arguments.firstIndex(of: "--test-home") else { return nil }
+    guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--"), !arguments[index + 1].isEmpty else {
+        throw NSError(domain: "Dashboard", code: 2, userInfo: [NSLocalizedDescriptionKey: "隔离测试参数缺少目录，拒绝回退到真实工具。"])
+    }
+    return arguments[index + 1]
+}
+
 final class DashboardActions: ObservableObject {
     @Published var busy = false
     @Published var activity = ""
@@ -59,8 +67,7 @@ final class DashboardActions: ObservableObject {
                 var args = [script.path, family + (clean ? "-clean" : "-preview")]
                 if let token { args += ["--token", token] }
                 // An explicit, marked disposable home is only for UI integration tests.
-                if let index = CommandLine.arguments.firstIndex(of: "--test-home"), index + 1 < CommandLine.arguments.count {
-                    let home = CommandLine.arguments[index + 1]
+                if let home = try testHomeArgument(CommandLine.arguments) {
                     guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
                         throw NSError(domain: "Dashboard", code: 2, userInfo: [NSLocalizedDescriptionKey: "隔离测试目录缺少标记，拒绝回退到真实工具。"])
                     }

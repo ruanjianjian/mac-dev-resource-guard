@@ -21,14 +21,8 @@
 
 ## 分类扫描与清理（1.1）
 
-- AC-01：磁盘页点击扫描，后台调用已安装的 `~/.local/bin/dev-storage plan --output ...`，按编译中间文件、Xcode索引、模块缓存、SDK状态缓存展示大小、路径、判定和保留原因；扫描失败／busy不回退旧结果。
-- AC-02：内存页点击诊断，后台调用 `dev-memory inspect --json`，分类展示受管后台、现有应用、设备占用、待核实请求。暂停或无法核实的资源保留；不根据RSS推算可释放内存。
-- AC-03：有符合条件的结果且预览未过期才可点击清理；弹出确认，取消不执行。确认调用 `dev-storage maintain --apply --scan` 或 `dev-memory clean --json`。磁盘按相同规则重新扫描，实际项目以复核为准，可能与预览不同；不提供单目录删除或任意命令入口。执行后预览失效。
-- AC-04：所有操作离开主线程；同一App操作互斥，适配器跨进程锁阻止多窗口重复执行，后端沿用原有锁。结果未知时不重发；守护暂停时不自动恢复，不添加新调度。
-- AC-05：全局唤起首选 `⌃⌥⌘S`（保留 `⌘S` 保存），注册冲突依次尝试 `⌃⌥⌘R`、`⌃⌥⇧⌘S`；全部失败保留菜单栏入口并显示未注册。无需辅助功能权限，退出注销快捷键。
+行为规格与验收口径统一维护在[资源看板规格](epics/resource-dashboard/specs/dashboard-actions.md)，[测试入口与边界](epics/resource-dashboard/specs/dashboard-actions.test-cases.md)。
 
-磁盘预览是目录统计，清理回执分别呈现删除/保留/失败项目数和实际磁盘净变化。内存只将明确stopped计为退出，accepted/pending不当作完成。后端缺失或schema不兼容时清理禁用，保留概览功能。
+适配器随App打包，使用已安装的dev-storage和dev-memory，不覆盖现有部署。运行元数据位于 `~/.local/state/dev-resource-guard/dashboard/`；结果未知时保留running/unknown状态，不重复发送清理请求，核实后端日志和进程再处理。退出菜单在操作运行时只唤回面板，关闭小窗不会取消后端。
 
-后台适配器随App打包，仅使用已安装的两条命令，不覆盖旧部署、不直接删除资源、不解除pin/lease。没有将已有CLI迁移到公开包内实现，也未扩大本机清理范围。
-
-隔离界面验证可用 `ResourceDashboard --test-home <显式目录>`；目录必须有 `.resource-dashboard-fixture` 标记，否则拒绝回退真实工具。该模式有显眼标题，仅用于可销毁夹具，不属于真实后端清理证据。
+隔离原生界面测试使用 `ResourceDashboard --test-home <目录>`，目录必须含 `.resource-dashboard-fixture` 标记。缺参或缺标记拒绝回退真实工具。隔离标题不构成真实清理证据。
