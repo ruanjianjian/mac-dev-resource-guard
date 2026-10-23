@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let actions = DashboardActions()
     var window: NSWindow!
     var status: NSStatusItem!
+    let statusMenu = NSMenu()
     var shortcut: GlobalShortcut?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -191,16 +192,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "资源看板"; window.titlebarAppearsTransparent = true
         window.minSize = NSSize(width: 620, height: 700)
         window.contentView = view; window.delegate = self; window.isReleasedWhenClosed = false
+        window.isRestorable = false
         window.setFrameAutosaveName("resource-dashboard")
         if !window.setFrameUsingName("resource-dashboard") { window.center() }
         window.level = model.pinned ? .floating : .normal
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status.button?.title = "◉ 资源"
+        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status.button?.image = NSImage(systemSymbolName: "gauge", accessibilityDescription: "资源看板")
+        status.button?.image?.isTemplate = true
+        status.button?.setAccessibilityLabel("显示资源看板")
+        status.button?.target = self
+        status.button?.action = #selector(statusClicked)
+        status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         shortcut = GlobalShortcut { [weak self] in self?.show() }
         shortcut?.register()
         model.shortcut = shortcut?.label ?? "未注册，可从菜单栏打开"
-        let menu = NSMenu()
+        let menu = statusMenu
         menu.addItem(withTitle: "显示资源看板", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r").target = self
         let shortcutItem = NSMenuItem(title: "全局唤起：\(model.shortcut)", action: nil, keyEquivalent: "")
@@ -208,7 +215,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(shortcutItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出资源看板", action: #selector(quit), keyEquivalent: "q").target = self
-        status.menu = menu
         let mainMenu = NSMenu()
         let applicationItem = NSMenuItem()
         let applicationMenu = NSMenu()
@@ -217,12 +223,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
         NSApp.mainMenu = mainMenu
-        model.start(); show()
+        model.start()
     }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
     func updateStatus(_ s: Snapshot) {
-        status.button?.title = "◉ \(s.free.map { String(format: "%.0fG", $0) } ?? "资源")"
-        status.button?.toolTip = "\(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB"
+        status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
+    }
+    @objc func statusClicked() {
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp, let button = status.button {
+            NSMenu.popUpContextMenu(statusMenu, with: event, for: button)
+        } else { show() }
     }
     @objc func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func refresh() { model.refresh() }
