@@ -1,2 +1,67 @@
-# mac-dev-resource-guard
-macOS memory diagnostics, safe idle reclaim, stable build caches, and a native desktop resource dashboard.
+# Mac Dev Resource Guard
+
+Mac 内存清理、App／模拟器构建缓存复用，以及随时可看的桌面「资源看板」。可作为完整 skill 交给 Codex / Claude 使用，也可以直接运行命令。
+
+## 先用桌面看板
+
+macOS 13+，安装 Xcode 或 Command Line Tools。看板独立可用，不要求先安装清理器。
+
+```bash
+git clone https://github.com/ruanjianjian/mac-dev-resource-guard.git
+cd mac-dev-resource-guard
+python3 widget/build.py
+open "$HOME/Applications/资源看板.app"
+```
+
+显示内存压力、物理内存、压缩内存、swap、磁盘可用量、配置的空间目标、守护状态和固定构建槽数量。每15秒后台采样，可手动刷新、置顶；关窗后从菜单栏唤回。可打开系统活动监视器继续查看。看板只读，不扫描全盘、不关闭进程、不执行清理、不联网。它是菜单栏 App + 桌面小窗，不是 WidgetKit 通知中心扩展。
+
+按当前 Mac 的架构本地编译，采用 ad-hoc 签名；没有 Developer ID 公证，未提供跨机器通用的预编译安装包。不修改 Gatekeeper 或系统安全设置。没有自动添加登录启动项。构建使用固定 Swift 模块缓存，不按每轮新建缓存。
+
+## 安装 skill 和命令
+
+将完整仓库或 [Release 压缩包](https://github.com/ruanjianjian/mac-dev-resource-guard/releases/latest) 交给 agent：
+
+> 使用 mac-dev-resource-guard，在我的 Mac 安装内存诊断与构建缓存复用，并接入我指定的构建脚本。先检查现有工具和调度，不覆盖、不打断开发；展示诊断后，再按我的授权启用周期维护。
+
+也可手动运行：
+
+```bash
+python3 scripts/setup.py doctor
+python3 scripts/setup.py install
+```
+
+Python 3.9+，无 pip 依赖。默认暂停自动回收、不安装调度。已有同名工具或状态时拒绝覆盖，需先核对迁移。Codex 与 Claude 共用同一份 skill、命令、状态和锁。
+
+- [完整安装与可选调度](references/install.md)
+- [内存回收机制及可选适配器](references/memory.md)
+- [构建缓存如何复用](references/cache.md)
+- [测试范围与未验证边界](references/validation.md)
+- [桌面组件行为与验收](docs/widget.md)
+
+## 共享什么
+
+下载依赖缓存沿用 Go/npm/pnpm/pub/Gradle 的原生全局位置。同一工作树的 Xcode 构建按工具链、平台、配置复用固定 DerivedData，并用跨进程锁独占；不会每轮、每commit再造一份。不同工作树的 build、Pods、node_modules、.dart_tool 和可变 checkout 继续隔离。
+
+直接 Xcode 构建接入示例：
+
+```bash
+dev-storage xcode --worktree "$PWD" --platform ios-simulator --configuration Debug -- \
+  xcodebuild -workspace ios/App.xcworkspace -scheme App -configuration Debug -sdk iphonesimulator build
+```
+
+替换实际工程和scheme。已有脚本不会自动迁移，修改真正执行构建的入口并验证两次构建的实际路径后才算接入。
+
+## 回收边界
+
+内存压力需连续观察，候选需复核身份与闲置证据。Gradle支持指定版本的温和排空；模拟器需要兼容devlease占用协议，MCP需要兼容broker协议；本包不附带这些外部系统，缺失时保留相应资源。不会根据CPU=0或进程年龄强杀。
+
+磁盘自动维护只处理专用缓存根中四类过期中间目录，保留源码、验收包、报告、登录态、设备和容器。磁盘目标只提醒，永远不阻止编译、依赖安装和测试。
+
+## 验证
+
+```bash
+python3 scripts/verify.py
+"$HOME/Applications/资源看板.app/Contents/MacOS/ResourceDashboard" --self-test
+```
+
+Python使用临时HOME与假设备／进程夹具；外部集成按条件跳过。桌面自测只读系统指标。真实项目构建命中率、第三方协议和其他Mac型号仍需在目标机器验证。

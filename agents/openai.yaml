@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mac 内存与构建缓存守护"
+  short_description: "诊断内存压力，安全回收闲置开发资源，复用 App 与模拟器编译缓存"
+  default_prompt: "使用 $mac-dev-resource-guard 诊断这台 Mac 的内存和重复构建缓存，保留正在运行的任务。"
