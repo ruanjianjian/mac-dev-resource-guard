@@ -82,6 +82,7 @@ final class Monitor: ObservableObject {
     @Published var snapshot = Snapshot()
     @Published var loading = true
     @Published var pinned = UserDefaults.standard.bool(forKey: "pinned")
+    @Published var shortcut = "正在注册快捷键"
     private var timer: Timer?
     private var busy = false
     func start() {
@@ -102,21 +103,11 @@ final class Monitor: ObservableObject {
     }
 }
 
-struct Dashboard: View {
+struct Overview: View {
     @ObservedObject var model: Monitor
     var body: some View {
         let s = model.snapshot
         VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("资源看板").font(.system(size: 21, weight: .semibold))
-                    Text("MAC · 本机实时状态").font(.system(size: 10, weight: .medium)).tracking(1.4).foregroundColor(.secondary)
-                }
-                Spacer()
-                Button(action: togglePin) { Image(systemName: model.pinned ? "pin.fill" : "pin").frame(width: 24, height: 24) }
-                    .buttonStyle(.borderless).help(model.pinned ? "取消置顶" : "置顶窗口")
-                    .accessibilityLabel(model.pinned ? "取消置顶" : "置顶窗口")
-            }
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 8) {
                     Circle().fill(s.tint).frame(width: 8, height: 8)
@@ -192,14 +183,17 @@ struct Dashboard: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = Monitor()
+    let actions = DashboardActions()
     var window: NSWindow!
     var status: NSStatusItem!
+    var shortcut: GlobalShortcut?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.setActivationPolicy(.accessory)
-        let view = NSHostingView(rootView: Dashboard(model: model))
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 460), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        let view = NSHostingView(rootView: Dashboard(model: model, actions: actions))
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 700), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "资源看板"; window.titlebarAppearsTransparent = true
+        window.minSize = NSSize(width: 620, height: 700)
         window.contentView = view; window.delegate = self; window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("resource-dashboard")
         if !window.setFrameUsingName("resource-dashboard") { window.center() }
@@ -207,9 +201,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.title = "◉ 资源"
+        shortcut = GlobalShortcut { [weak self] in self?.show() }
+        shortcut?.register()
+        model.shortcut = shortcut?.label ?? "未注册，可从菜单栏打开"
         let menu = NSMenu()
         menu.addItem(withTitle: "显示资源看板", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r").target = self
+        let shortcutItem = NSMenuItem(title: "全局唤起：\(model.shortcut)", action: nil, keyEquivalent: "")
+        shortcutItem.isEnabled = false
+        menu.addItem(shortcutItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出资源看板", action: #selector(quit), keyEquivalent: "q").target = self
         status.menu = menu
@@ -230,7 +230,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func refresh() { model.refresh() }
-    @objc func quit() { NSApp.terminate(nil) }
+    @objc func quit() {
+        if actions.busy { show(); return }
+        NSApp.terminate(nil)
+    }
 }
 
 func require(_ condition: Bool) { if !condition { fputs("Self-test failed\n", stderr); exit(1) } }
@@ -240,7 +243,18 @@ if CommandLine.arguments.contains("--self-test") {
     for (raw,label) in [(UInt32(1),"内存正常"),(2,"内存有压力"),(4,"内存压力高")] { s.pressure=raw; require(s.pressureLabel == label) }
     require(number(nil) == "—"); require(gib(1_073_741_824) == 1)
     let live=sample(); require(live.ram>0); require(live.free != nil); require(live.capacity! >= live.free!)
-    print("PASS: pressure states, missing values, units, read-only macOS sampling")
+    var attempts = 0
+    let fallback = ShortcutChoice.firstAvailable { _ in attempts += 1; return attempts == 2 }
+    require(fallback?.label == "⌃⌥⌘R"); require(attempts == 2)
+    require(ShortcutChoice.firstAvailable { _ in false } == nil)
+    require(ShortcutChoice.choices.allSatisfy { $0.label != "⌘S" })
+    let valid = BackendReply(status: "ok", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
+    require(valid.canClean)
+    let stale = BackendReply(status: "ok", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970 - 301, eligible: 1, eligibleBytes: 0)
+    require(!stale.canClean)
+    let failed = BackendReply(status: "busy", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
+    require(!failed.canClean)
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, global shortcut conflict fallback")
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate(); app.delegate = delegate
