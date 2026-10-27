@@ -446,7 +446,10 @@ def reconcile_external(state):
             pass
 
 
-def run_cycle(mode):
+def run_cycle(mode, selected_ids=None, owned_only=False):
+    manual = mode == 'clean-once'
+    if manual and not selected_ids:
+        raise ValueError('单次回收必须指定预览中的资源 ID')
     with locked():
         now = time.time()
         state_path = STATE / "state.json"
@@ -471,22 +474,28 @@ def run_cycle(mode):
             for field in ("swapins", "swapouts"):
                 sample[field + "_mib_s"] = round(max(0, sample[field] - old_sample.get(field, sample[field])) * sample["page_size"] / 1024 ** 2 / elapsed, 2)
         leases = protection_knowledge()
-        needs_top = mode in ("status", "inspect", "clean") or now - state.get("last_top", 0) >= 300
+        needs_top = mode in ("status", "inspect", "clean", "clean-once") or now - state.get("last_top", 0) >= 300
         needs_processes = needs_top or any((STATE / "resources").glob("*.json"))
         table = process_table() if needs_processes else {}
-        resources, records = inspect_resources(table, state, now, LEASES.is_dir())
-        reconcile_external(state)
-        external, external_records = inspect_external_resources(state, now)
+        # Device occupancy is optional. Owned tail supervisors establish their
+        # own identity boundary; malformed existing protection still raises above.
+        resources, records = inspect_resources(table, state, now, True)
+        if owned_only:
+            external, external_records = [], {}
+        else:
+            reconcile_external(state)
+            external, external_records = inspect_external_resources(state, now)
         actions = []
         effective_pressure = sample['pressure']
         last_normal_sweep = state.get('external_last_sweep')
         normal_sweep = sample["pressure"] == 1 and (last_normal_sweep is None or now - last_normal_sweep >= 86400)
         pressure_driven = sample['pressure'] in (2, 4)
         cooldown = state.get("last_cleanup") is None or now - state["last_cleanup"] >= 600
-        apply = not paused and cooldown and sample["pressure"] in (1, 2, 4) and (mode == "clean" or mode == "tick" and (event == "candidate" or normal_sweep))
+        apply = (manual or not paused) and cooldown and sample["pressure"] in (1, 2, 4) and (manual or mode == "clean" or mode == "tick" and (event == "candidate" or normal_sweep))
         if apply:
             candidates = [r for r in external + resources if r.get('eligible') is True
-                          and r.get('id') not in state.get('external_pending', {})]
+                          and r.get('id') not in state.get('external_pending', {})
+                          and (not manual or r.get('id') in selected_ids)]
             if candidates and not table:
                 table = process_table()
             for item in candidates[:3]:
@@ -510,7 +519,7 @@ def run_cycle(mode):
                     if is_external:
                         result = external_module().reclaim(item['kind'], rec, STATE)
                     else:
-                        result = resource_request(rec, 'stop_if_orphan')
+                        result = resource_request(rec, 'stop_if_orphan_once' if manual else 'stop_if_orphan')
                     if not isinstance(result, dict):
                         raise ValueError('invalid shutdown response')
                     if type(result.get('stopped')) is not bool:
@@ -567,13 +576,20 @@ def run_cycle(mode):
             log_event({"type": "notification", "delivered": ok, "pressure": effective_pressure})
         if mode == "tick":
             state["sample"] = sample
+        if not cooldown:
+            for resource in resources + external:
+                if resource.get('eligible'):
+                    resource.update(eligible=False, reason='cleanup_cooldown')
         result = {"version": VERSION, "at": now, "paused": paused, "sample": sample,
+                  "manual_clean_supported": True, "manual": manual,
                   "managed_resources": resources, 'external_resources': external,
                   'pending_requests': list(state.get('external_pending', {})),
                   "actions": actions, "protected_devices": len(leases),
                   "top_memory": rows, "policy": "模拟器按任务退出证据与占用CAS收尾；Gradle仅闲置无消费者时正常退出；MCP需原子排空协议；在用、旧协议和未知资源保留"}
         atomic_json(state_path, state)
         atomic_json(STATE / "latest.json", result)
+        if actions:
+            atomic_json(STATE / 'last-cleanup.json', result)
         if mode == "tick":
             log_event({"type": "sample", "pressure": sample["pressure"], "swap_used_bytes": sample["swap_used_bytes"], "compressed_bytes": sample["compressed_bytes"], "actions": len(actions), "paused": paused})
         return result
@@ -649,10 +665,10 @@ def supervise(args):
                     protected = not p or bool(NON_RECLAIMABLE.search(p.command))
                     safe = owner_dead and leaf and not protected and current is not None and current["start"] == born["start"]
                     result = {"owner_dead": owner_dead, "safe_to_stop": safe, "stopped": False, "accepted": False}
-                    if req.get("action") == "stop_if_orphan":
-                        # Check policy again at the actual endpoint. pause is a
-                        # global barrier, even if the scanner's snapshot predates it.
-                        if safe and not (STATE / "paused").exists():
+                    if req.get("action") in ("stop_if_orphan", "stop_if_orphan_once"):
+                        # Automatic requests honor pause at the endpoint. An
+                        # explicit one-shot request still requires the same safety proof.
+                        if safe and (req['action'] == 'stop_if_orphan_once' or not (STATE / "paused").exists()):
                             # Our unreaped Popen child cannot have its PID reused.
                             result['accepted'] = True
                             child.terminate()
@@ -695,9 +711,12 @@ def reason_label(value):
 def main():
     ap = argparse.ArgumentParser(description="本机内存守护；保留工作任务，只回收明确托管的闲置资源")
     sub = ap.add_subparsers(dest="mode", required=True)
-    for name in ("status", "inspect", "clean", "tick", "history", "pause", "resume"):
+    for name in ("status", "inspect", "clean", "clean-once", "tick", "history", "pause", "resume"):
         p = sub.add_parser(name)
         p.add_argument("--json", action="store_true")
+        p.add_argument('--owned-only', action='store_true', help='Only inspect/reclaim tails owned by this state directory; no external adapters')
+        if name == 'clean-once':
+            p.add_argument('--id', action='append', required=True, dest='selected_ids')
     p = sub.add_parser("run", help="托管一个新日志tail，所属任务退出后允许自动收尾")
     p.add_argument("--owner-pid", required=True, type=int)
     p.add_argument("--kind", choices=["tail"], default="tail")
@@ -725,7 +744,7 @@ def main():
                     f.readline()
                 print(f.read().decode("utf-8", "replace"), end="")
         return 0
-    result = run_cycle(args.mode)
+    result = run_cycle(args.mode, getattr(args, 'selected_ids', None), args.owned_only)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.mode != "tick":

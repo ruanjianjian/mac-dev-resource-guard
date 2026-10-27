@@ -1,5 +1,11 @@
 # 安装、启用与撤回
 
+## App 内置入口（1.2）
+
+仅构建 App 即包含扫描与手动清理引擎。默认 DerivedData 不要求构建包装接入；Go、模拟器、Claude 会话与用户选定任务目录只统计。已有命令优先复用，旧版本不支持单次回收时明确提示升级，不临时 resume 再 pause。
+
+「接入设置」检查 launchctl 实际加载状态；安装命令与启停定时维护分别确认。命令安装冲突会说明原工具被保留，不自动迁移或覆盖。新命令提供 `dev-memory clean-once --id <预览资源ID> --json`，保持自动暂停标记，仍执行闲置、身份、占用、冷却和 pending 检查。`clean`、`tick` 仍受暂停标记约束。已有 Xcode 缓存仅供手动清理，不加入周期删除白名单。
+
 将完整 zip 解压后，把文件夹交给 Codex / Claude，并说：
 
 > 使用这个 mac-dev-resource-guard skill，在我的 Mac 安装内存诊断与构建缓存复用。先检查现有工具和调度；不要覆盖、不打断开发。展示诊断和可回收范围后，再按我的授权开启定期维护。
@@ -59,6 +65,10 @@ python3 scripts/setup.py enable-scheduler storage
 启动程序使用安装时 Python 的绝对路径；升级／卸载 Python 后需检查调度。Mac 关机或退出登录期间不保证执行；不声称定时任务已实际触发，需看后续日志。内存详细事件自动轮转，调度 stderr 在 `~/.local/state/dev-resource-guard/`，持续报错应修复或停调度。
 
 ## 配置与停止
+
+## 已有版本升级
+
+在接入设置点「升级本工具」，或在新版本源码执行 `python3 scripts/setup.py upgrade`。只接受本工具标准命令包装器和已知发布版本文件；不同实现或本地修改保持原样。先关闭本工具的调度，并等在途维护、托管后台与待核实请求自然收尾。升级先构造完整副本、校验后切换，失败恢复旧目录，备份路径写入结果；配置、pin、lease 和自动暂停状态不变。升级不等于开启自动维护。
 
 `~/.config/dev-resource-guard/config.json`：安装时按文件系统总容量生成建议值：目标20%、提醒15%、低水位10%，都只提醒。可调整 `target_free_gib`、`warning_free_gib`、`critical_free_gib`、`intermediate_budget_gib`；默认缓存根 `~/Library/Caches/dev-resource-guard`，状态根 `~/.local/state/dev-storage`。不要让状态放进缓存根，也不要把整个 HOME 设为缓存根。配置在安装后新命令启动时读取；在途构建期间不要改缓存／状态根，换根会失去旧锁与pin关联。500/600GiB不是适用于所有磁盘的默认值。
 

@@ -47,11 +47,43 @@ class PortableTests(unittest.TestCase):
         self.assertEqual(p.read_text(),'existing tool')
         self.assertFalse((self.home/'.codex/skills/mac-dev-resource-guard').exists())
 
+    def test_standalone_observation_can_be_followed_by_install_without_state_loss(self):
+        result = subprocess.run([sys.executable, str(ROOT/'widget/backend.py'), 'memory-preview', '--home', str(self.home)],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout)['status'], 'ok', result.stdout)
+        state = self.home / '.local/state/dev-memory/state.json'
+        before = state.read_bytes()
+        installed = self.setup_run('install')
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(state.read_bytes(), before)
+        self.assertTrue((state.parent/'paused').exists())
+
     def test_existing_config_survives(self):
         p=self.home/'.config/dev-resource-guard/config.json';p.parent.mkdir(parents=True)
         p.write_text('{"target_free_gib":150}')
         self.assertEqual(self.setup_run('install').returncode,0)
         self.assertEqual(p.read_text(),'{"target_free_gib":150}')
+
+    def test_upgrade_rolls_back_directory_swap_failure_and_keeps_state(self):
+        self.assertEqual(self.setup_run('install').returncode, 0)
+        spec = importlib.util.spec_from_file_location('upgrade_setup', ROOT/'scripts/setup.py')
+        setup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup)
+        canonical = self.home/'.codex/skills/mac-dev-resource-guard'
+        before = (canonical/'runtime/storage/cli.py').read_bytes()
+        config = (self.home/'.config/dev-resource-guard/config.json').read_bytes()
+        replace = os.replace
+        def fail_staging(source, target):
+            if '.upgrade-' in Path(source).name:
+                raise OSError('synthetic full disk')
+            replace(source, target)
+        with patch.object(setup.subprocess, 'run', return_value=type('Result', (), {'returncode': 113})()), \
+             patch.object(setup.os, 'replace', side_effect=fail_staging):
+            with self.assertRaisesRegex(OSError, 'full disk'):
+                setup.upgrade(self.home)
+        self.assertEqual((canonical/'runtime/storage/cli.py').read_bytes(), before)
+        self.assertEqual((self.home/'.config/dev-resource-guard/config.json').read_bytes(), config)
+        self.assertTrue((self.home/'.local/state/dev-memory/paused').exists())
 
     def test_cache_config_is_reflected_in_slot_and_managed_roots(self):
         p=self.home/'config.json';p.write_text(json.dumps({'cache_root':str(self.home/'cache'),'state_root':str(self.home/'state'),'volume':str(self.home)}))

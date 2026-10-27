@@ -23,10 +23,14 @@
 
 行为规格与验收口径统一维护在[资源看板规格](epics/resource-dashboard/specs/dashboard-actions.md)，[测试入口与边界](epics/resource-dashboard/specs/dashboard-actions.test-cases.md)。
 
-适配器随App打包，使用已安装的dev-storage和dev-memory，不覆盖现有部署。运行元数据位于 `~/.local/state/dev-resource-guard/dashboard/`；结果未知时保留running/unknown状态，不重复发送清理请求，核实后端日志和进程再处理。退出菜单在操作运行时只唤回面板，关闭小窗不会取消后端。
+适配器和 runtime 随 App 打包，优先使用已安装的 dev-storage 和 dev-memory，不覆盖现有部署；缺命令时使用内置实现。运行元数据位于 `~/.local/state/dev-resource-guard/dashboard/`；结果未知时保留running/unknown状态，不重复发送清理请求，核实后端日志和进程再处理。退出菜单在操作运行时只唤回面板，关闭小窗不会取消后端。
 
 隔离原生界面测试使用 `ResourceDashboard --test-home <目录>`，目录必须含 `.resource-dashboard-fixture` 标记。缺参或缺标记拒绝回退真实工具。隔离标题不构成真实清理证据。
 
 ## 默认后台驻留（1.1.1）
 
 [启动与唤起规格](epics/resource-dashboard/specs/menubar-presence.md)规定首次启动和重启均不自动打开或恢复面板；关闭窗口只隐藏，左键小图标或快捷键按需呼出。菜单栏不常驻容量文字，资源指标保留在提示与面板中。
+
+## 新用户清理（1.2）
+
+行为规格统一维护在[新用户清理规格](epics/resource-dashboard/specs/new-user-cleanup.md)和对应 test-cases。已有缓存入口独立于构建脚本接入；接入设置提供能力检查及明确确认后的自动维护配置。新版单次回收独立于自动暂停，旧后端不兼容时明确提示，保持原状态。

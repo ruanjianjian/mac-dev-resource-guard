@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Dashboard adapter. Only installed dev-* commands may inspect/reclaim resources.
+"""Dashboard adapter: installed tools first, bundled runtime for standalone use.
 
-No resource deletion, process signalling, scheduling or policy decisions live here.
+Resource policies and filesystem deletion live in the runtime. Setup mutations
+are explicit UI actions, never part of polling or capability inspection.
 """
 import argparse
 import fcntl
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import time
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from setup_status import engine_root, tool_path, run_setup, status as setup_status, inventory
 
 CACHE_NAMES = {
     'Intermediates.noindex': '编译中间文件', 'Index.noindex': 'Xcode 索引',
@@ -27,6 +30,7 @@ REASONS = {
     'awaiting_second_check': '等待第二次闲置核对',
     'inspection_unavailable_preserved': '无法核实，保留',
     'pending_readonly_no_retry': '上次请求待核实，保留且不重发',
+    'cleanup_cooldown': '处于十分钟回收冷却期，请稍后重新诊断',
 }
 
 
@@ -84,13 +88,14 @@ def rows_memory(body):
         raise ValueError('不兼容的内存诊断结果，回收保持禁用')
     rows = []
     for raw in body['managed_resources'] + body['external_resources']:
-        eligible = raw.get('eligible') is True and not body['paused']
+        blocked = not body.get('manual_clean_supported')
+        eligible = raw.get('eligible') is True and not blocked
         reason = str(raw.get('reason') or '状态不明，保留')
         rows.append(dict(id=str(raw['id']), title=str(raw.get('id')),
                          detail=('PID ' + str(raw['pid'])) if raw.get('pid') else '',
                          category=MEMORY_NAMES.get(raw.get('kind'), '其他受管后台'), bytes=None,
                          eligible=eligible,
-                         reason='自动回收已暂停，保留' if body['paused'] else REASONS.get(reason, reason)))
+                         reason='现有后端不支持独立单次回收，请升级后端；自动暂停保持不变' if blocked else REASONS.get(reason, reason)))
     known_pids = {r.get('pid') for r in body['managed_resources'] + body['external_resources'] if r.get('pid')}
     for raw in body.get('top_memory', []):
         if raw.get('pid') in known_pids:
@@ -112,17 +117,33 @@ def rows_memory(body):
 class Adapter:
     def __init__(self, home=None):
         self.home = Path(home) if home else Path.home()
+        self.isolated = home is not None
         self.state = self.home / '.local/state/dev-resource-guard/dashboard'
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker = self.state.parent / 'standalone.json'
+        if not marker.exists() and not any((self.home / '.local/state' / name).exists() for name in ('dev-memory', 'dev-storage')):
+            atomic_json(marker, {'schema': 1, 'home': str(self.home.resolve())})
 
     def command(self, name, args):
         tool = self.home / '.local/bin' / name
-        if not tool.is_file() or not os.access(tool, os.X_OK):
-            raise ValueError('{} 未安装；请先安装或修复现有工具'.format(name))
+        if tool.exists() or tool.is_symlink():
+            if not tool.is_file() or not os.access(tool, os.X_OK):
+                raise ValueError('{} 现有命令不可执行，请先修复；未绕过现有工具'.format(name))
+            command = [str(tool)]
+        else:
+            command = [sys.executable, str(tool_path(name))]
         # Wait for cooperative backends; never terminate an in-flight operation on a UI timeout.
-        result = subprocess.run([str(tool)] + args, capture_output=True, text=True, shell=False)
+        env = dict(os.environ)
+        if self.isolated:
+            env['HOME'] = str(self.home)
+            env.pop('DEV_RESOURCE_CONFIG', None)
+            env.pop('DEV_MEMORY_STATE_DIR', None)
+            env.pop('DEV_MEMORY_BROKER_SOURCE', None)
+            if name == 'dev-memory' and args[0] in ('inspect', 'clean-once'):
+                args = args + ['--owned-only']
+        result = subprocess.run(command + args, capture_output=True, text=True, shell=False, env=env)
         bodies = json_stream(result.stdout)
-        if result.returncode and not any('errors' in b for b in bodies):
+        if result.returncode and not any('errors' in b or b.get('status') == 'rejected' for b in bodies):
             raise ValueError('{} 执行失败（退出码 {}），未自动重试'.format(name, result.returncode))
         return bodies
 
@@ -131,7 +152,22 @@ class Adapter:
         if operation.exists() and read_json(operation).get('status') in ('running', 'unknown'):
             return dict(status='unknown', message='上次操作仍在运行或结果待核实；请勿重复执行。', rows=[])
         token = str(uuid.uuid4())
-        if family == 'storage':
+        if family == 'common':
+            sys.path.insert(0, str(engine_root() / 'runtime/storage'))
+            import common
+            body = common.preview(self.home)
+            atomic_json(self.state / 'common-plan.json', body)
+            rows = rows_storage(body)
+            settings = self.state / 'task.json'
+            task = read_json(settings).get('path') if settings.exists() else None
+            rows += inventory(self.home, task)
+            errors = body.get('activity_errors', [])
+            note = '已有 Xcode 缓存：只清理至少 7 天未用的四类中间目录；Products、源码、设备及会话保留。'
+            if errors:
+                note += ' 占用检查不完整，清理禁用：' + '；'.join(errors)
+            elif not body['candidates']:
+                note += ' 默认 DerivedData 没有匹配项；这不表示磁盘没有其他占用。'
+        elif family == 'storage':
             path = self.state / 'storage-plan.json'
             # A busy command must not accidentally reuse a previous output file.
             bodies = self.command('dev-storage', ['plan', '--output', str(path)])
@@ -140,14 +176,26 @@ class Adapter:
             if not any(b.get('phase') == 'plan_complete' for b in bodies):
                 raise ValueError('扫描未完成；旧结果不会用作本次预览')
             body = read_json(path)
+            body['manual_apply_supported'] = any(b.get('manual_apply_supported') is True for b in bodies)
             rows = rows_storage(body)
+            if not body['manual_apply_supported']:
+                for row in rows:
+                    if row['eligible']:
+                        row.update(eligible=False, reason='现有工具不支持精确预览清理；请在接入设置升级本工具，其他实现由原工具升级。')
             note = '仅扫描现有 dev-storage 管理的缓存范围。目录统计量不等于实际可释放空间。'
         else:
             body = self.command('dev-memory', ['inspect', '--json'])[-1]
             rows = rows_memory(body)
-            note = '内存守护已暂停；此入口不会恢复调度。' if body['paused'] else '只诊断；闲置证据、冷却和占用保护由现有后端核对。'
+            note = '单次回收不改变自动维护开关；闲置证据、冷却和占用保护仍会复核。'
+            if not body.get('manual_clean_supported'):
+                note = '现有后端版本不支持限定预览对象的单次回收，需升级；不会替您恢复自动维护。'
+            if not any(r['eligible'] for r in rows):
+                note += ' 当前没有已证实闲置的后台。未接入设备占用或 MCP 协议的资源会保留，详情见接入设置。'
         eligible = sum(r['eligible'] for r in rows)
-        receipt = dict(family=family, token=token, created=time.time(), consumed=False, eligible=eligible)
+        created = body.get('created', time.time()) if family in ('storage', 'common') else time.time()
+        receipt = dict(family=family, token=token, created=created, consumed=False, eligible=eligible,
+                       ids=[r['id'] for r in rows if r['eligible']], manual=body.get('manual_clean_supported', False))
+        receipt['manual_storage'] = body.get('manual_apply_supported', False)
         atomic_json(self.state / (family + '-preview.json'), receipt)
         return dict(status='ok', message=note, rows=rows, token=token, created=receipt['created'],
                     eligible=eligible, eligibleBytes=sum(r['bytes'] or 0 for r in rows if r['eligible']))
@@ -164,12 +212,24 @@ class Adapter:
         operation = self.state / (family + '-operation.json')
         atomic_json(operation, dict(status='running', at=time.time()))
         try:
-            if family == 'storage':
-                bodies = self.command('dev-storage', ['maintain', '--apply', '--scan'])
-                result = bodies[-1]
+            if family in ('storage', 'common'):
+                if family == 'common':
+                    sys.path.insert(0, str(engine_root() / 'runtime/storage'))
+                    import common
+                    plan = read_json(self.state / 'common-plan.json')
+                    plan['candidates'] = [c for c in plan['candidates'] if c['path'] in preview['ids']]
+                    result = common.apply(self.home, plan)
+                else:
+                    if not preview.get('manual_storage'):
+                        raise ValueError('旧后端不支持限定预览的清理，请升级后重新扫描')
+                    args = ['apply-plan', '--input', str(self.state / 'storage-plan.json')]
+                    bodies = self.command('dev-storage', args)
+                    result = bodies[-1]
                 status = result.get('status')
                 if status == 'busy':
                     answer = dict(status='busy', message='已有扫描或维护正在运行，本次未执行；请稍后重新预览。')
+                elif status == 'rejected':
+                    answer = dict(status='error', message=str(result.get('message', '后端已拒绝，未执行；请重新扫描。')))
                 elif isinstance(result.get('deleted'), list) and isinstance(result.get('kept'), list) and isinstance(result.get('errors'), list):
                     delta = result.get('observed_free_delta_bytes', 0) / 1073741824
                     rows = []
@@ -186,7 +246,13 @@ class Adapter:
                 else:
                     raise ValueError('缺少清理完成回执，结果待核实')
             else:
-                result = self.command('dev-memory', ['clean', '--json'])[-1]
+                if not preview.get('manual'):
+                    raise ValueError('旧后端不支持单次回收，请升级后重新诊断')
+                args = ['clean-once', '--json']
+                if preview.get('manual'):
+                    for resource in preview['ids']:
+                        args += ['--id', resource]
+                result = self.command('dev-memory', args)[-1]
                 rows_memory(result)  # Validate required outcome fields, not transport success.
                 stopped = sum(a.get('result', {}).get('stopped') is True for a in result['actions'])
                 waiting = len(result['pending_requests'])
@@ -200,31 +266,60 @@ class Adapter:
                                      outcome='已退出' if exited else ('待核实' if pending else '保留'),
                                      reason=REASONS.get(str(outcome.get('reason')), str(outcome.get('reason') or ('确认正常退出' if exited else '未确认退出，保留并只读核实')))))
                 answer = dict(status='ok', rows=rows, message='正常退出 {} 项，待核实 {} 项。{}'.format(stopped, waiting,
-                              '守护已暂停，本次没有回收。' if result['paused'] else '未通过复核或处于冷却中的资源保留。'))
+                              '自动维护仍暂停。' if result['paused'] and result.get('manual') else '未通过复核或处于冷却中的资源保留。'))
             atomic_json(operation, answer)
             return answer
         except (OSError, ValueError, KeyError, TypeError) as error:
             atomic_json(operation, dict(status='unknown', at=time.time()))
             return dict(status='unknown', message='操作结果待核实，已禁止重发。' + str(error))
 
-    def run(self, action, token=None):
-        family, verb = action.split('-')
+    def run(self, action, token=None, path=None):
+        family, verb = action.split('-', 1)
         with open(self.state / 'operation.lock', 'a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return dict(status='busy', message='资源看板已有操作正在运行，请稍后再试。', rows=[])
+            if family == 'setup':
+                if self.isolated and verb not in ('preview', 'install', 'upgrade'):
+                    raise ValueError('隔离界面不操作真实 launchd；调度使用独立测试服务验证。')
+                if verb == 'install':
+                    run_setup(self.home, ['install'])
+                elif verb == 'upgrade':
+                    run_setup(self.home, ['upgrade'])
+                elif verb != 'preview':
+                    kind, operation = verb.split('-')
+                    run_setup(self.home, [('enable' if operation == 'enable' else 'disable') + '-scheduler', kind])
+                    if kind == 'memory':
+                        tool = self.home / '.local/bin/dev-memory'
+                        result = subprocess.run([str(tool), 'resume' if operation == 'enable' else 'pause'], capture_output=True, text=True)
+                        if result.returncode:
+                            raise ValueError('调度配置已变化，但内存暂停状态更新失败，请刷新核对。')
+                return setup_status(self.home)
+            if family == 'task':
+                target = Path(path or '').expanduser()
+                if not path or not target.is_dir() or target.is_symlink():
+                    raise ValueError('请选择真实的任务目录')
+                atomic_json(self.state / 'task.json', dict(path=str(target.resolve())))
+                return dict(status='ok', message='已保存任务目录；扫描已有缓存时一并统计，只提供核对命令。', rows=[])
             return self.preview(family) if verb == 'preview' else self.clean(family, token)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['storage-preview', 'storage-clean', 'memory-preview', 'memory-clean'])
+    parser.add_argument('action', choices=['storage-preview', 'storage-clean', 'common-preview', 'common-clean', 'memory-preview', 'memory-clean',
+                                          'setup-preview', 'setup-install', 'setup-upgrade', 'setup-memory-enable', 'setup-memory-disable',
+                                          'setup-storage-enable', 'setup-storage-disable', 'task-select'])
     parser.add_argument('--token')
+    parser.add_argument('--path')
     parser.add_argument('--home', type=Path, help='Explicit isolated test home; no command PATH fallback')
     args = parser.parse_args()
     try:
-        result = Adapter(args.home).run(args.action, args.token)
+        if args.home:
+            os.environ['HOME'] = str(args.home.resolve())
+            os.environ.pop('DEV_RESOURCE_CONFIG', None)
+            os.environ.pop('DEV_MEMORY_STATE_DIR', None)
+        result = Adapter(args.home).run(args.action, args.token, args.path)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = dict(status='error', message=str(error), rows=[])
     print(json.dumps(result, ensure_ascii=False))

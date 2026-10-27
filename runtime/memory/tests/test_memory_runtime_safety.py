@@ -57,6 +57,35 @@ class RunCycleSafetyTests(unittest.TestCase):
         self.request.assert_not_called()
         self.kill.assert_not_called()
 
+    def test_manual_cleanup_works_while_paused_without_resuming(self):
+        (self.state_dir / 'paused').touch()
+        result = memory.run_cycle('clean-once', [self.record['id']])
+        self.request.assert_called_once_with(self.record, 'stop_if_orphan_once')
+        self.assertTrue(result['actions'][0]['result']['stopped'])
+        self.assertTrue((self.state_dir / 'paused').exists())
+
+    def test_manual_cleanup_never_adds_unselected_or_new_resources(self):
+        memory.run_cycle('clean-once', ['not-this-resource'])
+        self.request.assert_not_called()
+
+    def test_isolated_owned_only_never_calls_external_adapters(self):
+        with mock.patch.object(memory, 'inspect_external_resources') as external, \
+             mock.patch.object(memory, 'reconcile_external') as reconcile:
+            result = memory.run_cycle('inspect', owned_only=True)
+        external.assert_not_called()
+        reconcile.assert_not_called()
+        self.assertEqual(result['external_resources'], [])
+
+    def test_manual_cleanup_keeps_active_unknown_and_cooldown(self):
+        with mock.patch.object(memory, 'read_json', return_value={'last_cleanup': 999}):
+            memory.run_cycle('clean-once', [self.record['id']])
+        self.request.assert_not_called()
+        self.inspect.return_value = ([dict(self.candidate, eligible=False)], [self.record])
+        memory.run_cycle('clean-once', [self.record['id']])
+        self.request.assert_not_called()
+        with self.assertRaises(ValueError):
+            memory.run_cycle('clean-once', [])
+
     def test_unknown_system_pressure_prevents_action(self):
         self.sample.return_value = reading(None)
         result = memory.run_cycle("clean")
