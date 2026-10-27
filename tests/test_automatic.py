@@ -19,6 +19,8 @@ class AutomaticTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve()
+        self.tier_patch = patch.object(service, 'tick_tiers', return_value=None)   # tier behaviour has its own tests
+        self.tiers = self.tier_patch.start(); self.addCleanup(patch.stopall)
 
     def cache(self, suffix):
         path = self.home/'Library/Developer/Xcode/DerivedData'/suffix/'Build/Intermediates.noindex'
@@ -68,7 +70,7 @@ class AutomaticTests(unittest.TestCase):
     def test_version_updates_keep_stable_loaded_job(self):
         p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
         command=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
-        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command)))
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command,StartInterval=service.STORAGE_WAKE_SECONDS)))
         with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run:
             self.assertIn('reused',service.enable_job(self.home,'storage',Path('/new/version')))
         self.assertTrue(all('bootstrap' not in call.args[0] and 'bootout' not in call.args[0] for call in run.call_args_list))
@@ -193,5 +195,44 @@ class AutomaticTests(unittest.TestCase):
         self.assertNotEqual(self.git(repo,'status','--porcelain'),'')
         service.integrate(self.home,repo)
         self.assertEqual(self.git(repo,'status','--porcelain'),'')
+
+    def test_13_twelve_hour_job_reloads_with_short_wake_only_when_idle(self):
+        p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
+        command=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command,StartInterval=43200)))
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'pid = 9\n','')) as run:
+            with self.assertRaisesRegex(ValueError,'仍在运行'):service.enable_job(self.home,'storage',ROOT)
+            self.assertFalse(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['StartInterval'],43200)
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'state = not running\n','')) as run:
+            service.enable_job(self.home,'storage',ROOT)
+            self.assertTrue(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['StartInterval'],service.STORAGE_WAKE_SECONDS)
+
+    def test_cache_cleanup_keeps_twelve_hour_pace_while_tiers_run_each_wake(self):
+        self.cache('Old')
+        with patch.object(service.common,'activity',return_value=Activity()):
+            first=service.tick_storage(self.home); second=service.tick_storage(self.home, now=time.time()+600)
+            third=service.tick_storage(self.home, now=time.time()+13*3600)
+        self.assertEqual(first['status'],'complete'); self.assertEqual(second['status'],'not-due'); self.assertEqual(third['status'],'complete')
+        self.assertEqual(self.tiers.call_count,3)
+
+    def test_tier_step_paces_reports_config_errors_and_yields_to_manual_cleanup(self):
+        self.tier_patch.stop()
+        calls=[]
+        with patch.object(service.auto_tier,'run',side_effect=lambda *a,**k:calls.append('auto')), \
+             patch.object(service.ask_tier,'refresh',return_value={'items':[]}), patch.object(service.ask_tier,'maybe_notify'):
+            now=time.time()
+            self.assertEqual(service.tick_tiers(self.home,now),'ran')
+            self.assertIsNone(service.tick_tiers(self.home,now+60))                 # not due within 30 minutes
+            lock=service.state_root(self.home)/'dashboard'/'operation.lock'
+            with lock.open('a') as held:
+                import fcntl; fcntl.flock(held,fcntl.LOCK_EX)
+                self.assertEqual(service.tick_tiers(self.home,now+1900),'busy')
+            settings=self.home/'.config/dev-resource-guard/auto-cleanup.json'; settings.parent.mkdir(parents=True,exist_ok=True); settings.write_text('{"auto_idle_days": 0}')
+            self.assertEqual(service.tick_tiers(self.home,now+3800),'config_error')
+        receipt=json.loads((service.state_root(self.home)/'auto-tier.json').read_text())
+        self.assertEqual(receipt['status'],'config_error'); self.assertIn('auto_idle_days',receipt['config_error'])
+        self.assertEqual(calls,['auto'])
 
 if __name__=='__main__':unittest.main()
