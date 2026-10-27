@@ -25,7 +25,7 @@
 | AC-AUTO-03 | 核 | macOS CLI 与构建 | 生成项目入口，真实两次 Xcode build 使用同槽，查询不计成功构建，现有脚本不覆盖 | ✅ | auto: test_automatic；真实 CacheProbe 两次 BUILD SUCCEEDED，slot key 相同且 successful_builds=2 |
 | AC-AUTO-04 | 核 | macOS App 原生界面 | 最终版本安装按钮、项目选择与结果呈现完整原生复验 | ⚠️CH-01 | 用户要求停止弹出面板，后续仅后台验证；不冒充完整原生验收 |
 | AC-AUTO-05 | 核 | macOS CLI 与后台 | Xcode 缓存目录是指向专用目录的链接时，定时清理与手动清理都按真实目录照常执行；指向主目录、磁盘根目录或整块盘时拒绝这一类；指向的位置不存在时跳过这一类并注明，其他类照常清理 | ✅ | auto: test_common_cleanup 链接三例 + test_automatic 链接/拔盘；真实 T9 隔离 HOME 跑 `service.py tick-storage`：过期缓存删除、pin 与 Products 保留，拔盘「部分跳过」，链到整块盘 exit=2「失败」；真实 HOME 只读预览解析到 /Volumes/T9 |
-| AC-AUTO-06 | 核 | macOS 看板后端（接入设置数据；原生显示归 AC-AUTO-04） | 某一类清理失败或整轮出错时，「自动清理最近结果」显示「失败」与原因；某一类跳过时显示「已跳过」与原因；还没有结果但定时任务报过错时，也显示「失败」与最后一条错误 | ✅ | auto: test_automatic 单类失败/配置非法/看板三态；真实 T9 回执经 setup_status 显示「已完成」「部分跳过」「失败」与原因；原生面板按 CH-01 未打开 |
+| AC-AUTO-06 | 核 | macOS 后台回执与看板数据（面板显示见 AC-AUTO-04） | 某一类清理失败或整轮出错时，「自动清理最近结果」显示「失败」与原因；某一类跳过时显示「已跳过」与原因；还没有结果但定时任务报过错时，也显示「失败」与最后一条错误 | ✅ | auto: test_automatic 单类失败/配置非法/看板三态；真实 T9 回执经 setup_status 显示「已完成」「部分跳过」「失败」与原因；原生面板按 CH-01 未打开 |
 | AC-AUTO-07 | 核 | macOS CLI 与构建 | 在 git 仓库或其子目录接入项目后，`git status` 不多出文件，项目 `.gitignore` 不变；重新接入 1.3 已接入的项目后同样干净 | ✅ | auto: test_project_entry_stays_out_of_git_status（真实 git，根目录与子目录、1.3 旧入口重接）；红证据见 PR |
 
 ## 实现期验证调整
