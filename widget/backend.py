@@ -5,6 +5,7 @@ Resource policies and filesystem deletion live in the runtime. Setup mutations
 are explicit UI actions, never part of polling or capability inspection.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -113,6 +114,81 @@ def rows_memory(body):
         rows.append(dict(id='pending:' + str(index), title='待核实请求', detail='',
                          category='待核实', bytes=None, eligible=False, reason='只读核实，不重复发送退出请求'))
     return rows
+
+
+KIND_TITLES = {'simulator-delete': '删除模拟器', 'simulator-shutdown': '关闭模拟器', 'task-delete': '删除任务目录',
+               'runtime-delete': '删除运行时', 'move': '搬到外接盘', 'prune': '删构建产物', 'tool-cache': '清工具缓存'}
+OUTCOMES = {'pending': '待确认', 'failed': '上次失败', 'ignored': '已忽略', 'done': '已完成', 'aborted': '已放弃', 'skipped': '已跳过'}
+TIER_STATUS = {
+    'disabled': '自动档未打开：在「接入设置」打开后，空间低于提醒线时会自动搬迁闲置任务目录、删可重新生成的构建产物。',
+    'healthy': '空间充足（剩 {free_before} GiB，高于提醒线 {warning_free_gib} GiB），本轮不处理。',
+    'busy': '你正在看板里清理，本轮让路。',
+    'config_error': '设置有误，本轮未清理：{config_error}',
+    'error': '本轮出错：{error}',
+}
+
+
+def tier_modules():
+    for folder in ('runtime/storage', 'scripts'):
+        if str(engine_root() / folder) not in sys.path:
+            sys.path.insert(0, str(engine_root() / folder))
+    import ask_tier, auto_tier, tiers_config
+    return ask_tier, auto_tier, tiers_config
+
+
+def rows_pending(pending):
+    rows = []
+    for item in pending.get('items', []):
+        if item['state'] not in ('pending', 'failed', 'ignored'):
+            continue
+        reason = item['reason'] + ('；上次失败：' + str(item.get('result')) if item['state'] == 'failed' else '')
+        rows.append(dict(id=item['id'], kind=item['kind'], title=KIND_TITLES[item['kind']] + '：' + item['title'],
+                         category='待确认', reason=reason, detail='会失去：' + item['loses'], loses=item['loses'],
+                         bytes=item.get('bytes'), eligible=not item.get('unreachable'), command=None,
+                         outcome='外接盘未连接' if item.get('unreachable') else OUTCOMES[item['state']]))
+    return rows
+
+
+def rows_auto(home):
+    root = home / '.local/state/dev-resource-guard'
+    receipt = read_json(root / 'auto-tier.json') if (root / 'auto-tier.json').is_file() else None
+    if receipt is None:
+        return [dict(id='auto-status', title='自动档', category='自动处理记录', reason='还没有运行过。', detail='',
+                     bytes=None, eligible=False, command=None, outcome='未运行')]
+    when = time.strftime('%m-%d %H:%M', time.localtime(receipt['at']))
+    status = receipt['status']
+    done = [a for a in receipt.get('actions', []) if a['result'] == 'done']
+    reason = TIER_STATUS[status].format(**{k: receipt.get(k) for k in ('free_before', 'warning_free_gib', 'config_error', 'error')}) \
+        if status in TIER_STATUS else '{} 项完成，可用空间 {} → {} GiB。'.format(len(done), receipt.get('free_before'), receipt.get('free_after'))
+    rows = [dict(id='auto-status', title='自动档 · ' + when, category='自动处理记录', reason=reason, detail='',
+                 bytes=sum(a.get('bytes') or 0 for a in done), eligible=False, command=None,
+                 outcome={'complete': '已完成', 'partial': '部分失败', 'disabled': '未打开', 'healthy': '空间充足',
+                          'busy': '让路', 'config_error': '设置有误', 'error': '失败'}.get(status, status))]
+    for path in receipt.get('external_missing', []):
+        rows.append(dict(id='external:' + path, title='外接开发盘未连接', category='自动处理记录', reason='本轮改为删构建产物：' + path,
+                         detail=path, bytes=None, eligible=False, command=None, outcome='提示'))
+    log = root / 'auto-tier-log.jsonl'
+    entries = [json.loads(line) for line in log.read_text().splitlines()[-200:] if line.strip()] if log.is_file() else []
+    for entry in reversed(entries):
+        for index, action in enumerate(entry.get('actions', [])):
+            stamp = time.strftime('%m-%d %H:%M', time.localtime(entry['at']))
+            rows.append(dict(id='auto:{}:{}'.format(entry['at'], index), title='{}：{}'.format(KIND_TITLES.get(action['kind'], action['kind']), Path(action['path']).name or action['path']),
+                             category='自动处理记录', reason=action.get('reason', ''), detail=stamp + ' · ' + action['path'] + (' → ' + action['dest'] if action.get('dest') else ''),
+                             bytes=action.get('bytes'), eligible=False, command=None, outcome=OUTCOMES.get(action['result'], action['result'])))
+    for index, kept in enumerate(receipt.get('kept', [])):
+        rows.append(dict(id='kept:{}'.format(index), title='保留：' + Path(kept['path']).name, category='保留原因', reason=kept['reason'],
+                         detail=kept['path'], bytes=None, eligible=False, command=None, outcome='保留'))
+    return rows
+
+
+def fixture_simctl(home):
+    """Isolated UI tests read listings from the fixture and never touch real simulators."""
+    def simctl(arguments):
+        if arguments[:2] in (['list', 'devices'], ['runtime', 'list']):
+            path = home / ('.fixture-simctl-' + arguments[0] + '.json')
+            return path.read_text() if path.is_file() else ('{"devices": {}}' if arguments[0] == 'list' else '{}')
+        raise RuntimeError('隔离界面不操作真实模拟器')
+    return simctl
 
 
 class Adapter:
@@ -279,13 +355,56 @@ class Adapter:
             atomic_json(operation, dict(status='unknown', at=time.time()))
             return dict(status='unknown', message='操作结果待核实，已禁止重发。' + str(error))
 
-    def run(self, action, token=None, path=None):
+    def tiers(self, family, verb, token, ids):
+        ask_tier, auto_tier, tiers_config = tier_modules()
+        if family == 'auto':
+            return dict(status='ok', message='自动档每次处理了什么、为什么保留，都记在这里。', rows=rows_auto(self.home))
+        receipt_path = self.state / 'pending-preview.json'
+        if verb == 'ignore':
+            ask_tier.ignore(self.home, set(ids))
+        if verb in ('preview', 'ignore'):
+            rows = rows_pending(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending()))
+            token = str(uuid.uuid4())
+            atomic_json(receipt_path, dict(token=token, created=time.time(), ids=[r['id'] for r in rows if r['eligible']]))
+            message = '{} 项等你确认。勾选后确认，执行前会逐项再核对。'.format(sum(r['outcome'] == '待确认' for r in rows)) if rows else '没有需要你确认的清理。'
+            return dict(status='ok', message=message, rows=rows, token=token, created=time.time())
+        preview = read_json(receipt_path) if receipt_path.is_file() else {}
+        receipt_path.unlink(missing_ok=True)   # one confirmation per preview
+        if (not token or token != preview.get('token') or time.time() - preview.get('created', 0) > 300
+                or not ids or not set(ids) <= set(preview.get('ids', []))):
+            return dict(status='rejected', message='确认已过期或勾选项不在列表里，未执行；请重新打开待确认。', rows=[])
+        sys.path.insert(0, str(engine_root() / 'scripts'))
+        from service import operation_lock
+        from portable_config import configure
+        settings = configure(self.home)
+        cfg = tiers_config.load(self.home, owned=[settings.cache_roots[0], settings.state_root, self.state.parent])
+        simctl = fixture_simctl(self.home) if self.isolated else auto_tier.default_simctl
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(operation_lock(self.home, 'periodic-storage'))
+            except ValueError:
+                return dict(status='busy', message='后台清理正在运行，未执行；请稍后再确认。',
+                            rows=rows_pending(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())))
+            results = ask_tier.execute(self.home, cfg, settings, list(ids), simctl)
+        rows = [dict(id=r['id'], title=r.get('title', r['id']), category='执行结果', reason=r['reason'], detail='',
+                     bytes=r.get('bytes'), eligible=False, command=None, outcome=r['outcome']) for r in results]
+        done = sum(r['outcome'] == '已完成' for r in results)
+        return dict(status='ok', message='已完成 {} 项，跳过或失败 {} 项。'.format(done, len(results) - done), rows=rows)
+
+    def run(self, action, token=None, path=None, ids=None):
         family, verb = action.split('-', 1)
         with open(self.state / 'operation.lock', 'a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return dict(status='busy', message='资源看板已有操作正在运行，请稍后再试。', rows=[])
+            if family in ('pending', 'auto'):
+                return self.tiers(family, verb, token, [i for i in (ids or '').split(',') if i])
+            if family == 'setup' and verb in ('auto-enable', 'auto-disable', 'ask-enable', 'ask-disable'):
+                _, _, tiers_config = tier_modules()
+                kind, operation = verb.split('-')
+                tiers_config.set_flag(self.home, kind + '_enabled', operation == 'enable')
+                return setup_status(self.home)
             if family == 'setup':
                 if self.isolated and verb not in ('preview', 'install', 'upgrade'):
                     raise ValueError('隔离界面不操作真实 launchd；调度使用独立测试服务验证。')
@@ -329,9 +448,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['storage-preview', 'storage-clean', 'common-preview', 'common-clean', 'memory-preview', 'memory-clean',
                                           'setup-preview', 'setup-install', 'setup-upgrade', 'setup-memory-enable', 'setup-memory-disable',
-                                          'setup-storage-enable', 'setup-storage-disable', 'setup-activate', 'task-select', 'project-integrate'])
+                                          'setup-storage-enable', 'setup-storage-disable', 'setup-activate', 'task-select', 'project-integrate',
+                                          'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',
+                                          'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview'])
     parser.add_argument('--token')
     parser.add_argument('--path')
+    parser.add_argument('--ids', help='Comma-separated pending ids the user ticked')
     parser.add_argument('--home', type=Path, help='Explicit isolated test home; no command PATH fallback')
     args = parser.parse_args()
     try:
@@ -339,7 +461,7 @@ def main():
             os.environ['HOME'] = str(args.home.resolve())
             os.environ.pop('DEV_RESOURCE_CONFIG', None)
             os.environ.pop('DEV_MEMORY_STATE_DIR', None)
-        result = Adapter(args.home).run(args.action, args.token, args.path)
+        result = Adapter(args.home).run(args.action, args.token, args.path, args.ids)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = dict(status='error', message=str(error), rows=[])
     print(json.dumps(result, ensure_ascii=False))

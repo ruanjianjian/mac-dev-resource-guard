@@ -27,7 +27,7 @@ class FakeSimctl:
         return ''
 
 
-class AskTierTests(TierFixture):
+class AskFixture(TierFixture):
     IOS = 'com.apple.CoreSimulator.SimRuntime.iOS-27-0'
 
     def device(self, udid, state, idle_days, name='Phone'):
@@ -66,6 +66,8 @@ class AskTierTests(TierFixture):
     def ids(self, pending, state='pending'):
         return sorted(i['id'] for i in pending['items'] if i['state'] == state)
 
+
+class AskTierTests(AskFixture):
     def test_four_kinds_listed_with_what_is_lost(self):
         task = self.worktree_task('done-task', 10)
         simctl = self.sims()
