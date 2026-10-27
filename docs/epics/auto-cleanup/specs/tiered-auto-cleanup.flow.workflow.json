@@ -1,0 +1,260 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "自动档清理（基于 1.3）",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "output": "tiered-auto-cleanup.html"
+  },
+  "lanes": [
+    {
+      "id": "user",
+      "label": "用户看到"
+    },
+    {
+      "id": "check",
+      "label": "后台检查"
+    },
+    {
+      "id": "guard",
+      "label": "保护规则",
+      "variant": "exception"
+    },
+    {
+      "id": "disk",
+      "label": "磁盘上的动作"
+    }
+  ],
+  "phases": [
+    {
+      "id": "gate",
+      "label": "要不要清",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "pick",
+      "label": "挑闲置目录",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "act",
+      "label": "清理并记录",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "tick",
+    "gate",
+    "pick",
+    "drive",
+    "move",
+    "stop",
+    "log"
+  ],
+  "nodes": [
+    {
+      "id": "tick",
+      "lane": "check",
+      "col": 0,
+      "type": "backend",
+      "label": "定时查空间",
+      "sublabel": "默认 30 分钟，可配置",
+      "width": 132
+    },
+    {
+      "id": "gate",
+      "lane": "guard",
+      "col": 1,
+      "type": "security",
+      "label": "空间低于提醒线？",
+      "sublabel": "且自动档已打开",
+      "width": 140
+    },
+    {
+      "id": "calm",
+      "lane": "user",
+      "col": 1,
+      "type": "frontend",
+      "label": "看板显示状态",
+      "sublabel": "空间充足 / 未打开",
+      "width": 132
+    },
+    {
+      "id": "pick",
+      "lane": "check",
+      "col": 2,
+      "type": "backend",
+      "label": "按闲置时间排序",
+      "sublabel": "从久到短",
+      "width": 132
+    },
+    {
+      "id": "keep",
+      "lane": "guard",
+      "col": 2,
+      "type": "security",
+      "label": "正在用或受保护",
+      "sublabel": "原样保留并记原因",
+      "width": 140
+    },
+    {
+      "id": "drive",
+      "lane": "check",
+      "col": 3,
+      "type": "backend",
+      "label": "外接盘已连接？",
+      "sublabel": "且空间够",
+      "width": 132
+    },
+    {
+      "id": "move",
+      "lane": "disk",
+      "col": 4,
+      "type": "database",
+      "label": "整个目录挪到外接盘",
+      "sublabel": "原处留链接",
+      "width": 140
+    },
+    {
+      "id": "prune",
+      "lane": "disk",
+      "col": 3,
+      "type": "database",
+      "label": "删可重新生成的产物",
+      "sublabel": "固定名单",
+      "width": 140
+    },
+    {
+      "id": "misc",
+      "lane": "disk",
+      "col": 5,
+      "type": "database",
+      "label": "清不可用模拟器",
+      "sublabel": "和工具自带缓存",
+      "width": 132
+    },
+    {
+      "id": "stop",
+      "lane": "check",
+      "col": 5,
+      "type": "backend",
+      "label": "回到目标线就停",
+      "sublabel": "每项执行前再核对",
+      "width": 132
+    },
+    {
+      "id": "log",
+      "lane": "user",
+      "col": 5,
+      "type": "frontend",
+      "label": "自动处理记录",
+      "sublabel": "清了什么、腾出多少",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "tick",
+      "to": "gate"
+    },
+    {
+      "id": "e2",
+      "from": "gate",
+      "to": "calm",
+      "label": "否",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e3",
+      "from": "gate",
+      "to": "pick",
+      "label": "是",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e4",
+      "from": "pick",
+      "to": "keep",
+      "label": "不闲置",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e5",
+      "from": "pick",
+      "to": "drive",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e6",
+      "from": "drive",
+      "to": "move",
+      "label": "是",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e7",
+      "from": "drive",
+      "to": "prune",
+      "label": "否",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e8",
+      "from": "move",
+      "to": "stop",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e9",
+      "from": "prune",
+      "to": "misc",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "route": "bottom-channel"
+    },
+    {
+      "id": "e10",
+      "from": "misc",
+      "to": "stop",
+      "variant": "dashed"
+    },
+    {
+      "id": "e11",
+      "from": "stop",
+      "to": "log",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "什么算闲置",
+      "items": [
+        "没有程序在里面运行或打开文件",
+        "N 天内没有改写（默认 3 天，可配置）",
+        "没有被标记保护"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "自动档不做",
+      "items": [
+        "不删整个任务目录、不删正常模拟器",
+        "这些进入询问档，由用户确认",
+        "过期 Xcode 缓存仍由 1.3 每 12 小时清"
+      ]
+    }
+  ]
+}

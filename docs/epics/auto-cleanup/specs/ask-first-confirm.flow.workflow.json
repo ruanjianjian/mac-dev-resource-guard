@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "询问档确认",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "output": "ask-first-confirm.html"
+  },
+  "lanes": [
+    { "id": "user", "label": "用户" },
+    { "id": "board", "label": "看板与通知" },
+    { "id": "check", "label": "后台检查" },
+    { "id": "guard", "label": "保护规则", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "find", "label": "发现候选", "fromCol": 0, "toCol": 1 },
+    { "id": "ask", "label": "询问", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "do", "label": "核对后执行", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["scan", "list", "notify", "pick", "recheck", "run", "result"],
+  "nodes": [
+    { "id": "scan", "lane": "check", "col": 0, "type": "backend", "label": "找询问档候选", "sublabel": "模拟器 / 目录 / 运行时", "width": 140 },
+    { "id": "never", "lane": "guard", "col": 1, "type": "security", "label": "永不档", "sublabel": "未推送 / 在用 / 受保护", "width": 140 },
+    { "id": "list", "lane": "check", "col": 1, "type": "backend", "label": "写入待确认列表", "sublabel": "大小、理由、会失去什么", "width": 140 },
+    { "id": "notify", "lane": "board", "col": 2, "type": "frontend", "label": "系统通知 + 红点", "sublabel": "每天最多一次", "width": 140 },
+    { "id": "pick", "lane": "user", "col": 3, "type": "external", "label": "勾选并确认", "sublabel": "或点忽略", "width": 132 },
+    { "id": "ignore", "lane": "board", "col": 3, "type": "frontend", "label": "忽略", "sublabel": "状态变化前不再提醒", "width": 140 },
+    { "id": "recheck", "lane": "guard", "col": 4, "type": "security", "label": "逐项再核对", "sublabel": "不过就跳过", "width": 132 },
+    { "id": "run", "lane": "check", "col": 4, "type": "backend", "label": "执行勾选项", "sublabel": "同一项只做一次", "width": 132 },
+    { "id": "result", "lane": "board", "col": 5, "type": "frontend", "label": "逐项结果", "sublabel": "完成 / 跳过 / 失败", "width": 140 }
+  ],
+  "edges": [
+    { "id": "e1", "from": "scan", "to": "never", "label": "命中", "variant": "security", "role": "error" },
+    { "id": "e2", "from": "scan", "to": "list", "variant": "emphasis" },
+    { "id": "e3", "from": "list", "to": "notify", "variant": "emphasis" },
+    { "id": "e4", "from": "notify", "to": "pick", "variant": "emphasis" },
+    { "id": "e5", "from": "pick", "to": "ignore", "label": "忽略", "variant": "dashed", "role": "branch" },
+    { "id": "e6", "from": "pick", "to": "recheck", "label": "确认", "variant": "emphasis" },
+    { "id": "e7", "from": "recheck", "to": "run", "variant": "emphasis" },
+    { "id": "e8", "from": "run", "to": "result", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "amber", "title": "四类候选", "items": ["关机 7 天的模拟器：删除", "开着 4 小时没人连的模拟器：关机", "全推送且闲置 7 天的目录、无人用的运行时：删除"] },
+    { "dot": "rose", "title": "不会发生", "items": ["不会自动执行或超时默认同意", "失败项留在列表里，可再次确认"] }
+  ]
+}
