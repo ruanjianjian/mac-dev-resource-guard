@@ -367,7 +367,9 @@ class Adapter:
             token = str(uuid.uuid4())
             atomic_json(receipt_path, dict(token=token, created=time.time(), ids=[r['id'] for r in rows if r['eligible']]))
             message = '{} 项等你确认。勾选后确认，执行前会逐项再核对。'.format(sum(r['outcome'] == '待确认' for r in rows)) if rows else '没有需要你确认的清理。'
-            return dict(status='ok', message=message, rows=rows, token=token, created=time.time())
+            eligible = [r for r in rows if r['eligible']]
+            return dict(status='ok', message=message, rows=rows, token=token, created=time.time(),
+                        eligible=len(eligible), eligibleBytes=sum(r.get('bytes') or 0 for r in eligible))
         preview = read_json(receipt_path) if receipt_path.is_file() else {}
         receipt_path.unlink(missing_ok=True)   # one confirmation per preview
         if (not token or token != preview.get('token') or time.time() - preview.get('created', 0) > 300

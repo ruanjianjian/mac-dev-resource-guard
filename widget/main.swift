@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Darwin
+import UserNotifications
 
 struct Snapshot {
     var pressure: UInt32? = nil
@@ -12,6 +13,8 @@ struct Snapshot {
     var target: Double? = nil
     var slots = 0
     var guardStatus = "未连接内存守护"
+    var pending = 0
+    var notice: (count: Int, critical: Bool)? = nil
     var at = Date()
     var errors: [String] = []
     var pressureLabel: String {
@@ -34,6 +37,19 @@ func expanded(_ value: String) -> URL {
     URL(fileURLWithPath: (value as NSString).expandingTildeInPath)
 }
 func gib(_ value: UInt64) -> Double { Double(value) / 1_073_741_824 }
+
+/// Pending items the user still has to decide on (design C4); unreachable ones cannot run now.
+func pendingCount(_ body: [String: Any]) -> Int {
+    (body["items"] as? [[String: Any]] ?? []).filter {
+        ($0["state"] as? String) == "pending" && ($0["unreachable"] as? Bool) != true
+    }.count
+}
+
+/// The isolated UI test home when given, otherwise the user's home.
+func stateHome() -> URL {
+    if let home = try? testHomeArgument(CommandLine.arguments) { return URL(fileURLWithPath: home) }
+    return FileManager.default.homeDirectoryForCurrentUser
+}
 func number(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "—" }
 
 func sample() -> Snapshot {
@@ -75,6 +91,14 @@ func sample() -> Snapshot {
     if FileManager.default.fileExists(atPath: memory.appendingPathComponent("paused").path) { s.guardStatus = "自动回收已暂停" }
     else if let last = memoryState["last_ts"] as? Double, abs(Date().timeIntervalSince1970 - last) < 180 { s.guardStatus = "内存守护正在观测" }
     else if !memoryState.isEmpty { s.guardStatus = "内存守护暂无近期观测" }
+    let tiers = stateHome().appendingPathComponent(".local/state/dev-resource-guard")
+    s.pending = pendingCount(readJSON(tiers.appendingPathComponent("pending.json")))
+    let request = tiers.appendingPathComponent("notify-request.json")
+    let notice = readJSON(request)
+    if let count = notice["count"] as? Int {
+        s.notice = (count, (notice["reason"] as? String) == "critical")
+        try? FileManager.default.removeItem(at: request)   // one notice per request (design C6)
+    }
     return s
 }
 
@@ -98,6 +122,7 @@ final class Monitor: ObservableObject {
             DispatchQueue.main.async {
                 self.snapshot = value; self.loading = false; self.busy = false
                 (NSApp.delegate as? AppDelegate)?.updateStatus(value)
+                if let notice = value.notice { (NSApp.delegate as? AppDelegate)?.notify(notice.count, critical: notice.critical) }
             }
         }
     }
@@ -177,13 +202,14 @@ struct Overview: View {
 
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     let model = Monitor()
     let actions = DashboardActions()
     var window: NSWindow!
     var status: NSStatusItem!
     let statusMenu = NSMenu()
     var shortcut: GlobalShortcut?
+    let badge = NSView(frame: NSRect(x: 14, y: 13, width: 7, height: 7))
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.setActivationPolicy(.accessory)
@@ -204,6 +230,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         status.button?.target = self
         status.button?.action = #selector(statusClicked)
         status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        badge.wantsLayer = true
+        badge.layer?.backgroundColor = NSColor.systemRed.cgColor
+        badge.layer?.cornerRadius = 3.5
+        badge.isHidden = true
+        status.button?.addSubview(badge)
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         shortcut = GlobalShortcut { [weak self] in self?.show() }
         shortcut?.register()
         model.shortcut = shortcut?.label ?? "未注册，可从菜单栏打开"
@@ -227,7 +261,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
     func updateStatus(_ s: Snapshot) {
-        status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
+        let waiting = s.pending > 0 ? " · \(s.pending) 项待确认" : ""
+        status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\(waiting)\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
+        badge.isHidden = s.pending == 0
+    }
+    func notify(_ count: Int, critical: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = "有 \(count) 项清理等你确认"
+        content.body = (critical ? "磁盘可用空间已低于低水位。" : "") + "打开「待确认」查看大小、理由和会失去什么。"
+        content.userInfo = ["tab": "pending"]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "pending-\(Date().timeIntervalSince1970)", content: content, trigger: nil))
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
+        DispatchQueue.main.async { self.show(); self.actions.requestedTab = "pending" }
+        done()
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner, .list, .sound])
     }
     @objc func statusClicked() {
         if let event = NSApp.currentEvent, event.type == .rightMouseUp, let button = status.button {
@@ -260,12 +310,18 @@ if CommandLine.arguments.contains("--self-test") {
     require(!stale.canClean)
     let failed = BackendReply(status: "busy", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
     require(!failed.canClean)
+    require(pendingCount(["items": [["state": "pending"], ["state": "ignored"], ["state": "pending", "unreachable": true], ["state": "failed"]]]) == 1)
+    require(pendingCount([:]) == 0)
+    let pendingRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"simulator-delete:U","title":"t","detail":"","category":"待确认","bytes":1,"eligible":true,"reason":"r","outcome":"待确认","command":null,"kind":"simulator-delete","loses":"登录状态"}"#.utf8))
+    require(pendingRow.loses == "登录状态" && pendingRow.kind == "simulator-delete")
+    let oldRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"a","title":"t","detail":"","category":"c","bytes":null,"eligible":false,"reason":"r","outcome":null,"command":null}"#.utf8))
+    require(oldRow.loses == nil)
     require(try! testHomeArgument(["app"]) == nil)
     require(try! testHomeArgument(["app", "--test-home", "/fixture"]) == "/fixture")
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding")
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate(); app.delegate = delegate

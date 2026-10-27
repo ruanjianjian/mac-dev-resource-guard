@@ -11,6 +11,8 @@ struct ResourceRow: Decodable, Identifiable {
     let reason: String
     let outcome: String?
     let command: String?
+    let kind: String?
+    let loses: String?
 }
 
 struct BackendReply: Decodable {
@@ -45,9 +47,11 @@ final class DashboardActions: ObservableObject {
     @Published var message = ""
     @Published var lastStatus = ""
     @Published var previews: [String: BackendReply] = [:]
+    /// A notification click asks the panel to open a tab.
+    @Published var requestedTab: String?
 
-    func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil) {
-        guard !busy, ["storage", "common", "memory", "setup", "task", "project"].contains(family) else { return }
+    func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil, ids: [String]? = nil) {
+        guard !busy, ["storage", "common", "memory", "setup", "task", "project", "pending", "auto"].contains(family) else { return }
         let preview = previews[family]
         if clean && preview?.canClean != true {
             message = "请先重新扫描，查看本次预览。"; return
@@ -68,6 +72,7 @@ final class DashboardActions: ObservableObject {
                 var args = [script.path, action ?? (family + (clean ? "-clean" : "-preview"))]
                 if let token { args += ["--token", token] }
                 if let path { args += ["--path", path] }
+                if let ids { args += ["--ids", ids.joined(separator: ",")] }
                 // An explicit, marked disposable home is only for UI integration tests.
                 if let home = try testHomeArgument(CommandLine.arguments) {
                     guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
@@ -110,6 +115,8 @@ struct Dashboard: View {
     @State private var storageFamily = "common"
     @State private var setupAction = ""
     @State private var confirmingSetup = false
+    @State private var selected: Set<String> = []
+    @State private var confirmingPending = false
 
     private var family: String { tab == "storage" ? storageFamily : tab }
     private var preview: BackendReply? { actions.previews[family] }
@@ -133,6 +140,8 @@ struct Dashboard: View {
                 Text("实时概览").tag("overview")
                 Text("磁盘缓存").tag("storage")
                 Text("开发后台").tag("memory")
+                Text(model.snapshot.pending > 0 ? "待确认 \(model.snapshot.pending)" : "待确认").tag("pending")
+                Text("自动记录").tag("auto")
                 Text("接入设置").tag("setup")
             }.pickerStyle(.segmented).padding(18)
             if tab == "overview" {
@@ -149,11 +158,13 @@ struct Dashboard: View {
                     Overview(model: model).frame(maxWidth: .infinity)
                 }
             } else {
-                if tab == "setup" { setupControls } else { controls }
+                if tab == "setup" { setupControls } else if tab == "pending" { pendingControls } else if tab == "auto" { autoControls } else { controls }
                 Divider()
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        if let reply = preview, let rows = reply.rows, !rows.isEmpty {
+                        if tab == "pending", let reply = preview, reply.token != nil, let rows = reply.rows, !rows.isEmpty {
+                            PendingList(rows: rows, selected: $selected)
+                        } else if let reply = preview, let rows = reply.rows, !rows.isEmpty {
                             ForEach(Array(Set(rows.map(\.category))).sorted(), id: \.self) { category in
                                 ResourceGroup(title: category, rows: rows.filter { $0.category == category })
                             }
@@ -161,7 +172,10 @@ struct Dashboard: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(preview == nil ? "先查看，再决定" : "本次没有可展示的项目")
                                     .font(.title3.weight(.medium))
-                                Text(tab == "storage" ? "首次使用请选择已有缓存并扫描，无需改构建脚本。可清理项、大项占用与保留原因会分别显示。" : "诊断后台归属与闲置证据，正在使用或无法核实的资源保留。")
+                                Text(tab == "storage" ? "首次使用请选择已有缓存并扫描，无需改构建脚本。可清理项、大项占用与保留原因会分别显示。"
+                                     : tab == "pending" ? "会丢东西的清理（删模拟器、关模拟器、删任务目录、删运行时）先放在这里，你勾选确认后才执行。"
+                                     : tab == "auto" ? "自动档每次挪了哪些目录、删了哪些构建产物、为什么保留，都记在这里。"
+                                     : "诊断后台归属与闲置证据，正在使用或无法核实的资源保留。")
                                     .foregroundColor(.secondary)
                             }.padding(.vertical, 35)
                         }
@@ -188,7 +202,17 @@ struct Dashboard: View {
         .frame(width: 620, height: 700)
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: tab) { value in
-            if value == "setup" && !actions.busy { actions.run("setup") }
+            selected = []
+            if ["setup", "pending", "auto"].contains(value) && !actions.busy { actions.run(value) }
+        }
+        .onReceive(actions.$requestedTab) { value in
+            if let value { tab = value; actions.requestedTab = nil; if !actions.busy { actions.run(value) } }
+        }
+        .alert("执行勾选的 \(selected.count) 项？", isPresented: $confirmingPending) {
+            Button("取消", role: .cancel) {}
+            Button("确认执行") { actions.run("pending", action: "pending-clean", ids: Array(selected)); selected = [] }
+        } message: {
+            Text(pendingSummary)
         }
         .alert(tab == "storage" ? "按当前规则清理缓存？" : "安全回收闲置开发后台？", isPresented: $confirming) {
             Button("取消", role: .cancel) {}
@@ -208,6 +232,10 @@ struct Dashboard: View {
                  ? "只升级可识别的本工具旧版本，先备份并校验再切换，保留配置、暂停状态和保护记录。运行中的维护、托管后台、本地修改或其他工具会阻止升级；不会停止它们。"
                  : setupAction == "setup-install"
                  ? "安装内置 dev-storage / dev-memory 命令。已有不同实现会保留并提示冲突，不覆盖状态或保护记录。安装本身不会开启自动清理。"
+                 : setupAction.hasPrefix("setup-auto")
+                 ? (setupAction.hasSuffix("enable") ? "打开自动档：空间低于提醒线时，自动把闲置的任务目录整个挪到外接盘（原路径留链接），外接盘不在就删可重新生成的构建产物，再清不可用的模拟器和工具缓存。有未提交改动的目录只挪不删；正在用、被保护的不动。打开一次即算授权，之后不再逐项询问。" : "关闭自动档：不再自动搬迁或删构建产物，已挪走的目录和链接保持原样。")
+                 : setupAction.hasPrefix("setup-ask")
+                 ? (setupAction.hasSuffix("enable") ? "打开询问档：发现久未使用的模拟器、闲置且已推送的任务目录、没人用的运行时时，发通知请你在「待确认」里勾选确认，不会自动执行。" : "关闭询问档：不再扫描和通知；已列出的待确认项保留，可手动处理。")
                  : "\(setupAction.contains("enable") ? "开启" : "暂停")\(setupAction.contains("memory") ? "每分钟观察、满足安全条件才回收的内存维护" : "每 12 小时处理固定槽与已有 Xcode 过期中间缓存的维护")。暂停不杀在途工作，下一候选复核开关；未接入协议的模拟器、MCP 和任务目录保持保留。")
         }
     }
@@ -240,7 +268,54 @@ struct Dashboard: View {
                 Button("开启") { configure("setup-storage-enable") }
                 Button("关闭") { configure("setup-storage-disable") }
             }
+            HStack {
+                Text("自动档（搬闲置目录、删构建产物）"); Spacer()
+                Button("开启") { configure("setup-auto-enable") }
+                Button("关闭") { configure("setup-auto-disable") }
+            }
+            HStack {
+                Text("询问档（先通知你确认）"); Spacer()
+                Button("开启") { configure("setup-ask-enable") }
+                Button("关闭") { configure("setup-ask-disable") }
+            }
         }.disabled(actions.busy).padding(.horizontal, 20).padding(.bottom, 16)
+    }
+
+    private var pendingRows: [ResourceRow] { preview?.rows?.filter { selected.contains($0.id) } ?? [] }
+
+    private var pendingSummary: String {
+        let bytes = pendingRows.reduce(Int64(0)) { $0 + ($1.bytes ?? 0) }
+        let losses = Set(pendingRows.compactMap(\.loses)).sorted().joined(separator: "；")
+        return "约 \(byteCount(bytes))。会失去：\(losses)。执行前逐项再核对，状态变了的会跳过。"
+    }
+
+    private var pendingControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("会丢东西的清理，等你确认").font(.headline)
+                    Text("已勾选 \(selected.count) 项").font(.callout).foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("刷新列表") { selected = []; actions.run("pending") }
+                Button("忽略所选") { actions.run("pending", action: "pending-ignore", ids: Array(selected)); selected = [] }
+                    .disabled(selected.isEmpty)
+                Button("确认执行所选") { confirmingPending = true }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selected.isEmpty || preview?.canClean != true)
+            }
+            Text("忽略后不再提醒，直到它的状态变化。确认 5 分钟内有效；有未提交或未推送改动、正在用的、被保护的不会出现在这里。")
+                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.disabled(actions.busy).padding(.horizontal, 20).padding(.bottom, 16)
+    }
+
+    private var autoControls: some View {
+        HStack {
+            Text("只做不丢东西的清理：搬到外接盘、删可重新生成的构建产物、清不可用模拟器和工具缓存。")
+                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("刷新记录") { actions.run("auto") }.disabled(actions.busy)
+        }.padding(.horizontal, 20).padding(.bottom, 16)
     }
 
     private func configure(_ action: String) {
@@ -291,6 +366,34 @@ struct Dashboard: View {
                     .font(.caption).foregroundColor(.secondary)
             }
         }.padding(.horizontal, 20).padding(.bottom, 16)
+    }
+}
+
+private struct PendingList: View {
+    let rows: [ResourceRow]
+    @Binding var selected: Set<String>
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(rows) { row in
+                HStack(alignment: .top, spacing: 10) {
+                    Toggle("", isOn: Binding(get: { selected.contains(row.id) },
+                                             set: { on in if on { selected.insert(row.id) } else { selected.remove(row.id) } }))
+                        .toggleStyle(.checkbox).labelsHidden().disabled(!row.eligible)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(row.title).fontWeight(.medium).lineLimit(1)
+                            Spacer()
+                            if let bytes = row.bytes, bytes > 0 { Text(byteCount(bytes)).monospacedDigit().foregroundColor(.secondary) }
+                            Text(row.outcome ?? "待确认").font(.caption)
+                                .foregroundColor(row.outcome == "上次失败" || row.outcome == "外接盘未连接" ? .orange : .secondary)
+                        }
+                        Text("为什么：" + row.reason).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let loses = row.loses { Text("会失去：" + loses).font(.caption).foregroundColor(.orange) }
+                    }
+                }.padding(.vertical, 9)
+                Divider()
+            }
+        }
     }
 }
 
