@@ -119,4 +119,79 @@ class AutomaticTests(unittest.TestCase):
         with self.assertRaises(ValueError):service.integrate(self.home,project)
         self.assertEqual((project/'source.c').read_text(),'source')
 
+    def link_standard_root(self, target=None):
+        root=self.home/'Library/Developer/Xcode/DerivedData'; root.parent.mkdir(parents=True,exist_ok=True)
+        moved=self.home/'External/Xcode-DerivedData'; moved.parent.mkdir(parents=True)
+        if root.exists(): root.rename(moved)
+        root.symlink_to(target or moved)
+        return moved
+
+    def receipt(self):
+        return json.loads((service.state_root(self.home)/'automatic-storage.json').read_text())
+
+    def test_linked_standard_cache_is_cleaned_by_periodic_tick(self):
+        self.cache('Old'); moved=self.link_standard_root()
+        with patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'complete')
+        self.assertFalse((moved/'Old/Build/Intermediates.noindex').exists())
+
+    def test_family_failure_is_recorded_and_other_family_still_runs(self):
+        self.cache('Old')
+        with patch.object(service.common,'manager',side_effect=ValueError('boom')), patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'error')
+        families={r['family']:r for r in result['results']}
+        self.assertIn('result',families['managed']); self.assertEqual(families['existing-xcode']['error'],'boom')
+        self.assertEqual(self.receipt()['status'],'error'); self.assertIn('boom',self.receipt()['error'])
+
+    def test_unplugged_link_target_is_skipped_not_failed(self):
+        self.link_standard_root(self.home/'Unplugged/DerivedData')
+        with patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'complete')
+        skipped=[r for r in result['results'] if r.get('skipped')]
+        self.assertEqual([r['family'] for r in skipped],['existing-xcode']); self.assertIn('不存在',skipped[0]['skipped'])
+
+    def test_invalid_config_still_writes_error_receipt(self):
+        p=self.home/'.config/dev-resource-guard/config.json';p.parent.mkdir(parents=True);p.write_text('{"cache_root":"/"}')
+        result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'error'); self.assertEqual(self.receipt()['status'],'error')
+        self.assertTrue(all(r.get('error') for r in result['results']))
+
+    def setup_rows(self):
+        sys.path.insert(0,str(ROOT/'widget')); import setup_status
+        return {r['id']:r for r in setup_status.status(self.home)['rows']}
+
+    def test_setup_page_shows_failure_skip_and_scheduler_error(self):
+        state=service.state_root(self.home); state.mkdir(parents=True)
+        def write(status, results, error=None):
+            body=dict(at=time.time(),status=status,results=results)
+            if error: body['error']=error
+            (state/'automatic-storage.json').write_text(json.dumps(body))
+        write('error',[dict(family='managed',result=dict(deleted=[],errors=[])),dict(family='existing-xcode',error='boom')],'已有 Xcode 缓存：boom')
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'失败'); self.assertIn('boom',row['reason'])
+        write('complete',[dict(family='managed',result=dict(deleted=[],errors=[])),dict(family='existing-xcode',skipped='指向的位置不存在')])
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'部分跳过'); self.assertIn('已跳过',row['reason']); self.assertIn('不存在',row['reason'])
+        (state/'automatic-storage.json').unlink()
+        (state/'storage-scheduler.err').write_text('Traceback...\nValueError: 配置坏了\n')
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'失败'); self.assertIn('配置坏了',row['reason'])
+
+    def git(self, repo, *args):
+        return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,text=True).stdout
+
+    def test_project_entry_stays_out_of_git_status(self):
+        command=self.home/'.local/bin/resource-guard-storage';command.parent.mkdir(parents=True);command.touch()
+        repo=self.home/'repo'; sub=repo/'apps/mobile'; sub.mkdir(parents=True); (sub/'main.swift').write_text('source')
+        subprocess.run(['git','init','-q',str(repo)],check=True); (repo/'.gitignore').write_text('build/\n')
+        self.git(repo,'add','.'); self.git(repo,'-c','user.name=t','-c','user.email=t@example.com','commit','-qm','init')
+        for project in (repo, sub):
+            service.integrate(self.home,project)
+            self.assertEqual(self.git(repo,'status','--porcelain'),'')
+        self.assertEqual((repo/'.gitignore').read_text(),'build/\n')
+        (repo/'.dev-resource-guard/.gitignore').unlink()  # an entry generated by 1.3
+        self.assertNotEqual(self.git(repo,'status','--porcelain'),'')
+        service.integrate(self.home,repo)
+        self.assertEqual(self.git(repo,'status','--porcelain'),'')
+
 if __name__=='__main__':unittest.main()

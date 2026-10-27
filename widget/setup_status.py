@@ -44,7 +44,7 @@ def loaded(home, kind):
 
 def status(home):
     sys.path.insert(0, str(engine_root() / 'scripts'))
-    from service import schedulers
+    from service import FAMILIES, schedulers
     installation = home / '.local/state/dev-resource-guard/installation.json'
     active = installation.is_file()
     rows = [row('common', '已有 Xcode 缓存', '已内置：扫描默认 DerivedData 中四类中间缓存，无需改构建脚本；手动确认清理。')]
@@ -77,13 +77,38 @@ def status(home):
         rows.append(row('installation', '安装结果', info.get('error', '完整引擎已安装；调度状态以上方实际检查为准。'), info.get('runtime', '')))
         rows[-1]['outcome'] = {'active':'已完成','partial':'部分完成','configuring':'正在配置'}.get(info.get('status'),'未知')
     auto = home / '.local/state/dev-resource-guard/automatic-storage.json'
+    failure = home / '.local/state/dev-resource-guard/storage-scheduler.err'
+    data = None
     if auto.is_file():
-        data = json.loads(auto.read_text())
-        completed = sum(len(r['result'].get('deleted', [])) for r in data.get('results', []))
-        amount = sum(e.get('directory_accounting_bytes', 0) for r in data.get('results', []) for e in r['result'].get('deleted', []))
+        try:
+            data = json.loads(auto.read_text())
+        except (OSError, ValueError):
+            data = dict(at=auto.stat().st_mtime, status='unreadable', results=[], error='回执不可读，不视为成功')
+    # A run that dies before writing a receipt only reaches launchd's error log.
+    crashed = (failure.is_file() and failure.stat().st_size > 0 and
+               (data is None or failure.stat().st_mtime > data.get('at', 0) + 60))
+    if crashed:
+        with failure.open('rb') as stream:  # launchd only appends; the tail is enough
+            stream.seek(max(0, failure.stat().st_size - 4096))
+            lines = [line for line in stream.read().decode(errors='replace').splitlines() if line.strip()]
+        when = datetime.fromtimestamp(failure.stat().st_mtime).astimezone().strftime('%m-%d %H:%M')
+        rows.append(row('automatic-last', '自动清理最近结果', '定时清理报错（{}）：{}'.format(when, lines[-1][-300:] if lines else '无输出'), str(failure)))
+        rows[-1]['outcome'] = '失败'
+    elif data is not None:
+        results = data.get('results', [])
+        completed = sum(len(r.get('result', {}).get('deleted', [])) for r in results)
+        amount = sum(e.get('directory_accounting_bytes', 0) for r in results for e in r.get('result', {}).get('deleted', []))
         when = datetime.fromtimestamp(data['at']).astimezone().strftime('%m-%d %H:%M')
-        rows.append(row('automatic-last', '自动清理最近结果', '{} 项完成；{}；大小为目录计量。{}'.format(completed, when, data.get('error','')), size=amount))
-        rows[-1]['outcome'] = {'complete':'已完成','running':'运行中','paused':'已暂停','error':'失败','busy':'等待空闲'}.get(data.get('status'),'未知')
+        reason = '{} 项完成；{}；大小为目录计量。'.format(completed, when)
+        if data.get('error'):
+            reason += '失败原因：' + data['error'] + '。'
+        skipped = ['{}已跳过：{}'.format(FAMILIES.get(r['family'], r['family']), r['skipped']) for r in results if r.get('skipped')]
+        reason += '；'.join(skipped)
+        rows.append(row('automatic-last', '自动清理最近结果', reason, size=amount))
+        outcome = {'complete':'已完成','running':'运行中','paused':'已暂停','error':'失败','busy':'等待空闲','unreadable':'失败'}.get(data.get('status'),'未知')
+        if outcome == '已完成' and skipped:
+            outcome = '已跳过' if len(skipped) == len(results) else '部分跳过'
+        rows[-1]['outcome'] = outcome
     project = home / '.local/state/dev-resource-guard/project.json'
     if project.is_file():
         info = json.loads(project.read_text())
