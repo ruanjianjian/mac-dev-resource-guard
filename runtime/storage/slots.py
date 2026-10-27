@@ -97,6 +97,10 @@ def slot_paths(identity, cache_root=None, state_root=None):
         raise ValueError("invalid slot key")
     cache = _canonical(DEFAULT_CACHE_ROOT if cache_root is None else cache_root)
     state = _canonical(DEFAULT_STATE_ROOT if state_root is None else state_root)
+    parts = cache.parts
+    # A cache on an unplugged drive must fail loudly, never fall back to the internal disk.
+    if len(parts) > 2 and parts[1] == "Volumes" and not os.path.ismount(os.path.join("/", parts[1], parts[2])):
+        raise ValueError("缓存所在的盘未连接：" + str(cache))
     lock = state / "slot-locks" / (key + ".lock")
     manifest = state / "slots" / (key + ".json")
     cache_path = cache / key / "DerivedData"
@@ -209,7 +213,20 @@ def run_xcode(worktree, platform, configuration, command, cache_root=None, state
     return run_in_slot(identity, arguments, cache_root, state_root)
 
 
-def run_in_slot(identity, arguments, cache_root=None, state_root=None, env=None, cache_path=None):
+def run_script(worktree, platform, configuration, command, env_name, cache_root=None, state_root=None, toolchain=None):
+    """Run a whole build script in the slot; the script learns the cache path from env_name."""
+    if not isinstance(env_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
+        raise ValueError("环境变量名不合法：" + str(env_name))
+    identity = slot_identity(worktree, platform, configuration, toolchain)
+    paths = slot_paths(identity, cache_root, state_root)
+    arguments = list(command)
+    if not arguments or any(not isinstance(value, str) or not value or "\0" in value for value in arguments):
+        raise ValueError("command must contain nonempty string arguments")
+    env = dict(os.environ, **{env_name: paths["cache_path"]})
+    return run_in_slot(identity, arguments, cache_root, state_root, env=env, script=True)
+
+
+def run_in_slot(identity, arguments, cache_root=None, state_root=None, env=None, cache_path=None, script=False):
     """Hold the existing managed lease for an entire build command or script."""
     paths = slot_paths(identity, cache_root, state_root)
     if cache_path is not None:
@@ -251,7 +268,8 @@ def run_in_slot(identity, arguments, cache_root=None, state_root=None, env=None,
             code = child.wait()
             build_actions = {'build', 'build-for-testing', 'test', 'archive', 'analyze', 'install'}
             query_flags = {'-list', '-showBuildSettings', '-showdestinations', '-showsdks', '-version', '-help', '-resolvePackageDependencies'}
-            if code == 0 and build_actions.intersection(arguments) and not query_flags.intersection(arguments):
+            # A whole script has no xcodebuild verb to inspect: its success is the build's success.
+            if code == 0 and (script or build_actions.intersection(arguments) and not query_flags.intersection(arguments)):
                 manifest['successful_builds'] += 1
             return code
         finally:

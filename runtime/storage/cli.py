@@ -10,7 +10,7 @@ import sys
 import time
 
 from storage import GIB, Settings, StorageManager, atomic_json, summarize
-from slots import run_xcode, slot_identity, slot_paths
+from slots import run_script, run_xcode, slot_identity, slot_paths
 from portable_config import configure
 
 
@@ -45,6 +45,7 @@ def main(argv=None):
     xcode.add_argument('--worktree', type=Path, required=True)
     xcode.add_argument('--platform', choices=['ios-device', 'ios-simulator', 'macos'], required=True)
     xcode.add_argument('--configuration', default='Profile')
+    xcode.add_argument('--cache-env', help='Run a whole build script; this variable receives the slot DerivedData path')
     xcode.add_argument('argv', nargs=argparse.REMAINDER)
     paths = sub.add_parser('xcode-path', help='Query path; this does not acquire a build lease')
     paths.add_argument('--worktree', type=Path, required=True)
@@ -94,6 +95,8 @@ def main(argv=None):
         command = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
         if not command:
             raise ValueError('supply a command after --')
+        if args.command == 'xcode' and args.cache_env:
+            return run_script(args.worktree, args.platform, args.configuration, command, args.cache_env)
         if args.command == 'xcode':
             return run_xcode(args.worktree, args.platform, args.configuration, command)
         directory = manager.state_root / 'dependency-locks'
