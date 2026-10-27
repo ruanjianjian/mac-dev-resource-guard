@@ -25,7 +25,7 @@ class RunCycleSafetyTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="dev-memory-unit-")
         self.addCleanup(self.temp.cleanup)
         self.state_dir = Path(self.temp.name)
-        self.record = {"id": "a" * 16, "pid": 424242, "start": "synthetic:1"}
+        self.record = {"id": "a" * 16, "pid": 424242, "start": "synthetic:1", "single_stop_supported": True}
         self.candidate = {**self.record, "eligible": True}
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
@@ -67,6 +67,19 @@ class RunCycleSafetyTests(unittest.TestCase):
     def test_manual_cleanup_never_adds_unselected_or_new_resources(self):
         memory.run_cycle('clean-once', ['not-this-resource'])
         self.request.assert_not_called()
+
+    def test_old_supervisor_paused_is_preserved_without_unknown_request(self):
+        (self.state_dir/'paused').touch()
+        self.record.pop('single_stop_supported'); self.candidate.pop('single_stop_supported')
+        result=memory.run_cycle('clean-once',[self.record['id']])
+        self.request.assert_not_called()
+        self.assertEqual(result['actions'],[])
+        self.assertEqual(result['managed_resources'][0]['reason'],'legacy_supervisor_paused_preserved')
+
+    def test_old_supervisor_unpaused_uses_supported_operation(self):
+        self.record.pop('single_stop_supported'); self.candidate.pop('single_stop_supported')
+        memory.run_cycle('clean-once',[self.record['id']])
+        self.request.assert_called_once_with(self.record,'stop_if_orphan')
 
     def test_isolated_owned_only_never_calls_external_adapters(self):
         with mock.patch.object(memory, 'inspect_external_resources') as external, \

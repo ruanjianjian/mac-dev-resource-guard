@@ -221,12 +221,17 @@ def run_in_slot(identity, arguments, cache_root=None, state_root=None, env=None,
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(lock_fd, "a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            successes = int(json.loads(manifest_path.read_text()).get('successful_builds', 0))
+        except (OSError, ValueError, TypeError):
+            successes = 0
         manifest = {
             **identity,
             "cache_path": paths["cache_path"],
             "last_used": time.time(),
             "last_finished": _previous_finish(manifest_path),
             "pid": None,
+            "successful_builds": successes,
         }
         child = None
         try:
@@ -243,7 +248,12 @@ def run_in_slot(identity, arguments, cache_root=None, state_root=None, env=None,
             )
             manifest["pid"] = child.pid
             _write_manifest(manifest_path, manifest)
-            return child.wait()
+            code = child.wait()
+            build_actions = {'build', 'build-for-testing', 'test', 'archive', 'analyze', 'install'}
+            query_flags = {'-list', '-showBuildSettings', '-showdestinations', '-showsdks', '-version', '-help', '-resolvePackageDependencies'}
+            if code == 0 and build_actions.intersection(arguments) and not query_flags.intersection(arguments):
+                manifest['successful_builds'] += 1
+            return code
         finally:
             try:
                 if child is not None:

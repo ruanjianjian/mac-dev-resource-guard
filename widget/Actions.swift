@@ -47,7 +47,7 @@ final class DashboardActions: ObservableObject {
     @Published var previews: [String: BackendReply] = [:]
 
     func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil) {
-        guard !busy, ["storage", "common", "memory", "setup", "task"].contains(family) else { return }
+        guard !busy, ["storage", "common", "memory", "setup", "task", "project"].contains(family) else { return }
         let preview = previews[family]
         if clean && preview?.canClean != true {
             message = "请先重新扫描，查看本次预览。"; return
@@ -93,7 +93,7 @@ final class DashboardActions: ObservableObject {
                                      rows: nil, token: nil, created: nil, eligible: nil, eligibleBytes: nil)
             }
             DispatchQueue.main.async {
-                self.previews[family] = reply
+                self.previews[family == "project" ? "setup" : family] = reply
                 self.message = reply.message; self.lastStatus = reply.status
                 self.busy = false; self.activity = ""
                 (NSApp.delegate as? AppDelegate)?.model.refresh()
@@ -139,7 +139,7 @@ struct Dashboard: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("先看占用，再决定清理").font(.headline)
-                        Text("已有 Xcode 缓存可直接扫描；自动维护需在接入设置单独开启。")
+                        Text("完整安装会开启安全自动维护；在接入设置查看运行结果与构建缓存复用。")
                             .font(.callout).foregroundColor(.secondary)
                         HStack {
                             Button("查看已有缓存") { tab = "storage" }
@@ -202,23 +202,33 @@ struct Dashboard: View {
             Button("取消", role: .cancel) {}
             Button("确认") { actions.run("setup", action: setupAction) }
         } message: {
-            Text(setupAction == "setup-upgrade"
+            Text(setupAction == "setup-activate"
+                 ? "安装完整引擎并开启自动维护：立即开始并每12小时清理符合规则的已有 Xcode 中间缓存和固定构建槽；每分钟观察内存，只收尾有闲置证据的后台。复用已有守护，保留原命令、pin、设备和任务。自动清理不逐次弹窗；可随时关闭本工具调度。"
+                 : setupAction == "setup-upgrade"
                  ? "只升级可识别的本工具旧版本，先备份并校验再切换，保留配置、暂停状态和保护记录。运行中的维护、托管后台、本地修改或其他工具会阻止升级；不会停止它们。"
                  : setupAction == "setup-install"
                  ? "安装内置 dev-storage / dev-memory 命令。已有不同实现会保留并提示冲突，不覆盖状态或保护记录。安装本身不会开启自动清理。"
-                 : "\(setupAction.contains("enable") ? "开启" : "关闭")\(setupAction.contains("memory") ? "每分钟观察、满足安全条件才回收的内存维护" : "每 12 小时仅处理托管槽的过期中间缓存维护")。未接入占用协议的模拟器、MCP 仍不会回收；已有缓存与任务目录不进入自动删除范围。")
+                 : "\(setupAction.contains("enable") ? "开启" : "暂停")\(setupAction.contains("memory") ? "每分钟观察、满足安全条件才回收的内存维护" : "每 12 小时处理固定槽与已有 Xcode 过期中间缓存的维护")。暂停不杀在途工作，下一候选复核开关；未接入协议的模拟器、MCP 和任务目录保持保留。")
         }
     }
 
     private var setupControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("先看可用能力，再开启维护").font(.headline)
-            Text("已有缓存清理已经内置。自动维护是可选项；仅装好看板不代表后台正在清理。")
+            Text("安装、自动维护与缓存复用").font(.headline)
+            Text("完整安装一次开启安全维护；旧命令保留，已有守护不会重复启动。")
                 .font(.callout).foregroundColor(.secondary)
             HStack {
                 Button("检查接入") { actions.run("setup") }
-                Button("安装命令工具") { configure("setup-install") }
-                Button("升级本工具") { configure("setup-upgrade") }
+                Button("完成安装并开启维护") { configure("setup-activate") }
+                Button("接入项目构建缓存") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true; panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.message = "选择项目根目录，将创建 .dev-resource-guard/xcode-build；已有构建脚本和源码不改写。"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        actions.run("project", action: "project-integrate", path: url.path)
+                    }
+                }
             }
             HStack {
                 Text("内存自动回收"); Spacer()
@@ -226,7 +236,7 @@ struct Dashboard: View {
                 Button("关闭") { configure("setup-memory-disable") }
             }
             HStack {
-                Text("托管槽定期清理"); Spacer()
+                Text("磁盘自动维护"); Spacer()
                 Button("开启") { configure("setup-storage-enable") }
                 Button("关闭") { configure("setup-storage-disable") }
             }
@@ -308,7 +318,7 @@ private struct ResourceGroup: View {
                     Text(row.reason).font(.caption).foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let command = row.command {
-                        Button("复制收尾核对命令") {
+                        Button(row.id == "project" ? "复制构建入口" : "复制收尾核对命令") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(command, forType: .string)
                         }.font(.caption)

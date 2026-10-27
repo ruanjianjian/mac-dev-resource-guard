@@ -79,3 +79,10 @@ python3 scripts/setup.py disable-scheduler storage
 ```
 
 停调度不会终止正在执行的维护或构建；等待其自然结束再卸载。卸载时仅移除本包创建且仍指向它的命令、Claude 链接和 skill 文件夹；保留缓存、状态、pin 与 pending，另行审阅后处理。不删除进程或用户数据来“卸载”。
+# 1.3 完整安装与升级
+
+推荐 `python3 scripts/install.py`。安装动作包含开启安全自动维护；安装前告知范围：固定槽和至少七天未用的标准 Xcode 中间缓存，保留源码、Products、pin、lease、设备和任务。已有守护核实后复用，不重复启动。未知调度报部分完成；已知旧公开调度仅在空闲时迁移，忙碌时保留并允许重试。
+
+更新后同命令重跑，原私有 dev-storage/dev-memory 保留，新引擎使用独立命令 resource-guard-storage/resource-guard-memory。运行中的旧版本进程继续自然结束，下次调度使用原子更新的入口。App 默认隐藏，不弹出面板。
+
+下面的 setup.py 分步安装为兼容接口，新用户无需逐项执行。

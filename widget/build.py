@@ -24,6 +24,6 @@ for folder in ('runtime', 'scripts', 'references', 'widget', 'docs', 'tests'):
     shutil.copytree(source.parent/folder, engine/folder, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
 shutil.copy2(source.parent/'SKILL.md', engine/'SKILL.md')
 shutil.copy2(source.parent/'README.md', engine/'README.md')
-(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'io.github.ruanjianjian.mac-dev-resource-guard.widget','CFBundleName':'资源看板','CFBundleDisplayName':'资源看板','CFBundleExecutable':'ResourceDashboard','CFBundlePackageType':'APPL','CFBundleShortVersionString':'1.2.0','CFBundleVersion':'4','LSMinimumSystemVersion':'13.0','LSUIElement':True,'NSHighResolutionCapable':True}))
+(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'io.github.ruanjianjian.mac-dev-resource-guard.widget','CFBundleName':'资源看板','CFBundleDisplayName':'资源看板','CFBundleExecutable':'ResourceDashboard','CFBundlePackageType':'APPL','CFBundleShortVersionString':'1.3.0','CFBundleVersion':'5','LSMinimumSystemVersion':'13.0','LSUIElement':True,'NSHighResolutionCapable':True}))
 subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)
 print(app)

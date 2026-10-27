@@ -1,73 +1,50 @@
 # Mac Dev Resource Guard
 
-Mac 开发资源诊断、已有 Xcode 缓存手动清理与托管后台回收，以及按需唤起的菜单栏「资源看板」。可作为完整 skill 交给 Codex / Claude 使用，也可以直接运行命令。
+**1.3 完整安装体验**：下方 `scripts/install.py` 一次完成 App、完整引擎与自动维护。安装后立即开始、此后每 12 小时检查并清理安全的过期中间缓存（固定槽 + 至少七天未用的默认 Xcode DerivedData）；内存每分钟观察，有闲置证明才收尾。无需每次手动触发；可在接入设置暂停。源码、Products、pin、设备与任务目录保留。
 
-## 先用桌面看板
+已有私有命令保留；看板使用内置完整协议，共用现有合法缓存根与保护状态。已有内存守护会复用，未知调度会明确报部分完成，不能假称开启成功。仅使用 `widget/build.py` 是构建 App，需再点「完成安装并开启维护」。
 
-macOS 13+，安装 Xcode 或 Command Line Tools。App 内置清理引擎，首次安装即可扫描默认 Xcode DerivedData，无需安装 devlease 或修改构建脚本。已有 dev-storage / dev-memory 会优先复用，不覆盖。
+构建缓存：接入设置选择项目，生成 `.dev-resource-guard/xcode-build`。将原构建命令经该入口执行（`--platform ios-simulator --configuration Debug -- xcodebuild <原参数> build`），同工作树同工具链同配置复用槽；页面以真实成功构建次数验证复用。安装不会偷偷改写项目原有脚本。Go/npm/pnpm/pub/Gradle 沿用工具全局共享缓存，不复制到每个任务。
+
+
+macOS 13+，Python 3.9+，已安装 Xcode 或 Command Line Tools，无 pip 依赖。
 
 ```bash
 git clone https://github.com/ruanjianjian/mac-dev-resource-guard.git
 cd mac-dev-resource-guard
-python3 widget/build.py
-open "$HOME/Applications/资源看板.app"
+python3 scripts/install.py
 ```
 
-启动默认隐藏面板，只在菜单栏保留小图标；左键点击图标或按全局快捷键呼出，右键图标打开刷新和退出菜单。面板显示内存压力、物理内存、压缩内存、swap、磁盘可用量、配置的空间目标、守护状态和固定构建槽数量。每15秒后台采样，可手动刷新、置顶；关窗后从菜单栏唤回。可打开系统活动监视器继续查看。默认全局唤起快捷键为 `⌃⌥⌘S`，避开保存用的 `⌘S`；注册冲突时依次尝试 `⌃⌥⌘R`、`⌃⌥⇧⌘S`，实际快捷键显示在面板底部和菜单栏。无需辅助功能权限。自动刷新只采样状态，不扫描缓存、不执行清理、不联网。手动清理与可选自动维护的操作见下方首次使用说明。它是菜单栏 App + 桌面小窗，不是 WidgetKit 通知中心扩展。
+更新：`git pull` 后再次运行 `python3 scripts/install.py`。构建使用固定 Swift 模块缓存；App 本地按当前架构编译并 ad-hoc 签名，无 Developer ID 公证，不修改 Gatekeeper。
 
-按当前 Mac 的架构本地编译，采用 ad-hoc 签名；没有 Developer ID 公证，未提供跨机器通用的预编译安装包。不修改 Gatekeeper 或系统安全设置。没有自动添加登录启动项。构建使用固定 Swift 模块缓存，不按每轮新建缓存。
+安装后面板默认隐藏，菜单栏图标或 `⌃⌥⌘S` 呼出；冲突时尝试 `⌃⌥⌘R`、`⌃⌥⇧⌘S`，实际组合显示在窗口底部。自动维护在后台运行，面板每15秒只采样状态。
 
-## 安装 skill 和命令
+## 维护范围
 
-首次使用可直接打开「磁盘缓存 → 已有缓存与大项占用」扫描，再确认清理默认 DerivedData 中至少七天未用的四类中间目录。Go 缓存、模拟器数据、Claude 会话和用户选定任务目录只统计大小，不直接删除；任务目录提供收尾核对命令。
+- 自动磁盘：固定构建槽与默认 DerivedData 的 Intermediates.noindex、Index.noindex、ModuleCache.noindex、SDKStatCaches.noindex。删除前复核槽锁、pin、lease、进程、打开文件、保留期与路径身份；空间目标只提醒，不阻止构建。
+- 自动内存：有归属与闲置证明的托管日志、支持的 Gradle 后台；模拟器和 MCP 仍需兼容的外部占用/排空协议。不强杀现有应用，不用 purge，不删 swap。
+- Go 编译缓存、模拟器数据、Claude 会话与选定任务目录显示占用；不会直接删除。任务只提供 git 核对命令。
+- 接入设置展示实际调度（包括旧守护）、暂停状态、最近清理回执和项目复用证据。目录统计不等于 APFS 实际释放量，不承诺固定释放容量。
+- 自动维护可暂停。关闭不终止已经执行的文件操作；下一候选复核暂停。对于无法验证的自定义调度，保留原配置并显示未完成，不重复安装。
 
-「接入设置」展示命令来源、依赖缺口、实际调度加载状态与最近结果，提供安装命令工具和分别启停维护的按钮。安装和开启分别确认。App 内置后端支持暂停自动维护时的单次回收，旧后端不支持时明确提示升级，不临时恢复自动维护。
+## 构建接入
 
-自动回收不保证释放指定容量。新用户可直接清理的是已有 Xcode 中间缓存；模拟器自动关机仍需兼容占用协议，MCP 仍需兼容 broker。未接入的资源保留，不把低 CPU 当闲置证明。
-
-将完整仓库或 [Release 压缩包](https://github.com/ruanjianjian/mac-dev-resource-guard/releases/latest) 交给 agent：
-
-> 使用 mac-dev-resource-guard，在我的 Mac 安装内存诊断与构建缓存复用，并接入我指定的构建脚本。先检查现有工具和调度，不覆盖、不打断开发；展示诊断后，再按我的授权启用周期维护。
-
-也可手动运行：
+原生面板「接入设置 → 接入项目构建缓存」选择项目根目录，新增一个独立入口，不覆盖原构建脚本。使用原工程/scheme参数：
 
 ```bash
-python3 scripts/setup.py doctor
-python3 scripts/setup.py install
-```
-
-Python 3.9+，无 pip 依赖。默认暂停自动回收、不安装调度。已有同名工具或状态时拒绝覆盖，需先核对迁移。Codex 与 Claude 共用同一份 skill、命令、状态和锁。
-
-- [完整安装与可选调度](references/install.md)
-- [内存回收机制及可选适配器](references/memory.md)
-- [构建缓存如何复用](references/cache.md)
-- [测试范围与未验证边界](references/validation.md)
-- [桌面组件行为与验收](docs/widget.md)
-
-## 共享什么
-
-下载依赖缓存沿用 Go/npm/pnpm/pub/Gradle 的原生全局位置。同一工作树的 Xcode 构建按工具链、平台、配置复用固定 DerivedData，并用跨进程锁独占；不会每轮、每commit再造一份。不同工作树的 build、Pods、node_modules、.dart_tool 和可变 checkout 继续隔离。
-
-直接 Xcode 构建接入示例：
-
-```bash
-dev-storage xcode --worktree "$PWD" --platform ios-simulator --configuration Debug -- \
+./.dev-resource-guard/xcode-build --platform ios-simulator --configuration Debug -- \
   xcodebuild -workspace ios/App.xcworkspace -scheme App -configuration Debug -sdk iphonesimulator build
 ```
 
-替换实际工程和scheme。已有脚本不会自动迁移，修改真正执行构建的入口并验证两次构建的实际路径后才算接入。
+也可使用完整安装提供的 `resource-guard-storage xcode --worktree "$PWD" ...`。新用户没有 dev-storage/dev-memory 时会创建别名；已有同名工具不覆盖。其他 agent 或原脚本必须实际调用入口才算接入，不能将安装 App 当作所有项目已经接入。
 
-## 回收边界
+## 验证与文档
 
-内存压力需连续观察，候选需复核身份与闲置证据。Gradle支持指定版本的温和排空；模拟器需要兼容devlease占用协议，MCP需要兼容broker协议；本包不附带这些外部系统，缺失时保留相应资源。不会根据CPU=0或进程年龄强杀。
+`python3 scripts/verify.py` 运行隔离测试。`scripts/verify_automatic.py --home <全新测试目录>` 使用唯一 launchd 标签实际清理测试缓存并保留 pin/Products，完成后卸载测试标签。
 
-磁盘自动维护只处理专用缓存根中四类过期中间目录，保留源码、验收包、报告、登录态、设备和容器。磁盘目标只提醒，永远不阻止编译、依赖安装和测试。
+- [安装说明](references/install.md)
+- [维护与构建规格](docs/epics/resource-dashboard/specs/automatic-maintenance.md)
+- [内存保护](references/memory.md)
+- [缓存复用](references/cache.md)
 
-## 验证
-
-```bash
-python3 scripts/verify.py
-"$HOME/Applications/资源看板.app/Contents/MacOS/ResourceDashboard" --self-test
-```
-
-Python使用临时HOME与假设备／进程夹具；外部集成按条件跳过。桌面自测只读系统指标。真实项目构建命中率、第三方协议和其他Mac型号仍需在目标机器验证。
+同工作树稳定槽复用已经由两个真实 Xcode build 验证；不同工作树可变目录保持隔离。第三方协议不具备条件时明确跳过，不能当作实际验收。
