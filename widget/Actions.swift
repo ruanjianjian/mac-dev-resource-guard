@@ -10,6 +10,7 @@ struct ResourceRow: Decodable, Identifiable {
     let eligible: Bool
     let reason: String
     let outcome: String?
+    let command: String?
 }
 
 struct BackendReply: Decodable {
@@ -45,8 +46,8 @@ final class DashboardActions: ObservableObject {
     @Published var lastStatus = ""
     @Published var previews: [String: BackendReply] = [:]
 
-    func run(_ family: String, clean: Bool = false) {
-        guard !busy, ["storage", "memory"].contains(family) else { return }
+    func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil) {
+        guard !busy, ["storage", "common", "memory", "setup", "task"].contains(family) else { return }
         let preview = previews[family]
         if clean && preview?.canClean != true {
             message = "请先重新扫描，查看本次预览。"; return
@@ -55,7 +56,7 @@ final class DashboardActions: ObservableObject {
         previews[family] = nil  // Neither failed requests nor old results enable cleaning.
         busy = true; message = ""
         activity = clean ? "后端正在重新核对保护并执行，请等待完成…" :
-            (family == "storage" ? "正在扫描受管缓存；大目录可能需要几分钟…" : "正在诊断开发后台…")
+            (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" : "正在检查，请稍候…")
         DispatchQueue.global(qos: .utility).async {
             let reply: BackendReply
             do {
@@ -64,8 +65,9 @@ final class DashboardActions: ObservableObject {
                 }
                 let task = Process()
                 task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                var args = [script.path, family + (clean ? "-clean" : "-preview")]
+                var args = [script.path, action ?? (family + (clean ? "-clean" : "-preview"))]
                 if let token { args += ["--token", token] }
+                if let path { args += ["--path", path] }
                 // An explicit, marked disposable home is only for UI integration tests.
                 if let home = try testHomeArgument(CommandLine.arguments) {
                     guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
@@ -105,8 +107,12 @@ struct Dashboard: View {
     @ObservedObject var actions: DashboardActions
     @State private var tab = "overview"
     @State private var confirming = false
+    @State private var storageFamily = "common"
+    @State private var setupAction = ""
+    @State private var confirmingSetup = false
 
-    private var preview: BackendReply? { actions.previews[tab] }
+    private var family: String { tab == "storage" ? storageFamily : tab }
+    private var preview: BackendReply? { actions.previews[family] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -127,11 +133,23 @@ struct Dashboard: View {
                 Text("实时概览").tag("overview")
                 Text("磁盘缓存").tag("storage")
                 Text("开发后台").tag("memory")
+                Text("接入设置").tag("setup")
             }.pickerStyle(.segmented).padding(18)
             if tab == "overview" {
-                ScrollView { Overview(model: model).frame(maxWidth: .infinity) }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("先看占用，再决定清理").font(.headline)
+                        Text("已有 Xcode 缓存可直接扫描；自动维护需在接入设置单独开启。")
+                            .font(.callout).foregroundColor(.secondary)
+                        HStack {
+                            Button("查看已有缓存") { tab = "storage" }
+                            Button("检查接入与自动维护") { tab = "setup" }
+                        }
+                    }.padding(.horizontal, 24)
+                    Overview(model: model).frame(maxWidth: .infinity)
+                }
             } else {
-                controls
+                if tab == "setup" { setupControls } else { controls }
                 Divider()
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -143,7 +161,7 @@ struct Dashboard: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(preview == nil ? "先查看，再决定" : "本次没有可展示的项目")
                                     .font(.title3.weight(.medium))
-                                Text(tab == "storage" ? "扫描现有工具管理的缓存，查看大小与保留原因。" : "诊断后台归属与闲置证据，正在使用或无法核实的资源保留。")
+                                Text(tab == "storage" ? "首次使用请选择已有缓存并扫描，无需改构建脚本。可清理项、大项占用与保留原因会分别显示。" : "诊断后台归属与闲置证据，正在使用或无法核实的资源保留。")
                                     .foregroundColor(.secondary)
                             }.padding(.vertical, 35)
                         }
@@ -169,18 +187,74 @@ struct Dashboard: View {
         }
         .frame(width: 620, height: 700)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: tab) { value in
+            if value == "setup" && !actions.busy { actions.run("setup") }
+        }
         .alert(tab == "storage" ? "按当前规则清理缓存？" : "安全回收闲置开发后台？", isPresented: $confirming) {
             Button("取消", role: .cancel) {}
-            Button("确认清理") { actions.run(tab, clean: true) }
+            Button("确认清理") { actions.run(family, clean: true) }
         } message: {
             Text(tab == "storage"
-                 ? "预览有 \(preview?.eligible ?? 0) 项符合条件，目录统计约 \(byteCount(preview?.eligibleBytes ?? 0))。后端将按同一规则重新扫描并复核，实际项目以复核为准。仅处理四类中间缓存，保留验收包、报告和设备数据。"
+                 ? "预览有 \(preview?.eligible ?? 0) 项符合条件，目录统计约 \(byteCount(preview?.eligibleBytes ?? 0))。已有缓存仅处理本次预览中的项目，执行前复核占用和变化；固定槽沿用现有工具规则。保留 Products、验收包、报告和设备数据；下次编译可能变慢。"
                  : "预览有 \(preview?.eligible ?? 0) 项符合闲置条件。后端仍会复核身份、占用、冷却与待核实请求；仅通过复核的后台正常退出。不会恢复已暂停的守护。")
         }
+        .alert("配置资源维护？", isPresented: $confirmingSetup) {
+            Button("取消", role: .cancel) {}
+            Button("确认") { actions.run("setup", action: setupAction) }
+        } message: {
+            Text(setupAction == "setup-upgrade"
+                 ? "只升级可识别的本工具旧版本，先备份并校验再切换，保留配置、暂停状态和保护记录。运行中的维护、托管后台、本地修改或其他工具会阻止升级；不会停止它们。"
+                 : setupAction == "setup-install"
+                 ? "安装内置 dev-storage / dev-memory 命令。已有不同实现会保留并提示冲突，不覆盖状态或保护记录。安装本身不会开启自动清理。"
+                 : "\(setupAction.contains("enable") ? "开启" : "关闭")\(setupAction.contains("memory") ? "每分钟观察、满足安全条件才回收的内存维护" : "每 12 小时仅处理托管槽的过期中间缓存维护")。未接入占用协议的模拟器、MCP 仍不会回收；已有缓存与任务目录不进入自动删除范围。")
+        }
+    }
+
+    private var setupControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("先看可用能力，再开启维护").font(.headline)
+            Text("已有缓存清理已经内置。自动维护是可选项；仅装好看板不代表后台正在清理。")
+                .font(.callout).foregroundColor(.secondary)
+            HStack {
+                Button("检查接入") { actions.run("setup") }
+                Button("安装命令工具") { configure("setup-install") }
+                Button("升级本工具") { configure("setup-upgrade") }
+            }
+            HStack {
+                Text("内存自动回收"); Spacer()
+                Button("开启") { configure("setup-memory-enable") }
+                Button("关闭") { configure("setup-memory-disable") }
+            }
+            HStack {
+                Text("托管槽定期清理"); Spacer()
+                Button("开启") { configure("setup-storage-enable") }
+                Button("关闭") { configure("setup-storage-disable") }
+            }
+        }.disabled(actions.busy).padding(.horizontal, 20).padding(.bottom, 16)
+    }
+
+    private func configure(_ action: String) {
+        setupAction = action; confirmingSetup = true
     }
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if tab == "storage" {
+                Picker("缓存范围", selection: $storageFamily) {
+                    Text("已有缓存与大项占用").tag("common")
+                    Text("固定构建槽").tag("storage")
+                }.pickerStyle(.segmented).disabled(actions.busy)
+                if storageFamily == "common" {
+                    Button("选择任务目录（只统计，不删除）") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true; panel.canChooseFiles = false
+                        panel.allowsMultipleSelection = false
+                        if panel.runModal() == .OK, let url = panel.url {
+                            actions.run("task", action: "task-select", path: url.path)
+                        }
+                    }.disabled(actions.busy)
+                }
+            }
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(tab == "storage" ? "构建缓存" : "后台回收预览").font(.headline)
@@ -192,14 +266,14 @@ struct Dashboard: View {
                     }
                 }
                 Spacer()
-                Button(tab == "storage" ? "扫描缓存" : "诊断后台") { actions.run(tab) }
+                Button(tab == "storage" ? "扫描缓存" : "诊断后台") { actions.run(family) }
                     .disabled(actions.busy)
                 Button(tab == "storage" ? "清理规则内缓存" : "安全回收") { confirming = true }
                     .buttonStyle(.borderedProminent)
                     .disabled(actions.busy || preview?.canClean != true)
             }
             Text(tab == "storage"
-                 ? "只处理编译中间文件、索引、模块与 SDK 状态缓存；范围沿用已安装工具的配置。"
+                 ? "已有缓存无需接入构建脚本；仅清理四类中间目录。大项占用不计入可清理量。"
                  : "模拟器回收仅关机；MEM 是进程记账，不能相加当作可释放内存。")
                 .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             if let created = preview?.created {
@@ -233,6 +307,12 @@ private struct ResourceGroup: View {
                     }
                     Text(row.reason).font(.caption).foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let command = row.command {
+                        Button("复制收尾核对命令") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(command, forType: .string)
+                        }.font(.caption)
+                    }
                 }.padding(.vertical, 9)
                 Divider()
             }

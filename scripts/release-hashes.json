@@ -1,0 +1,157 @@
+{
+  ".github/workflows/verify.yml": [
+    "2e3f6c1f0fc0478a972ccb434fb06250c0ee05dc822a11155ed9667f4d7e3dc3"
+  ],
+  ".gitignore": [
+    "45a63db46b0737b3dcfa22713c9a9a9aec6d6493d574c0c3e5b10d8d96d6de70"
+  ],
+  "README.md": [
+    "3703e447ab0e0c90ceb8be5b303813b99c8077f43e8623753cffd2e08c55f6ea",
+    "8b08b0336c1a28eef6619f3308a4448071a3a552ff3c2b96b649e8c78480f97c",
+    "dc8617bff51cbb89388f2191c9f8dd2bae03dcfa41f696c370e3db130781fe54"
+  ],
+  "SKILL.md": [
+    "06de39b151d45b982386575a7408b7885c48c843da96793d997f86b72c8553b4",
+    "4b5f18e0b386f07d5c6d13b386c9066dc71b821079e334daeb8f6c6b9e75da4e",
+    "ea7ad0e81daa7be3d4bf987e56022e014f5eae7fcdf35bd3fbbff65def6de557"
+  ],
+  "agents/openai.yaml": [
+    "3a36f2a19edafbe57f7e3858e560be3a0135f3a01520c32dd3f03ea3dc945665"
+  ],
+  "docs/widget.md": [
+    "0d71e0e1cd263f51a1b3c4646fdefca47cbeb92a31d43308875c491d7f4afdcb",
+    "5c799fd70611f0d6ba3f146a2045e6e280e8bd7c3dc6da4b59a45503d0bd33e8",
+    "8e5f5ab50705120d27dc95dd053b3aca992851f1ac86e86f65639e9a22aae6d3"
+  ],
+  "references/cache.md": [
+    "d72db469452275b1d8934e01a6a0d3e5f89258fd6d46af74fa29539e46457b09"
+  ],
+  "references/install.md": [
+    "52b4df6a5dcb9b3068143ac4b3ef11a830ba5c22c3ebcd528203dca923ba6d15"
+  ],
+  "references/memory.md": [
+    "f21c448d4a1268b9122b30d9195f65b1aca2a03e87543f13230ebbf39e531be3"
+  ],
+  "references/validation.md": [
+    "8194b80f825b5dd3f9a417f5d729ebef643f7e17f9fa1f823efa8a89953759a2"
+  ],
+  "runtime/memory/scripts/__init__.py": [
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ],
+  "runtime/memory/scripts/dev_memory.py": [
+    "217d165d3241b4bc88871509f571ef4ca197a6949a12bd94b4bb2bfdec59b74d"
+  ],
+  "runtime/memory/scripts/gradle_reclaim.py": [
+    "071b21f43097db09ccb51294ba3ac881b3faf062f858ba7f8068bb68cbd755ec"
+  ],
+  "runtime/memory/scripts/mcp_reclaim.py": [
+    "39b8046aad552bfb5a3b899c22ebcf9c2ba59f64d6f715eded37816a8f5b52ec"
+  ],
+  "runtime/memory/scripts/memory_external.py": [
+    "4c05eafbc90dd2cddc0215771fdb869fd12c6b0812129e88be1ead549164348e"
+  ],
+  "runtime/memory/tests/test_dev_memory.py": [
+    "9e7c5d0b31c67f38fcec15ca5e4101cdf45b0e21c446bf0d260cdeb950c9e516"
+  ],
+  "runtime/memory/tests/test_external_memory.py": [
+    "7399a0a8eac3a2c9d8025c8dea2a715bb351d86ea84fb0852446f1c4cd6f4b6f"
+  ],
+  "runtime/memory/tests/test_gradle_reclaim.py": [
+    "f2ebc5def2f624f698ecec7049fd7d9d1addbdc3087a8d8ace1455c8ba2f97d1"
+  ],
+  "runtime/memory/tests/test_mcp_reclaim.py": [
+    "2d182633fc777ab3e8fc847b891e651dbc5f8441e53b22b9d9454329541dcfaa"
+  ],
+  "runtime/memory/tests/test_memory_runtime_safety.py": [
+    "16fb0d63f46827c46a47ab7820a8a421a1d5c0634973c00d358bc92b325cdbfa"
+  ],
+  "runtime/memory/tests/test_recovery_v21.py": [
+    "e8ac893873e8d1c09f59d704f5725ea213e4b1b90d5603643cdb69ce42fa8e52"
+  ],
+  "runtime/storage/cli.py": [
+    "94d8b8cd2b1d8b5ce1b819794d568aeb555e97d6800d6a8dba0eebb4ceddb33b"
+  ],
+  "runtime/storage/portable_config.py": [
+    "7d980c40afecac8fb2550bd5e09dd4d29cfcd5fa9f7d7ca00f26858cd6bd1452"
+  ],
+  "runtime/storage/slots.py": [
+    "a0f487776dccaee5ea7a2b2b141f096cbf6064e345a23d6bd2857cd65d54f118"
+  ],
+  "runtime/storage/storage.py": [
+    "96a9f6a03fc75aa32bffcb3538dd5aaeecd16c9b9d2503b0e22460583caf6937"
+  ],
+  "runtime/storage/tests/test_cli.py": [
+    "f4d97d74208fa857055f8657a39d94e28e6bbdf126504d21779190c51a32fdd8"
+  ],
+  "runtime/storage/tests/test_lease_task_identity.py": [
+    "3f35af58bb95782724e41ef183303cd16b69b79ff4eb5e027df5fff499d85cd9"
+  ],
+  "runtime/storage/tests/test_managed_gc.py": [
+    "12051495f8f9215cd2dd540560b244e98a3d9701d9fa2527cf10d5e5635ce7ed"
+  ],
+  "runtime/storage/tests/test_review_safety.py": [
+    "123013d458f89b6e231c374b39fa42fc081f236d58b5ead6c2538bcf6c4ebe48"
+  ],
+  "runtime/storage/tests/test_slots.py": [
+    "087cd0043599b53e85a9e60c2469940414c000ea517dd882f5bb52ba492f95fb"
+  ],
+  "runtime/storage/tests/test_storage.py": [
+    "28105b304520e4950e88a0ae4a2975f3dc40ba38adb52436ef81cbf5239aa931"
+  ],
+  "scripts/setup.py": [
+    "2ee2de142a526afa7ccc4bced60f094935b2d74d23e76cefd341f06f77a41dfd"
+  ],
+  "scripts/verify.py": [
+    "c7ec60fb33d50cf67ba5dcf4777650fae7d4c624d8737fde3d40c2db6d5a8a34"
+  ],
+  "tests/test_portable.py": [
+    "30a0528946e990db91f97867f1ec3960a1d47bba5df243284cefb09cee7ad1b5"
+  ],
+  "widget/build.py": [
+    "4fe98d75b52ee96e2a39db4051677ea7d2e30b65711c329132b7d505b8b8556c",
+    "614a40c23e21617fa7db5680dc79d69b6929dfe930b82c408e2a18b5a2971745",
+    "9d153b28b0cc7c52bddbbde6fe17b028a1dcff93da6808ef63cad69e09f80ffc"
+  ],
+  "widget/main.swift": [
+    "2a91d7eb60b84ad869ef1ed311b9f7df4126f2861fba86b94484eaeb00513189",
+    "5b3a0eb6986560391214882d034340f9295f96adbf77bc54d37b1ee653fbc810",
+    "a96b282993305a73e1e0c2f49a33d5f7c55bd54f26d1eaf1588740733420669b"
+  ],
+  "docs/epics/resource-dashboard/brief.md": [
+    "681c6d462a0fa1043af65830f674692ce054814531b45f5c9d169bdedd1ca9fd",
+    "b6ee69af97cc2bcbb6240da5ef71d115acb8e28daf0a4032f9024f661b9dc673"
+  ],
+  "docs/epics/resource-dashboard/specs/dashboard-actions.md": [
+    "668630459c59744d582c623c4c31a9d056e1928fb31c577f01796881b14f72cb"
+  ],
+  "docs/epics/resource-dashboard/specs/dashboard-actions.raw-input.md": [
+    "e4aa0e2c51147c2e9b5b315c39e6392f37d0d361962650f0d80f52660f8a757f"
+  ],
+  "docs/epics/resource-dashboard/specs/dashboard-actions.test-cases.md": [
+    "1a2f54b650104b9f8dd9cf1ed9c5b5750173e347cf24a116d38f4b1b5ddf2ad5"
+  ],
+  "tests/dashboard_fixture.py": [
+    "cec5b98e448812adc43e8b074adf6c567f2374f75ba4bb50aacd51d40d2dd819"
+  ],
+  "tests/test_dashboard.py": [
+    "773b21b3f7e2bcfa81a8afd5a51d6bfb7c678d60f8b7f19fbdd16553a3a52574"
+  ],
+  "widget/Actions.swift": [
+    "af079ac4e039a3bb02fc753e84c68be6c4e3690de2afe46b8e7099b5c59008f4"
+  ],
+  "widget/Shortcut.swift": [
+    "284cfa3066b9967aa5d51766698e152a8db2449ecdce6d278bb8f9b1c6a4903d"
+  ],
+  "widget/backend.py": [
+    "ed0aadb1065f0754ea62bae47c9d8491b4a9a1c66b649b3a56f12d18b70056e2"
+  ],
+  "docs/epics/resource-dashboard/specs/menubar-presence.md": [
+    "e89bfd6153033d103c3d849e6bf8edba750ac2ba7ad904c23df09ee5ff3407ae"
+  ],
+  "docs/epics/resource-dashboard/specs/menubar-presence.raw-input.md": [
+    "25d34cc9a7ada118ba7ea13a4b250c745c75f0d264ce768af039bba0b9cfdac6"
+  ],
+  "docs/epics/resource-dashboard/specs/menubar-presence.test-cases.md": [
+    "28473639eb9e5734218093e69fdf9b113f9f49122f4238d0179fb695a96d88fb"
+  ]
+}

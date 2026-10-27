@@ -30,6 +30,8 @@ def main(argv=None):
     check.add_argument('--required-gib', type=int, help='Advisory reserve for this check; does not block builds')
     plan = sub.add_parser('plan', help='Read-only scan with active-use protection')
     plan.add_argument('--output', type=Path)
+    apply_plan = sub.add_parser('apply-plan', help='Explicit one-shot cleanup of an unexpired preview, rechecking every candidate')
+    apply_plan.add_argument('--input', type=Path, required=True)
     maintain = sub.add_parser('maintain', help='Preview by default; --apply performs bounded cleanup')
     maintain.add_argument('--apply', action='store_true')
     maintain.add_argument('--scan', action='store_true', help='Scan even when healthy and scanned in the last 24 hours')
@@ -54,6 +56,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     settings = configure()
     manager = StorageManager(settings)
+    if args.command == 'apply-plan':
+        result = json.loads(args.input.read_text())
+        if result.get('schema_version') != 1 or not 0 <= time.time() - result.get('created', 0) <= 300:
+            emit({'status': 'rejected', 'message': '预览已过期，未执行；请重新扫描'})
+            return 2
+        applied = manager.apply(result, manual=True)
+        emit(applied)
+        return 2 if applied['errors'] else 0
     if args.command in {'status', 'check'}:
         free = manager.free_bytes()
         value = {'free_gib': round(free / GIB, 2), 'target_free_gib': settings.target_free_gib,
@@ -118,7 +128,7 @@ def main(argv=None):
         atomic_json(manager.state_root / 'last-plan.json', result)
         if args.command == 'plan' and args.output:
             atomic_json(args.output, result)
-        emit({'phase': 'plan_complete', **summarize(result), 'plan_path': str(manager.state_root / 'last-plan.json')})
+        emit({'phase': 'plan_complete', 'manual_apply_supported': True, **summarize(result), 'plan_path': str(manager.state_root / 'last-plan.json')})
         if args.command == 'maintain' and args.apply:
             applied = manager.apply(result)
             emit(applied)

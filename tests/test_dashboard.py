@@ -16,7 +16,7 @@ spec.loader.exec_module(backend)
 
 
 def memory(**overrides):
-    result = dict(paused=False, managed_resources=[], external_resources=[], actions=[], pending_requests=[], top_memory=[])
+    result = dict(paused=False, manual_clean_supported=True, managed_resources=[], external_resources=[], actions=[], pending_requests=[], top_memory=[])
     result.update(overrides)
     return result
 
@@ -40,7 +40,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(name, 'dev-storage')
             self.assertEqual(args[:2], ['plan', '--output'])
             backend.atomic_json(Path(args[2]), plan())
-            return [dict(phase='planning'), dict(phase='plan_complete')]
+            return [dict(phase='planning'), dict(phase='plan_complete', manual_apply_supported=True)]
         with patch.object(self.adapter, 'command', side_effect=command):
             return self.adapter.run('storage-preview')
 
@@ -68,7 +68,7 @@ class DashboardTests(unittest.TestCase):
         output = dict(status='ok', deleted=[{}], kept=[{}], errors=[], observed_free_delta_bytes=1024**3)
         with patch.object(self.adapter, 'command', return_value=[output]) as run:
             value = self.adapter.run('storage-clean', preview['token'])
-            run.assert_called_once_with('dev-storage', ['maintain', '--apply', '--scan'])
+            run.assert_called_once_with('dev-storage', ['apply-plan', '--input', str(self.adapter.state / 'storage-plan.json')])
             self.assertEqual(value['status'], 'ok')
             self.assertIn('+1.00 GiB', value['message'])
             with self.assertRaises(ValueError): self.adapter.run('storage-clean', preview['token'])
@@ -93,7 +93,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
 
     def test_paused_memory_disables_reclaim_without_resuming(self):
-        body = memory(paused=True, external_resources=[dict(id='gradle:1', kind='gradle', eligible=True)])
+        body = memory(paused=True, manual_clean_supported=False, external_resources=[dict(id='gradle:1', kind='gradle', eligible=True)])
         with patch.object(self.adapter, 'command', return_value=[body]) as run:
             value = self.adapter.run('memory-preview')
             self.assertEqual(value['eligible'], 0)
@@ -114,7 +114,7 @@ class DashboardTests(unittest.TestCase):
         body.update(actions=[dict(result=dict(accepted=True, stopped=False))], pending_requests=[{}])
         with patch.object(self.adapter, 'command', return_value=[body]) as run:
             result = self.adapter.run('memory-clean', value['token'])
-        run.assert_called_once_with('dev-memory', ['clean', '--json'])
+        run.assert_called_once_with('dev-memory', ['clean-once', '--json', '--id', 'mcp:1'])
         self.assertIn('正常退出 0 项，待核实 1 项', result['message'])
 
     def test_schema_failures_keep_cleaning_disabled(self):
@@ -123,9 +123,25 @@ class DashboardTests(unittest.TestCase):
         with self.assertRaises(ValueError): backend.rows_storage({'candidates':[]})
         with self.assertRaises(ValueError): backend.json_stream('{"status":"ok"}garbage')
 
-    def test_missing_command_has_no_path_fallback(self):
-        with self.assertRaisesRegex(ValueError, '未安装'):
+    def test_invalid_existing_command_has_no_bundled_fallback(self):
+        tool = self.home / '.local/bin/dev-memory'
+        tool.parent.mkdir(parents=True)
+        tool.write_text('broken existing installation')
+        with self.assertRaisesRegex(ValueError, '不可执行'):
             self.adapter.run('memory-preview')
+
+    def test_paused_capable_backend_performs_only_selected_manual_cleanup(self):
+        body = memory(paused=True, manual_clean_supported=True,
+                      external_resources=[dict(id='gradle:1', kind='gradle', eligible=True)])
+        with patch.object(self.adapter, 'command', return_value=[body]):
+            preview = self.adapter.run('memory-preview')
+        self.assertEqual(preview['eligible'], 1)
+        body.update(manual=True, actions=[dict(id='gradle:1', result=dict(stopped=True))])
+        with patch.object(self.adapter, 'command', return_value=[body]) as run:
+            result = self.adapter.run('memory-clean', preview['token'])
+        run.assert_called_once_with('dev-memory', ['clean-once', '--json', '--id', 'gradle:1'])
+        self.assertIn('正常退出 1 项', result['message'])
+        self.assertIn('仍暂停', result['message'])
 
     def test_multiple_window_operation_lock(self):
         import fcntl
@@ -134,6 +150,27 @@ class DashboardTests(unittest.TestCase):
             with patch.object(self.adapter, 'command') as run:
                 self.assertEqual(self.adapter.run('storage-preview')['status'], 'busy')
                 run.assert_not_called()
+
+    def test_isolated_ui_never_mutates_real_launchd(self):
+        with patch.object(backend, 'run_setup') as run:
+            for action in ('setup-memory-enable', 'setup-memory-disable', 'setup-storage-enable', 'setup-storage-disable'):
+                with self.assertRaisesRegex(ValueError, 'launchd'):
+                    self.adapter.run(action)
+            run.assert_not_called()
+
+    def test_unpaused_legacy_memory_is_readonly(self):
+        body = memory(paused=False, manual_clean_supported=False,
+                      external_resources=[dict(id='legacy:1', kind='mcp', eligible=True)])
+        with patch.object(self.adapter, 'command', return_value=[body]):
+            value = self.adapter.run('memory-preview')
+        self.assertEqual(value['eligible'], 0)
+
+    def test_definite_rejection_allows_rescan_without_unknown_barrier(self):
+        preview = self.storage_preview()
+        with patch.object(self.adapter, 'command', return_value=[dict(status='rejected', message='expired')]):
+            result = self.adapter.run('storage-clean', preview['token'])
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(self.storage_preview()['status'], 'ok')
 
     def test_subprocess_cli_end_to_end_without_shell(self):
         tool = self.home/'.local/bin/dev-memory'

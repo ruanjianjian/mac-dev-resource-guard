@@ -450,7 +450,7 @@ class StorageManager:
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def apply(self, plan, activity_factory=None, now=None):
+    def apply(self, plan, activity_factory=None, now=None, manual=False):
         now = time.time() if now is None else now
         collect = activity_factory or (lambda: Activity.collect(self.settings.lease_root))
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -470,7 +470,7 @@ class StorageManager:
                 if not self._path_safe(path):
                     result['kept'].append({'path': str(path), 'reason': 'path outside cache deletion contract'})
                     continue
-                if (self.free_bytes() >= self.settings.target_free_gib * GIB and
+                if (not manual and self.free_bytes() >= self.settings.target_free_gib * GIB and
                         accounting_remaining <= self.settings.intermediate_budget_gib * GIB):
                     break
                 scope, worktree, slot = self._context(path)
