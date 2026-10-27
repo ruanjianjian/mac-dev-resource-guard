@@ -315,6 +315,8 @@ def inspect_resources(table, state, now, knowledge_ok):
             continue
         try:
             probe = resource_request(rec, "probe")
+            rec['single_stop_supported'] = probe.get('single_stop_supported') is True
+            item['single_stop_supported'] = rec['single_stop_supported']
             proc = table.get(rec.get("pid"))
             birth = identity(rec.get("pid", -1))
             if not proc or not birth:
@@ -480,6 +482,10 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
         # Device occupancy is optional. Owned tail supervisors establish their
         # own identity boundary; malformed existing protection still raises above.
         resources, records = inspect_resources(table, state, now, True)
+        if paused:
+            for resource in resources:
+                if resource.get('eligible') and not resource.get('single_stop_supported'):
+                    resource.update(eligible=False, reason='legacy_supervisor_paused_preserved')
         if owned_only:
             external, external_records = [], {}
         else:
@@ -519,7 +525,7 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
                     if is_external:
                         result = external_module().reclaim(item['kind'], rec, STATE)
                     else:
-                        result = resource_request(rec, 'stop_if_orphan_once' if manual else 'stop_if_orphan')
+                        result = resource_request(rec, 'stop_if_orphan_once' if manual and rec.get('single_stop_supported') else 'stop_if_orphan')
                     if not isinstance(result, dict):
                         raise ValueError('invalid shutdown response')
                     if type(result.get('stopped')) is not bool:
@@ -664,7 +670,7 @@ def supervise(args):
                     p = table.get(child.pid)
                     protected = not p or bool(NON_RECLAIMABLE.search(p.command))
                     safe = owner_dead and leaf and not protected and current is not None and current["start"] == born["start"]
-                    result = {"owner_dead": owner_dead, "safe_to_stop": safe, "stopped": False, "accepted": False}
+                    result = {"owner_dead": owner_dead, "safe_to_stop": safe, "stopped": False, "accepted": False, "single_stop_supported": True}
                     if req.get("action") in ("stop_if_orphan", "stop_if_orphan_once"):
                         # Automatic requests honor pause at the endpoint. An
                         # explicit one-shot request still requires the same safety proof.

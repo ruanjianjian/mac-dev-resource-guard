@@ -34,3 +34,6 @@
 ## 新用户清理（1.2）
 
 行为规格统一维护在[新用户清理规格](epics/resource-dashboard/specs/new-user-cleanup.md)和对应 test-cases。已有缓存入口独立于构建脚本接入；接入设置提供能力检查及明确确认后的自动维护配置。新版单次回收独立于自动暂停，旧后端不兼容时明确提示，保持原状态。
+# 1.3 安装后自动维护
+
+使用 scripts/install.py 完整安装。接入设置同时提供「完成安装并开启维护」和「接入项目构建缓存」，显示实际旧/新调度、真实清理回执、项目构建次数和复用证据。旧命令保留，安装后看板使用内置完整协议。自动磁盘范围增加默认 DerivedData 的过期中间目录；模拟器、任务目录仍保留。详细行为见 [自动维护规格](epics/resource-dashboard/specs/automatic-maintenance.md)。

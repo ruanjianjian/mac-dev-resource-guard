@@ -31,6 +31,7 @@ REASONS = {
     'inspection_unavailable_preserved': '无法核实，保留',
     'pending_readonly_no_retry': '上次请求待核实，保留且不重发',
     'cleanup_cooldown': '处于十分钟回收冷却期，请稍后重新诊断',
+    'legacy_supervisor_paused_preserved': '旧托管进程不支持暂停时单次退出；保持暂停和进程，不发送未知请求。新建托管后台请使用 resource-guard-memory。',
 }
 
 
@@ -126,7 +127,12 @@ class Adapter:
 
     def command(self, name, args):
         tool = self.home / '.local/bin' / name
-        if tool.exists() or tool.is_symlink():
+        # Completing installation opts into the bundled protocol without replacing
+        # legacy commands. Both implementations retain the same protection state.
+        active = (self.home / '.local/state/dev-resource-guard/installation.json').is_file()
+        if active:
+            command = [sys.executable, str(tool_path(name))]
+        elif tool.exists() or tool.is_symlink():
             if not tool.is_file() or not os.access(tool, os.X_OK):
                 raise ValueError('{} 现有命令不可执行，请先修复；未绕过现有工具'.format(name))
             command = [str(tool)]
@@ -283,14 +289,23 @@ class Adapter:
             if family == 'setup':
                 if self.isolated and verb not in ('preview', 'install', 'upgrade'):
                     raise ValueError('隔离界面不操作真实 launchd；调度使用独立测试服务验证。')
-                if verb == 'install':
+                if verb == 'activate':
+                    result = subprocess.run([sys.executable, str(engine_root() / 'scripts/service.py'), 'activate'],
+                                            capture_output=True, text=True)
+                    if result.returncode: raise ValueError(result.stderr.strip())
+                elif verb == 'install':
                     run_setup(self.home, ['install'])
                 elif verb == 'upgrade':
                     run_setup(self.home, ['upgrade'])
                 elif verb != 'preview':
                     kind, operation = verb.split('-')
-                    run_setup(self.home, [('enable' if operation == 'enable' else 'disable') + '-scheduler', kind])
-                    if kind == 'memory':
+                    if (self.home / '.local/state/dev-resource-guard/installation.json').is_file():
+                        sys.path.insert(0, str(engine_root() / 'scripts'))
+                        from service import set_enabled
+                        set_enabled(self.home, kind, operation == 'enable')
+                    else:
+                        run_setup(self.home, [('enable' if operation == 'enable' else 'disable') + '-scheduler', kind])
+                    if kind == 'memory' and not (self.home / '.local/state/dev-resource-guard/installation.json').is_file():
                         tool = self.home / '.local/bin/dev-memory'
                         result = subprocess.run([str(tool), 'resume' if operation == 'enable' else 'pause'], capture_output=True, text=True)
                         if result.returncode:
@@ -302,6 +317,11 @@ class Adapter:
                     raise ValueError('请选择真实的任务目录')
                 atomic_json(self.state / 'task.json', dict(path=str(target.resolve())))
                 return dict(status='ok', message='已保存任务目录；扫描已有缓存时一并统计，只提供核对命令。', rows=[])
+            if family == 'project':
+                sys.path.insert(0, str(engine_root() / 'scripts'))
+                from service import integrate
+                integrate(self.home, Path(path or ''))
+                return setup_status(self.home)
             return self.preview(family) if verb == 'preview' else self.clean(family, token)
 
 
@@ -309,7 +329,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['storage-preview', 'storage-clean', 'common-preview', 'common-clean', 'memory-preview', 'memory-clean',
                                           'setup-preview', 'setup-install', 'setup-upgrade', 'setup-memory-enable', 'setup-memory-disable',
-                                          'setup-storage-enable', 'setup-storage-disable', 'task-select'])
+                                          'setup-storage-enable', 'setup-storage-disable', 'setup-activate', 'task-select', 'project-integrate'])
     parser.add_argument('--token')
     parser.add_argument('--path')
     parser.add_argument('--home', type=Path, help='Explicit isolated test home; no command PATH fallback')

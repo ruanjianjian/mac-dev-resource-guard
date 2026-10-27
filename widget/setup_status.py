@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+from datetime import datetime
 
 
 def row(key, title, reason, detail='', size=None, command=None):
@@ -42,27 +43,61 @@ def loaded(home, kind):
 
 
 def status(home):
+    sys.path.insert(0, str(engine_root() / 'scripts'))
+    from service import schedulers
+    installation = home / '.local/state/dev-resource-guard/installation.json'
+    active = installation.is_file()
     rows = [row('common', '已有 Xcode 缓存', '已内置：扫描默认 DerivedData 中四类中间缓存，无需改构建脚本；手动确认清理。')]
     rows[0]['outcome'] = '已内置'
     for name in ('dev-storage', 'dev-memory'):
         tool = home / '.local/bin' / name
         exists = tool.exists() or tool.is_symlink()
-        rows.append(row(name, name, '复用现有命令，不覆盖。' if exists else '使用 App 内置实现；安装命令工具后可配置周期维护。', str(tool)))
-        rows[-1]['outcome'] = '复用' if exists else '使用内置'
+        rows.append(row(name, name, '看板使用内置完整协议；原命令、pin 与占用记录保留。' if active else
+                        ('复用现有命令；完成安装可启用内置完整协议。' if exists else '使用 App 内置实现；完成安装后自动维护。'), str(tool)))
+        rows[-1]['outcome'] = '内置引擎' if active else ('复用' if exists else '使用内置')
     paused = (home / '.local/state/dev-memory/paused').exists()
     for kind, title in (('memory', '自动内存回收'), ('storage', '每 12 小时磁盘维护')):
-        enabled = loaded(home, kind)
-        reason = '调度已加载' if enabled else '未启用：尚未加载定时任务'
+        jobs = schedulers(home, kind)
+        enabled = any(j['loaded'] for j in jobs)
+        is_paused = paused if kind == 'memory' else (home / '.local/state/dev-resource-guard/storage-paused').exists()
+        reason = '已加载：' + '、'.join(j['label'] for j in jobs if j['loaded']) if enabled else '未启用：尚未加载定时任务'
         if kind == 'memory' and paused:
             reason += '；自动回收暂停，支持单次回收的后端仍可手动操作'
         if kind == 'storage':
-            reason += '；仅托管槽，不包含已有 Xcode 缓存、任务目录和设备'
+            reason += ('；本工具维护包含托管槽和至少七天未用的已有 Xcode 中间缓存；任务目录和设备保留'
+                       if any(j['ours'] for j in jobs) else '；旧调度清理范围未确认' if jobs else '；完成安装后覆盖托管槽和已有 Xcode 中间缓存')
         rows.append(row(kind, title, reason))
-        rows[-1]['outcome'] = '暂停' if enabled and kind == 'memory' and paused else ('已加载' if enabled else '未启用')
+        rows[-1]['outcome'] = '暂停' if enabled and is_paused else ('已加载' if enabled else '未启用')
     rows.append(row('devices', '模拟器自动收尾',
                     '已检测到 devlease；实际可用性与占用须在诊断时复核。' if (home / '.local/bin/devlease').is_file()
                     else '未接入设备占用协议：不会关闭或删除模拟器。磁盘页仍可查看其占用。'))
     rows.append(row('broker', 'MCP 自动收尾', '需要兼容 broker；未接入的实例保留，不强杀。'))
+    if active:
+        info = json.loads(installation.read_text())
+        rows.append(row('installation', '安装结果', info.get('error', '完整引擎已安装；调度状态以上方实际检查为准。'), info.get('runtime', '')))
+        rows[-1]['outcome'] = {'active':'已完成','partial':'部分完成','configuring':'正在配置'}.get(info.get('status'),'未知')
+    auto = home / '.local/state/dev-resource-guard/automatic-storage.json'
+    if auto.is_file():
+        data = json.loads(auto.read_text())
+        completed = sum(len(r['result'].get('deleted', [])) for r in data.get('results', []))
+        amount = sum(e.get('directory_accounting_bytes', 0) for r in data.get('results', []) for e in r['result'].get('deleted', []))
+        when = datetime.fromtimestamp(data['at']).astimezone().strftime('%m-%d %H:%M')
+        rows.append(row('automatic-last', '自动清理最近结果', '{} 项完成；{}；大小为目录计量。{}'.format(completed, when, data.get('error','')), size=amount))
+        rows[-1]['outcome'] = {'complete':'已完成','running':'运行中','paused':'已暂停','error':'失败','busy':'等待空闲'}.get(data.get('status'),'未知')
+    project = home / '.local/state/dev-resource-guard/project.json'
+    if project.is_file():
+        info = json.loads(project.read_text())
+        settings = __import__('portable_config').configure(home)
+        manifests = []
+        for p in (settings.state_root / 'slots').glob('*.json'):
+            value = json.loads(p.read_text())
+            if value.get('worktree') == info['path']: manifests.append(value)
+        builds = sum(m.get('successful_builds', 0) for m in manifests)
+        reused = any(m.get('successful_builds', 0) >= 2 for m in manifests)
+        rows.append(row('project', '项目构建缓存', '已验证同槽重复构建' if reused else
+                        '入口已生成；成功构建 {} 次，尚未验证重复复用。已有脚本需调用此入口。'.format(builds), info['path'],
+                        command=shlex.quote(info['wrapper']) + ' --platform ios-simulator --configuration Debug -- xcodebuild <原构建参数>'))
+        rows[-1]['outcome'] = '复用已验证' if reused else '待构建验证'
     for kind, path in (('磁盘', home / '.local/state/dev-storage/last-maintenance.json'),
                        ('内存', home / '.local/state/dev-memory/last-cleanup.json')):
         if path.is_file():
@@ -86,7 +121,7 @@ def inventory(home, task_path=None):
         size = None
         if path.exists() and not path.is_symlink():
             try:
-                result = subprocess.run(['/usr/bin/du', '-sk', str(path)], text=True, capture_output=True, timeout=8)
+                result = subprocess.run(['/usr/bin/du', '-sk', str(path)], text=True, capture_output=True, timeout=120)
                 if result.returncode == 0:
                     size = int(result.stdout.split()[0]) * 1024
                 else:
