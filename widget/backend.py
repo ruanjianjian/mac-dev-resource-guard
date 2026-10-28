@@ -117,7 +117,9 @@ def rows_memory(body):
 
 
 KIND_TITLES = {'simulator-delete': '删除模拟器', 'simulator-shutdown': '关闭模拟器', 'task-delete': '删除任务目录',
-               'runtime-delete': '删除运行时', 'move': '搬到外接盘', 'prune': '删构建产物', 'tool-cache': '清工具缓存'}
+               'runtime-delete': '删除运行时', 'move': '搬到外接盘', 'prune': '删构建产物', 'tool-cache': '清工具缓存',
+               'installer-delete': '删除安装包', 'trash-empty': '清空', 'device-support-delete': '删除',
+               'archive-delete': '删除', 'cache-move': '缓存搬到外接盘'}
 OUTCOMES = {'pending': '待确认', 'failed': '上次失败', 'ignored': '已忽略', 'done': '已完成', 'aborted': '已放弃', 'skipped': '已跳过'}
 TIER_STATUS = {
     'disabled': '自动档未打开：在「接入设置」打开后，空间低于提醒线时会自动搬迁闲置任务目录、删可重新生成的构建产物。',
@@ -134,6 +136,64 @@ def tier_modules():
             sys.path.insert(0, str(engine_root() / folder))
     import ask_tier, auto_tier, tiers_config
     return ask_tier, auto_tier, tiers_config
+
+
+def checkup_modules():
+    tier_modules()
+    import checkup, toolcaches
+    return checkup, toolcaches
+
+
+SUGGESTION_TITLES = {'caches': '共享构建缓存', 'clean': '自动清理', 'external': '使用外接盘'}
+
+
+def gb(value):
+    return '{:.0f} GB'.format(value / 1073741824) if value is not None else '读不到'
+
+
+def short(home, path):
+    path = str(path)
+    return '~' + path[len(str(home)):] if path.startswith(str(home) + '/') else path
+
+
+def rows_checkup(home, cfg, report, freed, gone):
+    """The checkup page in rows; the panel lays them out by category."""
+    checkup, _ = checkup_modules()
+    rows = []
+    for drive in gone:
+        what = '、'.join(drive['caches']) or '没有缓存'
+        rows.append(dict(id='gone:' + drive['volume'], title='外接盘「{}」未连接'.format(drive['name']), category='提醒',
+                         reason='暂时不能用：{}；{} 个任务在上面。用到它们的构建会报「盘未连接」类错误，插回即可。'.format(what, drive['tasks']),
+                         detail=drive['volume'], bytes=None, eligible=False, command=None, outcome='未连接'))
+    states = checkup.suggestion_state(home, cfg, report)
+    effect = dict(caches=sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local') if (cfg['external_root'] or report.get('recommended')) else None,
+                  clean=sum(t['bytes'] or 0 for t in report['tasks'] if t['idle'] and not t['linked']) or None, external=None)
+    for key in checkup.SUGGESTIONS:
+        state = states[key]
+        rows.append(dict(id=key, kind='suggestion', title=SUGGESTION_TITLES[key], category='建议', reason=state['detail'], detail='',
+                         bytes=effect[key] or None, eligible=state['available'], command=None,
+                         outcome='已开启' if state['on'] else ('未开启' if state['available'] else '不可用')))
+    for root in report['roots']:
+        external = next((str(r['external']) for r in cfg['task_roots'] if str(r['path']) == root['path'] and r['external']), None)
+        rows.append(dict(id='root:' + root['path'], title=short(home, root['path']), category='任务目录', bytes=None, eligible=False,
+                         command=None, outcome='{} 个任务'.format(root['tasks']),
+                         reason=('闲置的挪到' + checkup.drive_label(external)) if external else ('已在设置里' if root['configured'] else '体检时找到的'),
+                         detail=''))
+    for drive in report['drives']:
+        used = cfg['external_root'] is not None and str(cfg['external_root']).startswith(drive['path'] + '/')
+        rows.append(dict(id='drive:' + drive['path'], title=drive['name'], category='外接盘', bytes=drive['free'], eligible=drive['usable'],
+                         command=None, outcome='在用' if used else ('推荐' if report.get('recommended') and report['recommended']['path'] == drive['path'] else ('可用' if drive['usable'] else '不可用')),
+                         reason=('剩余空间 ' + gb(drive['free'])) if drive['usable'] else drive['reason'], detail=drive['path']))
+    for item in report['categories']:
+        rows.append(dict(id='space:' + item['id'], title=item['title'], category='空间去哪了', bytes=item['bytes'], eligible=False,
+                         command=None, outcome=item['where'], reason=item['handling'] + ('；' + item['note'] if item['note'] else ''),
+                         detail=''))
+    for cache in report['caches']:
+        status = dict(moved='已搬到外接盘', linked='已是链接', custom='你改过位置', local='在内置盘', stays='留在内置盘')[cache['status']]
+        rows.append(dict(id='cache:' + cache['key'], title=cache['name'], category='工具缓存', bytes=cache['bytes'], eligible=False,
+                         command=None, outcome=status, reason=cache['note'] or short(home, cache['path']),
+                         detail=short(home, cache['path']) + (' → ' + cache['dest'] if cache.get('dest') else '')))
+    return rows
 
 
 def rows_pending(pending):
@@ -153,8 +213,9 @@ def rows_auto(home):
     root = home / '.local/state/dev-resource-guard'
     receipt = read_json(root / 'auto-tier.json') if (root / 'auto-tier.json').is_file() else None
     if receipt is None:
-        return [dict(id='auto-status', title='自动档', category='自动处理记录', reason='还没有运行过。', detail='',
+        rows = [dict(id='auto-status', title='自动档', category='自动处理记录', reason='还没有运行过。', detail='',
                      bytes=None, eligible=False, command=None, outcome='未运行')]
+        return rows + rows_log(root)
     when = time.strftime('%m-%d %H:%M', time.localtime(receipt['at']))
     status = receipt['status']
     done = [a for a in receipt.get('actions', []) if a['result'] == 'done']
@@ -170,6 +231,16 @@ def rows_auto(home):
     for path in receipt.get('external_missing', []):
         rows.append(dict(id='external:' + path, title='外接开发盘未连接', category='自动处理记录', reason='本轮改为删构建产物：' + path,
                          detail=path, bytes=None, eligible=False, command=None, outcome='提示'))
+    rows += rows_log(root)
+    for index, kept in enumerate(receipt.get('kept', [])):
+        rows.append(dict(id='kept:{}'.format(index), title='保留：' + Path(kept['path']).name, category='保留原因', reason=kept['reason'],
+                         detail=kept['path'], bytes=None, eligible=False, command=None, outcome='保留'))
+    return rows
+
+
+def rows_log(root):
+    """Every action taken, newest first: tier moves and prunes, and shared-cache moves."""
+    rows = []
     log = root / 'auto-tier-log.jsonl'
     entries = [json.loads(line) for line in log.read_text().splitlines()[-200:] if line.strip()] if log.is_file() else []
     for entry in reversed(entries):
@@ -178,10 +249,35 @@ def rows_auto(home):
             rows.append(dict(id='auto:{}:{}'.format(entry['at'], index), title='{}：{}'.format(KIND_TITLES.get(action['kind'], action['kind']), Path(action['path']).name or action['path']),
                              category='自动处理记录', reason=action.get('reason', ''), detail=stamp + ' · ' + action['path'] + (' → ' + action['dest'] if action.get('dest') else ''),
                              bytes=action.get('bytes') or None, eligible=False, command=None, outcome=OUTCOMES.get(action['result'], action['result'])))
-    for index, kept in enumerate(receipt.get('kept', [])):
-        rows.append(dict(id='kept:{}'.format(index), title='保留：' + Path(kept['path']).name, category='保留原因', reason=kept['reason'],
-                         detail=kept['path'], bytes=None, eligible=False, command=None, outcome='保留'))
     return rows
+
+
+def fixture_launchctl(home):
+    """Isolated tests record environment changes in a file instead of the real login session."""
+    record = home / '.fixture-launchctl.json'
+    def launchctl(*args):
+        env = json.loads(record.read_text()) if record.is_file() else {}
+        out = ''
+        if args[0] == 'getenv':
+            out = env.get(args[1], '')
+        elif args[0] == 'setenv':
+            env[args[1]] = args[2]
+        elif args[0] == 'unsetenv':
+            env.pop(args[1], None)
+        record.write_text(json.dumps(env))
+        return subprocess.CompletedProcess(args, 0, out + '\n' if out else '', '')
+    return launchctl
+
+
+def app_version():
+    """The installed app's version; 'dev' when run from the source tree."""
+    info = Path(__file__).resolve().parent.parent / 'Info.plist'
+    try:
+        import plistlib
+        body = plistlib.loads(info.read_bytes())
+        return '{}-{}'.format(body.get('CFBundleShortVersionString'), body.get('CFBundleVersion'))
+    except (OSError, ValueError):
+        return 'dev'
 
 
 def fixture_simctl(home):
@@ -396,8 +492,68 @@ class Adapter:
         done = sum(r['outcome'] == '已完成' for r in results)
         return dict(status='ok', message='已完成 {} 项，跳过或失败 {} 项。'.format(done, len(results) - done), rows=rows)
 
+    def checkup(self, verb, ids, path):
+        checkup, toolcaches = checkup_modules()
+        _, auto_tier, tiers_config = tier_modules()
+        sys.path.insert(0, str(engine_root() / 'scripts'))
+        from portable_config import configure
+        settings = configure(self.home)
+        owned = [settings.cache_roots[0], settings.state_root, self.state.parent]
+        cfg = tiers_config.load(self.home, owned=owned)
+        volumes, info, is_mount = Path('/Volumes'), checkup.discover.disk_info, os.path.ismount
+        launchctl = toolcaches.default_launchctl
+        if self.isolated:
+            volumes = self.home / 'Volumes'
+            fixture = self.home / '.fixture-diskutil.json'
+            details = json.loads(fixture.read_text()) if fixture.is_file() else {}
+            info = lambda mount: details.get(Path(mount).name, {})
+            is_mount = lambda mount: Path(mount).name in details
+            launchctl = fixture_launchctl(self.home)
+        if verb == 'status':   # a drive was unplugged: what does it take away?
+            gone = [d for d in checkup.disconnected(self.home, cfg, is_mount) if not path or d['volume'] == path]
+            rows = [dict(id='gone:' + d['volume'], title='外接盘「{}」已断开'.format(d['name']), category='提醒',
+                         reason='暂时不能用：{}；{} 个任务在上面。用到它们的构建会报错，插回即可。'.format('、'.join(d['caches']) or '没有缓存', d['tasks']),
+                         detail=d['volume'], bytes=None, eligible=False, command=None, outcome='未连接') for d in gone]
+            return dict(status='ok' if rows else 'skip', message=rows[0]['reason'] if rows else '', rows=rows)
+        notes = []
+        if verb == 'apply':
+            cfg, notes = checkup.apply(self.home, ids, owned, launchctl=launchctl)
+            if not self.isolated:
+                subprocess.run(['/bin/launchctl', 'kickstart', 'gui/{}/local.dev-resource-guard.storage'.format(os.getuid())],
+                               capture_output=True)
+        elif verb == 'off':
+            notes = [checkup.turn_off(self.home, ids[0] if ids else '', owned, launchctl=launchctl)]
+            cfg = tiers_config.load(self.home, owned=owned)
+        report = checkup.load_report(self.home)
+        version = app_version()
+        if verb == 'firstrun' and report and report.get('notified_version') == version:
+            return dict(status='skip', message='', rows=[])
+        if verb in ('scan', 'firstrun') or report is None or time.time() - report.get('at', 0) > 6 * 3600:
+            report = checkup.scan(self.home, cfg, volumes=volumes, info=info, is_mount=is_mount)
+        elif verb in ('apply', 'off'):
+            report['caches'] = toolcaches.inspect(self.home, cfg['external_root'])
+        ask_tier, _, _ = tier_modules()
+        pending = ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())
+        pending_bytes = sum(i.get('bytes') or 0 for i in pending['items'] if i['state'] == 'pending')
+        freed = checkup.estimate(report, cfg, pending_bytes)
+        if verb == 'firstrun':
+            report['notified_version'] = version
+            atomic_json(checkup.report_path(self.home), report)
+            return dict(status='ok', message=checkup.first_run_message(report, freed), rows=[], eligibleBytes=freed)
+        message = ''
+        if freed >= 1073741824 and not all(checkup.suggestion_state(self.home, cfg, report)[k]['on'] for k in checkup.SUGGESTIONS):
+            message += '按推荐全部开启后，预计可腾出约 {}。'.format(gb(freed))
+        if notes:
+            message += '；'.join(notes)
+        rows = rows_checkup(self.home, cfg, report, freed, checkup.disconnected(self.home, cfg, is_mount))
+        return dict(status='ok', message=message, rows=rows, eligibleBytes=freed,
+                    created=report.get('at'))
+
     def run(self, action, token=None, path=None, ids=None):
         family, verb = action.split('-', 1)
+        if family == 'checkup' and verb in ('preview', 'scan', 'firstrun', 'status'):
+            # Read-only: a long background checkup must not make the panel's buttons answer "busy".
+            return self.checkup(verb, [], path)
         with open(self.state / 'operation.lock', 'a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -405,6 +561,8 @@ class Adapter:
                 return dict(status='busy', message='资源看板已有操作正在运行，请稍后再试。', rows=[])
             if family in ('pending', 'auto'):
                 return self.tiers(family, verb, token, [i for i in (ids or '').split(',') if i])
+            if family == 'checkup':
+                return self.checkup(verb, [i for i in (ids or '').split(',') if i], path)
             if family == 'setup' and verb in ('auto-enable', 'auto-disable', 'ask-enable', 'ask-disable'):
                 _, _, tiers_config = tier_modules()
                 kind, operation = verb.split('-')
@@ -455,7 +613,9 @@ def main():
                                           'setup-preview', 'setup-install', 'setup-upgrade', 'setup-memory-enable', 'setup-memory-disable',
                                           'setup-storage-enable', 'setup-storage-disable', 'setup-activate', 'task-select', 'project-integrate',
                                           'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',
-                                          'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview'])
+                                          'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview',
+                                          'checkup-preview', 'checkup-scan', 'checkup-apply', 'checkup-off', 'checkup-firstrun',
+                                          'checkup-status'])
     parser.add_argument('--token')
     parser.add_argument('--path')
     parser.add_argument('--ids', help='Comma-separated pending ids the user ticked')

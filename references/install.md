@@ -1,6 +1,10 @@
 # 安装、启用与撤回
 
-## 1.3 完整安装与升级（推荐）
+## 1.5 一条命令安装与体检
+
+`curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash` 下载源码到 `~/.local/share/dev-resource-guard/source`，再运行 `scripts/install.py`；下载失败时已装版本不变。`RESOURCE_GUARD_REF` 可指定分支、`refs/tags/…` 或提交。体检页的开关写进 `auto-cleanup.json` 的 `caches_enabled`、`xcode_compile_cache`、`external_root`、`task_roots`、`auto_enabled`、`ask_enabled`。打开「共享构建缓存」会：写 `~/.config/dev-resource-guard/xcode-global.xcconfig`，在 `~/.zshenv`（以及已存在的 `~/.bash_profile`）加一段带标记的 `XCODE_XCCONFIG_FILE`，并 `launchctl setenv`；已有别人的全局 xcconfig 时不覆盖。关闭时移除这段、取消环境变量、还原缓存链接。
+
+## 1.3 完整安装与升级
 
 推荐 `python3 scripts/install.py`。安装动作包含开启安全自动维护；安装前告知范围：固定槽和至少七天未用的标准 Xcode 中间缓存，保留源码、Products、pin、lease、设备和任务。已有守护核实后复用，不重复启动。未知调度报部分完成；已知旧公开调度仅在空闲时迁移，忙碌时保留并允许重试。
 
@@ -31,7 +35,7 @@ python3 scripts/setup.py doctor
 python3 scripts/setup.py install
 ```
 
-安装至 `~/.codex/skills/mac-dev-resource-guard`，Claude 的同名 skill 符号链接指向它；命令包装器在 `~/.local/bin/`，两端共用状态和锁。命令不在 PATH 时使用绝对路径，或自行将 `~/.local/bin` 加入 PATH。安装器不会改 shell、AGENTS.md、hooks、插件、设备或账号。不要使用 sudo。`--home` 仅用于隔离安装测试。
+安装至 `~/.codex/skills/mac-dev-resource-guard`，Claude 的同名 skill 符号链接指向它；命令包装器在 `~/.local/bin/`，两端共用状态和锁。命令不在 PATH 时使用绝对路径，或自行将 `~/.local/bin` 加入 PATH。安装器不会改 shell、AGENTS.md、hooks、插件、设备或账号；只有用户在体检页打开「共享构建缓存」时，才在 `~/.zshenv` 加一段带标记、可还原的 Xcode 设置。不要使用 sudo。`--home` 仅用于隔离安装测试。
 
 已有 dev-memory / dev-storage 时安装器拒绝覆盖；优先复用原实现。若确需迁移，先检查在途锁、pending 请求及兼容性，维护窗口中迁移，保留原状态和回滚入口，不并行跑两套。单纯分享本包不需要迁移来源机器的部署。
 

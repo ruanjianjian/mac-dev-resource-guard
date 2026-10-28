@@ -24,11 +24,11 @@
 
 | Feature | 一句话 | 状态 |
 |---|---|---|
-| one-line-install | 复制一行命令到终端就装好，不用先克隆仓库；装完不弹面板，只发一条「体检完成」通知 | 未开 spec |
-| checkup-home | 点开通知看到「体检」：上面是空间去哪了，下面是三项建议（共享构建缓存、自动清理、使用外接盘），每项一个开关，另有「全部按推荐开启」；任务目录和外接盘由工具自己找到，列出来确认一次 | 未开 spec |
-| toolchain-cache-takeover | 找出本机装了哪些开发工具，把它们的缓存统一放到看板管理的位置（插着外接盘就放外接盘），全局打开 Xcode 编译缓存；改过的设置随时一键还原 | 未开 spec |
-| external-drive | 插着外接盘时，缓存全放上去，闲置任务目录也挪过去；外接盘被拔掉后，用到它的构建直接报「缓存所在的盘未连接」，不在内置盘另建缓存，同时马上提醒用户 | 未开 spec |
-| space-watch | 菜单栏直接显示剩余空间，按颜色提醒；监控和清理扩大到 Xcode 全家、各工具缓存、废纸篓和下载文件夹里的大安装包，Docker 只显示大小并提醒 | 未开 spec |
+| [one-line-install](specs/one-line-install.md) | 复制一行命令到终端就装好，不用先克隆仓库；装完不弹面板，只发一条「体检完成」通知 | 已实现 |
+| [checkup-home](specs/checkup-home.md) | 点开通知看到「体检」：上面是空间去哪了，下面是三项建议（共享构建缓存、自动清理、使用外接盘），每项一个开关，另有「全部按推荐开启」；任务目录和外接盘由工具自己找到，列出来确认一次 | 已实现 |
+| [toolchain-cache-takeover](specs/toolchain-cache-takeover.md) | 找出本机装了哪些开发工具，把它们的缓存统一放到看板管理的位置（插着外接盘就放外接盘），全局打开 Xcode 编译缓存；改过的设置随时一键还原 | 已实现 |
+| [external-drive](specs/external-drive.md) | 插着外接盘时，缓存全放上去，闲置任务目录也挪过去；外接盘被拔掉后，用到它的构建直接报「缓存所在的盘未连接」，不在内置盘另建缓存，同时马上提醒用户 | 已实现 |
+| [space-watch](specs/space-watch.md) | 菜单栏直接显示剩余空间，按颜色提醒；监控和清理扩大到 Xcode 全家、各工具缓存、废纸篓和下载文件夹里的大安装包，Docker 只显示大小并提醒 | 已实现 |
 | duplicate-merge | 后台把闲置任务构建产物里内容相同的文件合并，只占一份空间 | 第二期，未开 spec |
 
 全景图：[overview.html](overview.html)（给人看，浏览器打开） · 源：[overview.workflow.json](overview.workflow.json)（给 AI 读、可 diff）

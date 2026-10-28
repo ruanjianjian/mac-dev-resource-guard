@@ -11,6 +11,8 @@ struct Snapshot {
     var free: Double? = nil
     var capacity: Double? = nil
     var target: Double? = nil
+    var warning: Double? = nil
+    var critical: Double? = nil
     var slots = 0
     var guardStatus = "未连接内存守护"
     var pending = 0
@@ -83,6 +85,8 @@ func sample() -> Snapshot {
         s.free = free.doubleValue / 1_073_741_824; s.capacity = total.doubleValue / 1_073_741_824
     } else { s.errors.append("磁盘空间读取失败") }
     let plan = readJSON(state.appendingPathComponent("last-plan.json"))
+    s.warning = (config["warning_free_gib"] as? NSNumber)?.doubleValue
+    s.critical = (config["critical_free_gib"] as? NSNumber)?.doubleValue
     s.target = (config["target_free_gib"] as? NSNumber)?.doubleValue
         ?? (plan["target_free_bytes"] as? NSNumber).map { $0.doubleValue / 1_073_741_824 }
     s.slots = ((try? FileManager.default.contentsOfDirectory(atPath: state.appendingPathComponent("slots").path)) ?? []).filter { $0.hasSuffix(".json") }.count
@@ -223,9 +227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         if !window.setFrameUsingName("resource-dashboard") { window.center() }
         window.level = model.pinned ? .floating : .normal
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "gauge", accessibilityDescription: "资源看板")
         status.button?.image?.isTemplate = true
+        status.button?.imagePosition = .imageLeading
         status.button?.setAccessibilityLabel("显示资源看板")
         status.button?.target = self
         status.button?.action = #selector(statusClicked)
@@ -258,12 +263,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         mainMenu.addItem(applicationItem)
         NSApp.mainMenu = mainMenu
         model.start()
+        // A drive in use was unplugged: say what stopped working right away (external-drive AC-02).
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] note in
+            guard let volume = (note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)?.path else { return }
+            DispatchQueue.global(qos: .utility).async {
+                guard let reply = try? DashboardActions.call("checkup-status", path: volume), reply.status == "ok",
+                      let row = reply.rows?.first else { return }
+                DispatchQueue.main.async { self?.post(title: row.title, body: row.reason, tab: "checkup") }
+            }
+        }
+        // After an install or upgrade: one checkup in the background, then one notice (one-line-install AC-05).
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let reply = try? DashboardActions.call("checkup-firstrun"), reply.status == "ok" else { return }
+            DispatchQueue.main.async { self?.post(title: "体检完成", body: reply.message, tab: "checkup") }
+        }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
     func updateStatus(_ s: Snapshot) {
         let waiting = s.pending > 0 ? " · \(s.pending) 项待确认" : ""
         status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\(waiting)\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
         badge.isHidden = s.pending == 0
+        // Free space beside the icon; orange below the warning line, red below the critical line.
+        let text = s.free.map { String(format: " %.0fG", $0) } ?? ""
+        let colour: NSColor = [NSColor.labelColor, .systemOrange, .systemRed][s.freeLevel]
+        status.button?.attributedTitle = NSAttributedString(string: text, attributes: [
+            .foregroundColor: colour, .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .medium)])
+        badge.frame.origin.x = 14
+    }
+    func post(title: String, body: String, tab: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title; content.body = body
+        content.userInfo = ["tab": tab]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "\(tab)-\(Date().timeIntervalSince1970)", content: content, trigger: nil))
     }
     func notify(_ count: Int, critical: Bool) {
         let content = UNMutableNotificationContent()
@@ -273,7 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "pending-\(Date().timeIntervalSince1970)", content: content, trigger: nil))
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
-        DispatchQueue.main.async { self.show(); self.actions.requestedTab = "pending" }
+        let tab = response.notification.request.content.userInfo["tab"] as? String ?? "pending"
+        DispatchQueue.main.async { self.show(); self.actions.requestedTab = tab }
         done()
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -349,6 +381,9 @@ if CommandLine.arguments.contains("--run-tick") {
     require(!failed.canClean)
     require(pendingCount(["items": [["state": "pending"], ["state": "ignored"], ["state": "pending", "unreachable": true], ["state": "failed"]]]) == 1)
     require(pendingCount([:]) == 0)
+    var space = Snapshot(); space.free = 80; space.warning = 69; space.critical = 46; require(space.freeLevel == 0)
+    space.free = 50; require(space.freeLevel == 1); space.free = 21; require(space.freeLevel == 2)
+    space.free = nil; require(space.freeLevel == 0)
     let pendingRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"simulator-delete:U","title":"t","detail":"","category":"待确认","bytes":1,"eligible":true,"reason":"r","outcome":"待确认","command":null,"kind":"simulator-delete","loses":"登录状态"}"#.utf8))
     require(pendingRow.loses == "登录状态" && pendingRow.kind == "simulator-delete")
     let oldRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"a","title":"t","detail":"","category":"c","bytes":null,"eligible":false,"reason":"r","outcome":null,"command":null}"#.utf8))
@@ -358,7 +393,7 @@ if CommandLine.arguments.contains("--run-tick") {
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels")
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-tab"), index + 2 < CommandLine.arguments.count {
     // Only against a marked fixture home, so evidence never reads or changes real data.
     guard let home = try? testHomeArgument(CommandLine.arguments), FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {

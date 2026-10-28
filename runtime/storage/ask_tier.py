@@ -9,6 +9,7 @@ import subprocess
 import time
 
 from storage import GIB, Activity, StorageManager, atomic_json
+import spaces
 import tasks as T
 
 PENDING, REQUEST, ASK_STATE = 'pending.json', 'notify-request.json', 'ask-state.json'
@@ -17,6 +18,10 @@ LOSES = {
     'simulator-shutdown': '当前画面和 App 运行状态',
     'task-delete': '本地的构建产物和被忽略的文件；要用时得重新拉代码',
     'runtime-delete': '以后要建这个版本的模拟器得重新下载',
+    'installer-delete': '安装包文件，要用时得重新下载',
+    'trash-empty': '废纸篓里的全部文件，清空后不能恢复',
+    'device-support-delete': '下次连这台设备调试时，Xcode 要花几分钟重新准备',
+    'archive-delete': '这个版本的安装包和查崩溃用的符号文件',
 }
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
@@ -109,6 +114,7 @@ def candidates(home, cfg, activity, pins, simctl, now, memory):
         found[kind + ':' + key] = dict(id=kind + ':' + key, kind=kind, title=title, bytes=bytes_ or 0, reason=reason,
                                        loses=LOSES[kind], fingerprint=fingerprint, **extra)
 
+    other_candidates(home, activity, now, add)
     listing = json.loads(simctl(['list', 'devices', '--json']))
     used_runtimes, booted = set(), set()
     unattached = memory.setdefault('unattached_since', {})
@@ -155,6 +161,33 @@ def candidates(home, cfg, activity, pins, simctl, now, memory):
             add('task-delete', str(task.path), task.path.name + where, T.size(task.real),
                 '闲置 {:.0f} 天，改动都已提交并推送'.format((now - latest) / T.DAY), 'latest:{:.0f}'.format(latest))
     return found
+
+
+def other_candidates(home, activity, now, add, mounted=None):
+    """Installers, the Trash and Xcode leftovers (space-watch AC-02~04)."""
+    for item in spaces.installers(home, now, mounted):
+        if item['idle'] and not activity.reasons(Path(item['path'])):
+            add('installer-delete', item['path'], '下载里的 ' + Path(item['path']).name, item['bytes'],
+                '{:.0f} 天没动，没有挂载'.format(item['idle_days']), 'mtime:{:.0f}'.format(item['mtime']))
+    trash = spaces.trash_size(home)
+    if trash is not None and trash >= spaces.TRASH_MIN_BYTES:
+        add('trash-empty', str(Path(home) / '.Trash'), '废纸篓', trash, '废纸篓占了 {:.1f} GB'.format(trash / GIB),
+            'bytes:{}'.format(trash // GIB))
+    for item in spaces.device_support(home, now):
+        if item['idle_days'] >= spaces.DEVICE_SUPPORT_IDLE_DAYS and not activity.reasons(Path(item['path'])):
+            add('device-support-delete', item['path'], '{} {} 设备支持文件'.format(item['platform'], item['version']), item['bytes'],
+                '{:.0f} 天没连过这个版本的设备'.format(item['idle_days']), 'mtime:{:.0f}'.format(item['mtime']))
+    for item in spaces.archives(home, now):
+        if item['age_days'] >= spaces.ARCHIVE_AGE_DAYS and not activity.reasons(Path(item['path'])):
+            add('archive-delete', item['path'], '归档 ' + item['name'], item['bytes'],
+                '{:.0f} 天前打的包'.format(item['age_days']), 'mtime:{:.0f}'.format(item['mtime']))
+
+
+def empty_trash():
+    out = subprocess.run(['/usr/bin/osascript', '-e', 'tell application "Finder" to empty trash'],
+                         capture_output=True, text=True, timeout=600)
+    if out.returncode:
+        raise RuntimeError((out.stderr or out.stdout).strip() or '访达没有清空废纸篓')
 
 
 def refresh(home, cfg, settings, simctl, activity=None, now=None):
@@ -249,7 +282,7 @@ def remove_task(path, cfg):
         T.remove_tree(real)
 
 
-def execute(home, cfg, settings, ids, simctl, activity=None, now=None):
+def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash):
     """Run only the confirmed ids, re-checking each against a fresh scan (ask AC-02/06/07)."""
     now = time.time() if now is None else now
     pending = refresh(home, cfg, settings, simctl, activity, now)
@@ -276,6 +309,14 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None):
                 simctl(['shutdown', target])
             elif item['kind'] == 'runtime-delete':
                 simctl(['runtime', 'delete', target])
+            elif item['kind'] == 'trash-empty':
+                trash_emptier()
+            elif item['kind'] in ('installer-delete', 'device-support-delete', 'archive-delete'):
+                path = Path(target)
+                if path.is_dir() and not path.is_symlink():
+                    T.remove_tree(path)
+                else:
+                    path.unlink()
             else:
                 remove_task(target, cfg)
             item.update(state='done', result=None, updated=time.time())

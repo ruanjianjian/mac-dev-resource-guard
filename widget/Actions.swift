@@ -83,8 +83,10 @@ final class DashboardActions: ObservableObject {
     /// A notification click asks the panel to open a tab.
     @Published var requestedTab: String?
 
+    private func command(_ family: String, _ action: String?) -> String { action ?? family + "-preview" }
+
     func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil, ids: [String]? = nil) {
-        guard !busy, ["storage", "common", "memory", "setup", "task", "project", "pending", "auto"].contains(family) else { return }
+        guard !busy, ["storage", "common", "memory", "setup", "task", "project", "pending", "auto", "checkup"].contains(family) else { return }
         let preview = previews[family]
         if clean && preview?.canClean != true {
             message = "请先重新扫描，查看本次预览。"; return
@@ -93,7 +95,8 @@ final class DashboardActions: ObservableObject {
         previews[family] = nil  // Neither failed requests nor old results enable cleaning.
         busy = true; message = ""
         activity = clean ? "后端正在重新核对保护并执行，请等待完成…" :
-            (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" : "正在检查，请稍候…")
+            (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" :
+             command(family, action) == "checkup-scan" ? "正在体检：统计任务目录和各类缓存，可能要一两分钟…" : "正在检查，请稍候…")
         let command = action ?? (family + (clean ? "-clean" : "-preview"))
         DispatchQueue.global(qos: .utility).async {
             let reply: BackendReply
@@ -116,7 +119,7 @@ final class DashboardActions: ObservableObject {
 struct Dashboard: View {
     @ObservedObject var model: Monitor
     @ObservedObject var actions: DashboardActions
-    @State private var tab = "overview"
+    @State private var tab = "checkup"
     @State private var confirming = false
     @State private var storageFamily = "common"
     @State private var setupAction = ""
@@ -124,7 +127,7 @@ struct Dashboard: View {
     @State private var selected: Set<String> = []
     @State private var confirmingPending = false
 
-    init(model: Monitor, actions: DashboardActions, initialTab: String = "overview", initialSelected: Set<String> = []) {
+    init(model: Monitor, actions: DashboardActions, initialTab: String = "checkup", initialSelected: Set<String> = []) {
         _model = ObservedObject(wrappedValue: model); _actions = ObservedObject(wrappedValue: actions)
         _tab = State(initialValue: initialTab); _selected = State(initialValue: initialSelected)
     }
@@ -137,7 +140,7 @@ struct Dashboard: View {
             HStack {
                 Text(CommandLine.arguments.contains("--test-home") ? "资源看板 · 隔离验证" : "资源看板").font(.title2.weight(.semibold))
                 Spacer()
-                Text("\(model.snapshot.pressureLabel) · 可用 \(number(model.snapshot.free)) GiB")
+                Text("\(model.snapshot.pressureLabel) · 可用 \(number(model.snapshot.free)) GB")
                     .font(.callout).foregroundColor(.secondary)
                 Button {
                     model.pinned.toggle()
@@ -148,6 +151,7 @@ struct Dashboard: View {
                     .accessibilityLabel(model.pinned ? "取消置顶" : "置顶窗口")
             }.padding(.horizontal, 22).padding(.top, 18)
             Picker("查看", selection: $tab) {
+                Text("体检").tag("checkup")
                 Text("实时概览").tag("overview")
                 Text("磁盘缓存").tag("storage")
                 Text("开发后台").tag("memory")
@@ -155,7 +159,9 @@ struct Dashboard: View {
                 Text("自动记录").tag("auto")
                 Text("接入设置").tag("setup")
             }.pickerStyle(.segmented).padding(18)
-            if tab == "overview" {
+            if tab == "checkup" {
+                CheckupPage(model: model, actions: actions)
+            } else if tab == "overview" {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("先看占用，再决定清理").font(.headline)
@@ -215,7 +221,9 @@ struct Dashboard: View {
         .onChange(of: tab) { value in
             selected = []
             if ["setup", "pending", "auto"].contains(value) && !actions.busy { actions.run(value) }
+            if value == "checkup" && actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") }
         }
+        .onAppear { if tab == "checkup" && actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") } }
         .onReceive(actions.$requestedTab) { value in
             if let value { tab = value; actions.requestedTab = nil; if !actions.busy { actions.run(value) } }
         }
