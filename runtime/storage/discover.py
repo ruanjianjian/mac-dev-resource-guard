@@ -6,9 +6,11 @@ import shutil
 import subprocess
 import time
 
-# Folders under HOME that never hold source checkouts worth scanning.
-SKIP = {'Library', 'Applications', 'Pictures', 'Music', 'Movies', 'Public', 'node_modules', 'DerivedData',
-        'Pods', 'build', '.build', 'target', 'dist', 'vendor'}
+# Folders under HOME that never hold source checkouts worth scanning. Desktop, Documents and Downloads
+# are skipped too: touching them makes macOS ask the user for access, and a background scan would sit
+# waiting on that question (seen on a real install).
+SKIP = {'Library', 'Applications', 'Pictures', 'Music', 'Movies', 'Public', 'Desktop', 'Documents', 'Downloads',
+        'node_modules', 'DerivedData', 'Pods', 'build', '.build', 'target', 'dist', 'vendor'}
 SCAN_DEPTH = 4
 SCAN_SECONDS = 20
 

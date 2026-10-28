@@ -528,8 +528,10 @@ class Adapter:
         version = app_version()
         if verb == 'firstrun' and report and report.get('notified_version') == version:
             return dict(status='skip', message='', rows=[])
-        if verb in ('scan', 'firstrun') or report is None or time.time() - report.get('at', 0) > 6 * 3600:
-            report = checkup.scan(self.home, cfg, volumes=volumes, info=info, is_mount=is_mount)
+        fresh = report is not None and time.time() - report.get('at', 0) < 600
+        if verb == 'scan' or verb == 'firstrun' and not fresh or report is None or time.time() - report.get('at', 0) > 6 * 3600:
+            # Only a scan started from the open panel may touch Downloads (macOS asks about it once).
+            report = checkup.scan(self.home, cfg, volumes=volumes, info=info, is_mount=is_mount, foreground=verb in ('scan', 'preview'))
         elif verb in ('apply', 'off'):
             report['caches'] = toolcaches.inspect(self.home, cfg['external_root'])
         ask_tier, _, _ = tier_modules()

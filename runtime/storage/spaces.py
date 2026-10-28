@@ -28,15 +28,31 @@ def mounted_images(run=subprocess.run):
         return set()
 
 
-def installers(home, now=None, mounted=None):
+DOWNLOADS_GRANT = '.local/state/dev-resource-guard/downloads-readable'
+
+
+def downloads_readable(home):
+    """Set once Downloads was read from the open panel; until then background runs never touch it,
+    because reading it makes macOS ask the user and the run would wait for the answer."""
+    return (Path(home) / DOWNLOADS_GRANT).exists()
+
+
+def installers(home, now=None, mounted=None, foreground=False):
     """Big installer files at the top of Downloads (all ages; `idle` says whether one may be proposed)."""
     now = time.time() if now is None else now
-    mounted = mounted_images() if mounted is None else mounted
     found = []
+    if not foreground and not downloads_readable(home):
+        return found
+    grant = Path(home) / DOWNLOADS_GRANT
     try:
         entries = list(os.scandir(Path(home) / 'Downloads'))
     except OSError:
+        grant.unlink(missing_ok=True)
         return found
+    if foreground and not grant.exists():
+        grant.parent.mkdir(parents=True, exist_ok=True)
+        grant.touch()
+    mounted = mounted_images() if mounted is None else mounted
     for entry in entries:
         if not entry.name.lower().endswith(INSTALLER_EXT) or entry.name.startswith('.'):
             continue

@@ -1,4 +1,5 @@
 """The checkup page (checkup-home): where the space went, three suggestions, one confirmation."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -61,7 +62,21 @@ def task_rows(roots, now, idle_days):
     return rows
 
 
-def scan(home, cfg, simulators_bytes=None, now=None, volumes=Path('/Volumes'), info=discover.disk_info, is_mount=os.path.ismount):
+def scan(home, cfg, simulators_bytes=None, now=None, volumes=Path('/Volumes'), info=discover.disk_info, is_mount=os.path.ismount,
+         foreground=False):
+    """One checkup at a time: a second caller waits and takes the result that just finished."""
+    started = time.time()
+    lock = auto_tier.state_root(home) / 'checkup.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open('a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        report = load_report(home)
+        if report and report.get('finished', 0) >= started:
+            return report
+        return _scan(home, cfg, simulators_bytes, now, volumes, info, is_mount, foreground)
+
+
+def _scan(home, cfg, simulators_bytes, now, volumes, info, is_mount, foreground):
     """Measure and discover; slow (du over the task folders), so the result is kept in checkup.json."""
     home = Path(home)
     now = time.time() if now is None else now
@@ -73,7 +88,7 @@ def scan(home, cfg, simulators_bytes=None, now=None, volumes=Path('/Volumes'), i
     if simulators_bytes is None:
         devices = home / 'Library/Developer/CoreSimulator/Devices'
         simulators_bytes = T.size(devices) if devices.is_dir() else 0
-    installers = spaces.installers(home, now)
+    installers = spaces.installers(home, now, foreground=foreground)
     support = spaces.device_support(home, now)
     archives = spaces.archives(home, now)
     trash = spaces.trash_size(home)
@@ -105,6 +120,7 @@ def scan(home, cfg, simulators_bytes=None, now=None, volumes=Path('/Volumes'), i
     report = dict(schema=1, at=now, roots=found['roots'], drives=found['drives'], recommended=found['recommended'],
                   categories=sorted(categories, key=lambda c: -(c['bytes'] or 0)), caches=caches, tasks=task_list,
                   notified_version=(load_report(home) or {}).get('notified_version'))
+    report['finished'] = time.time()
     auto_tier.state_root(home).mkdir(parents=True, exist_ok=True)
     atomic_json(report_path(home), report)
     return report

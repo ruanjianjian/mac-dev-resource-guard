@@ -96,7 +96,7 @@ final class DashboardActions: ObservableObject {
         busy = true; message = ""
         activity = clean ? "后端正在重新核对保护并执行，请等待完成…" :
             (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" :
-             command(family, action) == "checkup-scan" ? "正在体检：统计任务目录和各类缓存，可能要一两分钟…" : "正在检查，请稍候…")
+             command(family, action) == "checkup-scan" ? "正在体检：统计任务目录和各类缓存，任务多时要几分钟…" : "正在检查，请稍候…")
         let command = action ?? (family + (clean ? "-clean" : "-preview"))
         DispatchQueue.global(qos: .utility).async {
             let reply: BackendReply
@@ -223,7 +223,6 @@ struct Dashboard: View {
             if ["setup", "pending", "auto"].contains(value) && !actions.busy { actions.run(value) }
             if value == "checkup" && actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") }
         }
-        .onAppear { if tab == "checkup" && actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") } }
         .onReceive(actions.$requestedTab) { value in
             if let value { tab = value; actions.requestedTab = nil; if !actions.busy { actions.run(value) } }
         }

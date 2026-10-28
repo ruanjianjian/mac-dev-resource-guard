@@ -63,7 +63,10 @@ class DiscoverTest(TierFixture):
         self.worktree(main, self.home / 'code/worktrees/20261001-a/app-2', 'a2')
         self.worktree(main, self.home / 'code/worktrees/20261002-b/app', 'b')
         self.worktree(main, main / '.claude/worktrees/fix', 'c')
+        protected = self.home / 'Documents/old-repo'; protected.mkdir(parents=True)
+        git(protected, 'init', '-q')   # never walked: macOS would ask the user about Documents
         found = discover.task_roots(discover.worktrees(discover.main_repositories(self.home)), self.home)
+        self.assertNotIn(protected / '.git', discover.main_repositories(self.home))
         self.assertEqual(found, sorted([self.home / 'code/worktrees', main / '.claude/worktrees']))
         self.assertEqual(discover.task_count(self.home / 'code/worktrees'), 2)
 
@@ -271,7 +274,18 @@ class WiderCleanupTest(TierFixture):
         ask_tier.other_candidates(self.home, idle(), time.time(), add, mounted=set(mounted))
         return found
 
+    def grant_downloads(self):
+        (self.home / 'Downloads').mkdir(exist_ok=True)
+        spaces.installers(self.home, foreground=True)
+
+    def test_downloads_is_untouched_in_the_background_until_read_from_the_panel(self):
+        old = self.file('Downloads/Xcode_27.xip', 300 << 20, 10)
+        self.assertEqual(self.collect(), {})
+        self.assertEqual(spaces.installers(self.home, foreground=True)[0]['path'], str(old))
+        self.assertIn('installer-delete:' + str(old), self.collect())
+
     def test_old_big_installers_are_proposed_new_small_or_mounted_are_not(self):
+        self.grant_downloads()
         old = self.file('Downloads/Xcode_27.xip', 300 << 20, 10)
         self.file('Downloads/new.dmg', 300 << 20, 1)
         self.file('Downloads/small.pkg', 10 << 20, 30)
@@ -307,6 +321,7 @@ class WiderCleanupTest(TierFixture):
 
     @unittest.mock.patch.object(spaces, 'TRASH_MIN_BYTES', 32768)
     def test_confirmed_installer_is_deleted_and_trash_goes_through_finder(self):
+        self.grant_downloads()
         old = self.file('Downloads/Old.dmg', 300 << 20, 10)
         self.trash()
         cfg = tiers_config.load(self.home)

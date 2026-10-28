@@ -316,7 +316,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             NSMenu.popUpContextMenu(statusMenu, with: event, for: button)
         } else { show() }
     }
-    @objc func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    @objc func show() {
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        // The checkup tab loads when the panel is first shown, never at launch while it is hidden.
+        if actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") }
+    }
     @objc func refresh() { model.refresh() }
     @objc func quit() {
         if actions.busy { show(); return }
