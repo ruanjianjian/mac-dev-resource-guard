@@ -60,6 +60,10 @@ def state_root(home):
     return home / '.local/state/dev-resource-guard'
 
 
+class Busy(ValueError):
+    """Another run holds the lock; callers that wake on a timer skip quietly."""
+
+
 @contextlib.contextmanager
 def operation_lock(home, name):
     path = state_root(home) / (name + '.lock')
@@ -68,7 +72,7 @@ def operation_lock(home, name):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError('维护或安装正在进行，请稍后重试')
+            raise Busy('维护或安装正在进行，请稍后重试')
         yield
 
 
@@ -263,7 +267,11 @@ FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓
 def tick_storage(home, now=None):
     """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace."""
     now = time.time() if now is None else now
-    with operation_lock(home, 'periodic-storage'):
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(operation_lock(home, 'periodic-storage'))
+        except Busy:
+            return {'status': 'busy', 'results': []}   # the previous wake is still working (e.g. a long move)
         if (state_root(home)/'storage-paused').exists():
             return {'status': 'paused', 'results': []}
         previous = read_json(state_root(home)/'automatic-storage.json')

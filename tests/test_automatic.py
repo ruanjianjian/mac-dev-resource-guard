@@ -235,4 +235,13 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(receipt['status'],'config_error'); self.assertIn('auto_idle_days',receipt['config_error'])
         self.assertEqual(calls,['auto'])
 
+    def test_overlapping_wake_is_a_quiet_skip_not_a_failure(self):
+        lock=service.state_root(self.home)/'periodic-storage.lock'; lock.parent.mkdir(parents=True)
+        with lock.open('a') as held:
+            import fcntl; fcntl.flock(held,fcntl.LOCK_EX)
+            self.assertEqual(service.tick_storage(self.home)['status'],'busy')
+            env=dict(os.environ,HOME=str(self.home))
+            run=subprocess.run([sys.executable,str(ROOT/'scripts/service.py'),'tick-storage'],capture_output=True,text=True,env=env)
+        self.assertEqual((run.returncode,run.stderr),(0,''))
+
 if __name__=='__main__':unittest.main()

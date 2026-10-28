@@ -126,6 +126,14 @@ class TaskTests(TierFixture):
         self.assertTrue(tasks.idle_check(item, Activity(), {}, 3, cfg)[0])
 
 
+class LatestWriteTests(TierFixture):
+    def test_stops_at_first_recent_write(self):
+        task = self.task('t', 5); (task / 'app/new.swift').write_text('fresh')
+        cutoff = time.time() - 3 * DAY
+        self.assertGreater(tasks.latest_write(task, tasks.skip_names({}), stop_after=cutoff), cutoff)
+        self.assertLess(tasks.latest_write(self.task('old', 5), tasks.skip_names({}), stop_after=cutoff), cutoff)
+
+
 class AutoTierTests(TierFixture):
     def test_moves_oldest_idle_first_and_stops_at_target(self):
         old, mid = self.task('old', 6), self.task('mid', 4)

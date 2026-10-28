@@ -46,8 +46,12 @@ def skip_names(cfg):
     return set(PRUNE_NAMES) | set(cfg.get('prune_names', [])) | {'.git'}
 
 
-def latest_write(path, skipped):
-    """Newest mtime of anything but build outputs and git internals (our own git calls touch .git)."""
+def latest_write(path, skipped, stop_after=None):
+    """Newest mtime of anything but build outputs and git internals (our own git calls touch .git).
+
+    With stop_after, the walk ends at the first entry newer than it: a busy folder is
+    answered quickly, while an idle one still gets its real age for ordering.
+    """
     newest = 0.0
     for folder, dirs, files in os.walk(path, followlinks=False):
         dirs[:] = [d for d in dirs if d not in skipped]
@@ -56,6 +60,8 @@ def latest_write(path, skipped):
                 newest = max(newest, os.lstat(os.path.join(folder, name)).st_mtime)
             except OSError:
                 continue
+            if stop_after is not None and newest > stop_after:
+                return newest
     return newest
 
 
@@ -136,7 +142,7 @@ def idle_check(task, activity, pins, days, cfg, now=None):
     pinned = pin_reason(pins, task)
     if pinned:
         reasons.append(pinned)
-    latest = latest_write(task.real, skip_names(cfg))
+    latest = latest_write(task.real, skip_names(cfg), stop_after=now - days * DAY)
     if now - latest < days * DAY:
         reasons.append('{:.1f} 天内有改写（要求闲置 {} 天）'.format(max(0.0, (now - latest) / DAY), days))
     return reasons, latest
