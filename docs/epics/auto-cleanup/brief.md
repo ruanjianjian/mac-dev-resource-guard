@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 [raw-input.md](./raw-input.md)；首轮 RAW-01～23：需求主体是 RAW-16～19，拍板的选择题回答是 RAW-20～23。本轮新增 RAW-24～25：1.3 发布后改基线。
+原话全量在 [raw-input.md](./raw-input.md)；首轮 RAW-01～23：需求主体是 RAW-16～19，拍板的选择题回答是 RAW-20～23。本轮新增 RAW-24～25：1.3 发布后改基线；RAW-26～27：确认方案、全部由 Claude 实现。
 
 ## 意图
 
@@ -25,9 +25,9 @@
 
 | Feature | 一句话 | 状态 |
 |---|---|---|
-| [tiered-auto-cleanup](specs/tiered-auto-cleanup.md) | 空间不够时，自动把闲置任务目录挪到外接盘、清掉闲置任务里能重新生成的构建产物，并清掉系统不可用的模拟器和工具缓存；接在 1.3 的定时任务上 | 已有 spec |
-| [ask-first-confirm](specs/ask-first-confirm.md) | 会丢东西的清理先发通知，用户在看板里勾选确认后才做 | 已有 spec |
-| [build-slot-wrapper](specs/build-slot-wrapper.md) | 1.3 的项目入口除了包一条 xcodebuild，也能包一整段构建脚本，并通过环境变量告诉脚本固定缓存在哪 | 已有 spec |
+| [tiered-auto-cleanup](specs/tiered-auto-cleanup.md) | 空间不够时，自动把闲置任务目录挪到外接盘、清掉闲置任务里能重新生成的构建产物，并清掉系统不可用的模拟器和工具缓存；接在 1.3 的定时任务上 | 已实现（PR #6） |
+| [ask-first-confirm](specs/ask-first-confirm.md) | 会丢东西的清理先发通知，用户在看板里勾选确认后才做 | 已实现（PR #6；系统通知待安装后实测） |
+| [build-slot-wrapper](specs/build-slot-wrapper.md) | 1.3 的项目入口除了包一条 xcodebuild，也能包一整段构建脚本，并通过环境变量告诉脚本固定缓存在哪 | 已实现（PR #6） |
 
 全景图：[overview.html](overview.html)（给人看，浏览器打开） · 源：[overview.workflow.json](overview.workflow.json)（给 AI 读、可 diff）
 

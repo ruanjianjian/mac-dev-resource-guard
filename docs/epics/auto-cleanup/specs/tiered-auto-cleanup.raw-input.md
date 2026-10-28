@@ -150,3 +150,19 @@ https://github.com/ruanjianjian/mac-dev-resource-guard
 ```text
 先修 1.3 的链接失败、看板不报错和仓库多出未跟踪文件这三个问题，再把分档自动清理的方案改到 1.3 上，一起开 Draft PR。
 ```
+
+## 2026-10-27 · Claude Code 会话 d63e22ae · 确认方案并开始实现
+
+来源：当前 Claude Code 会话 JSONL（session-raw-input.py）；分工回答取自同一会话的 AskUserQuestion 工具结果。
+
+## RAW-22
+日期：2026-10-27T14:36:46.539Z；提出人：阮鉴鉴；场景：对话
+```text
+分档方案没问题，按这个开始实现。
+```
+
+## RAW-23
+日期：2026-10-27T14:4x（选择题回答）；提出人：阮鉴鉴；场景：派活确认（AskUserQuestion）
+```text
+分档清理这次怎么分工？三部分的接口已写进设计文档并冻结。 → 全部我来做
+```
