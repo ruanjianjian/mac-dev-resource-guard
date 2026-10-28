@@ -12,7 +12,7 @@
 
 ## 分档自动清理（1.4）
 
-升级到 1.4 后重跑 `python3 scripts/install.py`：本工具的磁盘定时任务从 12 小时改为每 5 分钟唤醒（空闲时才重新加载，忙时保留并提示稍后重试）。自动档默认关闭；询问档默认打开，只通知、不自动执行。设置写在 `~/.config/dev-resource-guard/auto-cleanup.json`，至少填 `task_roots` 才会处理任务目录；字段与默认值见 [设计 C1](../docs/epics/auto-cleanup/design.md)。首次发通知时 macOS 会请求通知权限，由你决定是否允许；不允许时只亮菜单栏红点。
+升级到 1.4 后重跑 `python3 scripts/install.py`：本工具的磁盘定时任务从 12 小时改为每 5 分钟唤醒（空闲时才重新加载，忙时保留并提示稍后重试）。自动档默认关闭；询问档默认打开，只通知、不自动执行。设置写在 `~/.config/dev-resource-guard/auto-cleanup.json`，至少填 `task_roots` 才会处理任务目录；字段与默认值见 [设计 C1](../docs/epics/auto-cleanup/design.md)。首次发通知时 macOS 会请求通知权限，由你决定是否允许；不允许时只亮菜单栏红点。磁盘定时任务通过 App（`ResourceDashboard --run-tick`）运行：后台命令行任务读写外接盘会被 macOS 静默拒绝，经 App 运行后系统会询问一次是否允许「资源看板」访问可移除宗卷。
 
 ## App 内置入口（1.2）
 

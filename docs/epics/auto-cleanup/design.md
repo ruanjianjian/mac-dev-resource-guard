@@ -135,4 +135,5 @@
 - 询问档的任务目录还要求：顶层只有 git 工作区（`.DS_Store` 除外）；目录内的主仓库没有别的工作区依赖它。
 - 工具缓存：`go clean -cache`、`npm cache verify`、`pnpm store prune`，缓存目录须与 HOME 在同一卷，且该工具没有构建/安装进程在跑。
 - launchd `StartInterval` 为 300 秒；1.3 的 12 小时任务在空闲时重新加载为 300 秒，忙时保留并提示稍后重试。
+- 外接盘权限：launchd 直接运行的命令行任务访问 `/Volumes/*` 会得到 Operation not permitted（本机实测）。磁盘任务改为 `资源看板.app/Contents/MacOS/ResourceDashboard --run-tick`，由 App 调起 `resource-guard-service tick-storage`，系统把访问归到「资源看板」并询问一次。自动档搬迁前先在外接目录试写；被拒时回执 C3 增加 `external_denied: [{path, reason}]`，本轮改删构建产物。指向外接盘的 Xcode 缓存读不了时算错误，不再当作「0 项」。读不全的任务目录一律不算闲置。
 - 界面证据：`ResourceDashboard --test-home <带标记的目录> --render-tab <页签> <out.png> [--select id]` 离屏渲染，不显示窗口。
