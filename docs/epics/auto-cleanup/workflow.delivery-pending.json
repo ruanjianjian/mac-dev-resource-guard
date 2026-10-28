@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "command": "deliver",
+  "status": "pending",
+  "receiptId": "510c22f9-5309-4fee-af7f-52af4a17b805",
+  "input": "/Volumes/T9/RJJ-ELYS/tasks/20261027-guard-tiered-cleanup/mac-dev-resource-guard/docs/epics/auto-cleanup/specs/build-slot-wrapper.flow.workflow.json specs/build-slot-wrapper.html",
+  "output": "/Volumes/T9/RJJ-ELYS/tasks/20261027-guard-tiered-cleanup/mac-dev-resource-guard/docs/epics/auto-cleanup/workflow.html"
+}

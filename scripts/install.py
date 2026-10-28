@@ -22,7 +22,6 @@ if staging.exists():
     raise SystemExit('上次安装副本仍在，请核对后重试：' + str(staging))
 subprocess.run([sys.executable, str(root/'widget/build.py'), '--output', str(staging)], check=True)
 subprocess.run([str(staging/'Contents/MacOS/ResourceDashboard'), '--self-test'], check=True)
-result = activate(home)
 # Only stop our menu process; detached builds and maintenance are left running.
 if app.exists():
     executable = str(app/'Contents/MacOS/ResourceDashboard')
@@ -36,5 +35,7 @@ try:
 except BaseException:
     if 'backup' in locals(): os.rename(backup, app)
     raise
+# The storage job runs through the installed app, so activate only once it is in place.
+result = activate(home)
 subprocess.run(['open', str(app)], check=True)
 print('安装完成：安全自动维护已启用，面板默认隐藏。点击菜单栏图标查看结果。')

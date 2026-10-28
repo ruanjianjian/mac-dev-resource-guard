@@ -78,11 +78,48 @@ class CommonCleanupTests(unittest.TestCase):
             common.apply(self.home, plan)
         self.assertTrue(other.exists())
 
-    def test_standard_root_symlink_is_rejected(self):
-        self.root.rename(self.root.with_name('Moved'))
-        self.root.symlink_to(self.root.with_name('Moved'))
-        with self.assertRaises(ValueError):
-            self.preview()
+    def link_root(self, target=None):
+        moved = self.home / 'External/dev-cache/Xcode-DerivedData'
+        moved.parent.mkdir(parents=True)
+        self.root.rename(moved)
+        self.root.symlink_to(target or moved)
+        return moved
+
+    def test_standard_root_linked_to_dedicated_directory_is_cleaned(self):
+        moved = self.link_root()
+        real = moved / 'Example-abc/Build/Intermediates.noindex'
+        plan = self.preview()
+        self.assertEqual([r['path'] for r in plan['candidates']], [str(real)])
+        with patch.object(common, 'activity', return_value=common.CommonActivity()):
+            result = common.apply(self.home, plan)
+        self.assertEqual(len(result['deleted']), 1)
+        self.assertFalse(real.exists())
+        self.assertTrue((moved / 'Example-abc/Build/Products/App').is_file())
+
+    def test_standard_root_linked_to_broad_location_is_rejected(self):
+        self.link_root()
+        volume = self.home / 'Volume'
+        volume.mkdir()
+        managed = self.home / 'Library/Caches/dev-resource-guard'
+        managed.mkdir(parents=True)
+        for target in (self.home, self.home.parent, Path('/'), volume, managed, managed.parent):
+            with self.subTest(target=target):
+                self.root.unlink()
+                self.root.symlink_to(target)
+                with patch('os.path.ismount', side_effect=lambda p: Path(p) in (Path('/'), volume)):
+                    with self.assertRaisesRegex(ValueError, '范围过大'):
+                        common.manager(self.home)
+
+    def test_standard_root_linked_to_missing_location_is_unavailable(self):
+        self.link_root(self.home / 'Unplugged/DerivedData')
+        with self.assertRaisesRegex(common.CacheUnavailable, '不存在'):
+            common.manager(self.home)
+
+    def test_unreadable_relocated_cache_is_an_error_not_an_empty_result(self):
+        self.link_root()
+        with patch.object(common.os, 'listdir', side_effect=PermissionError(1, 'Operation not permitted')):
+            with self.assertRaisesRegex(ValueError, '没有读取'):
+                common.manager(self.home)
 
     def test_scheduler_settings_do_not_discover_standard_cache(self):
         from portable_config import configure

@@ -19,6 +19,8 @@ class AutomaticTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve()
+        self.tier_patch = patch.object(service, 'tick_tiers', return_value=None)   # tier behaviour has its own tests
+        self.tiers = self.tier_patch.start(); self.addCleanup(patch.stopall)
 
     def cache(self, suffix):
         path = self.home/'Library/Developer/Xcode/DerivedData'/suffix/'Build/Intermediates.noindex'
@@ -68,7 +70,7 @@ class AutomaticTests(unittest.TestCase):
     def test_version_updates_keep_stable_loaded_job(self):
         p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
         command=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
-        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command)))
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command,StartInterval=service.STORAGE_WAKE_SECONDS)))
         with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run:
             self.assertIn('reused',service.enable_job(self.home,'storage',Path('/new/version')))
         self.assertTrue(all('bootstrap' not in call.args[0] and 'bootout' not in call.args[0] for call in run.call_args_list))
@@ -118,5 +120,138 @@ class AutomaticTests(unittest.TestCase):
         Path(result['wrapper']).write_text('my own build')
         with self.assertRaises(ValueError):service.integrate(self.home,project)
         self.assertEqual((project/'source.c').read_text(),'source')
+
+    def link_standard_root(self, target=None):
+        root=self.home/'Library/Developer/Xcode/DerivedData'; root.parent.mkdir(parents=True,exist_ok=True)
+        moved=self.home/'External/Xcode-DerivedData'; moved.parent.mkdir(parents=True)
+        if root.exists(): root.rename(moved)
+        root.symlink_to(target or moved)
+        return moved
+
+    def receipt(self):
+        return json.loads((service.state_root(self.home)/'automatic-storage.json').read_text())
+
+    def test_linked_standard_cache_is_cleaned_by_periodic_tick(self):
+        self.cache('Old'); moved=self.link_standard_root()
+        with patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'complete')
+        self.assertFalse((moved/'Old/Build/Intermediates.noindex').exists())
+
+    def test_family_failure_is_recorded_and_other_family_still_runs(self):
+        self.cache('Old')
+        with patch.object(service.common,'manager',side_effect=ValueError('boom')), patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'error')
+        families={r['family']:r for r in result['results']}
+        self.assertIn('result',families['managed']); self.assertEqual(families['existing-xcode']['error'],'boom')
+        self.assertEqual(self.receipt()['status'],'error'); self.assertIn('boom',self.receipt()['error'])
+
+    def test_unplugged_link_target_is_skipped_not_failed(self):
+        self.link_standard_root(self.home/'Unplugged/DerivedData')
+        with patch.object(service.common,'activity',return_value=Activity()):
+            result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'complete')
+        skipped=[r for r in result['results'] if r.get('skipped')]
+        self.assertEqual([r['family'] for r in skipped],['existing-xcode']); self.assertIn('不存在',skipped[0]['skipped'])
+
+    def test_invalid_config_still_writes_error_receipt(self):
+        p=self.home/'.config/dev-resource-guard/config.json';p.parent.mkdir(parents=True);p.write_text('{"cache_root":"/"}')
+        result=service.tick_storage(self.home)
+        self.assertEqual(result['status'],'error'); self.assertEqual(self.receipt()['status'],'error')
+        self.assertTrue(all(r.get('error') for r in result['results']))
+
+    def setup_rows(self):
+        sys.path.insert(0,str(ROOT/'widget')); import setup_status
+        return {r['id']:r for r in setup_status.status(self.home)['rows']}
+
+    def test_setup_page_shows_failure_skip_and_scheduler_error(self):
+        state=service.state_root(self.home); state.mkdir(parents=True)
+        def write(status, results, error=None):
+            body=dict(at=time.time(),status=status,results=results)
+            if error: body['error']=error
+            (state/'automatic-storage.json').write_text(json.dumps(body))
+        write('error',[dict(family='managed',result=dict(deleted=[],errors=[])),dict(family='existing-xcode',error='boom')],'已有 Xcode 缓存：boom')
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'失败'); self.assertIn('boom',row['reason'])
+        write('complete',[dict(family='managed',result=dict(deleted=[],errors=[])),dict(family='existing-xcode',skipped='指向的位置不存在')])
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'部分跳过'); self.assertIn('已跳过',row['reason']); self.assertIn('不存在',row['reason'])
+        (state/'automatic-storage.json').unlink()
+        (state/'storage-scheduler.err').write_text('Traceback...\nValueError: 配置坏了\n')
+        row=self.setup_rows()['automatic-last']; self.assertEqual(row['outcome'],'失败'); self.assertIn('配置坏了',row['reason'])
+
+    def git(self, repo, *args):
+        return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,text=True).stdout
+
+    def test_project_entry_stays_out_of_git_status(self):
+        command=self.home/'.local/bin/resource-guard-storage';command.parent.mkdir(parents=True);command.touch()
+        repo=self.home/'repo'; sub=repo/'apps/mobile'; sub.mkdir(parents=True); (sub/'main.swift').write_text('source')
+        subprocess.run(['git','init','-q',str(repo)],check=True); (repo/'.gitignore').write_text('build/\n')
+        self.git(repo,'add','.'); self.git(repo,'-c','user.name=t','-c','user.email=t@example.com','commit','-qm','init')
+        for project in (repo, sub):
+            service.integrate(self.home,project)
+            self.assertEqual(self.git(repo,'status','--porcelain'),'')
+        self.assertEqual((repo/'.gitignore').read_text(),'build/\n')
+        (repo/'.dev-resource-guard/.gitignore').unlink()  # an entry generated by 1.3
+        self.assertNotEqual(self.git(repo,'status','--porcelain'),'')
+        service.integrate(self.home,repo)
+        self.assertEqual(self.git(repo,'status','--porcelain'),'')
+
+    def test_13_twelve_hour_job_reloads_with_short_wake_only_when_idle(self):
+        p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
+        command=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=command,StartInterval=43200)))
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'pid = 9\n','')) as run:
+            with self.assertRaisesRegex(ValueError,'仍在运行'):service.enable_job(self.home,'storage',ROOT)
+            self.assertFalse(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['StartInterval'],43200)
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'state = not running\n','')) as run:
+            service.enable_job(self.home,'storage',ROOT)
+            self.assertTrue(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['StartInterval'],service.STORAGE_WAKE_SECONDS)
+
+    def test_cache_cleanup_keeps_twelve_hour_pace_while_tiers_run_each_wake(self):
+        self.cache('Old')
+        with patch.object(service.common,'activity',return_value=Activity()):
+            first=service.tick_storage(self.home); second=service.tick_storage(self.home, now=time.time()+600)
+            third=service.tick_storage(self.home, now=time.time()+13*3600)
+        self.assertEqual(first['status'],'complete'); self.assertEqual(second['status'],'not-due'); self.assertEqual(third['status'],'complete')
+        self.assertEqual(self.tiers.call_count,3)
+
+    def test_tier_step_paces_reports_config_errors_and_yields_to_manual_cleanup(self):
+        self.tier_patch.stop()
+        calls=[]
+        with patch.object(service.auto_tier,'run',side_effect=lambda *a,**k:calls.append('auto')), \
+             patch.object(service.ask_tier,'refresh',return_value={'items':[]}), patch.object(service.ask_tier,'maybe_notify'):
+            now=time.time()
+            self.assertEqual(service.tick_tiers(self.home,now),'ran')
+            self.assertIsNone(service.tick_tiers(self.home,now+60))                 # not due within 30 minutes
+            lock=service.state_root(self.home)/'dashboard'/'operation.lock'
+            with lock.open('a') as held:
+                import fcntl; fcntl.flock(held,fcntl.LOCK_EX)
+                self.assertEqual(service.tick_tiers(self.home,now+1900),'busy')
+            settings=self.home/'.config/dev-resource-guard/auto-cleanup.json'; settings.parent.mkdir(parents=True,exist_ok=True); settings.write_text('{"auto_idle_days": 0}')
+            self.assertEqual(service.tick_tiers(self.home,now+3800),'config_error')
+        receipt=json.loads((service.state_root(self.home)/'auto-tier.json').read_text())
+        self.assertEqual(receipt['status'],'config_error'); self.assertIn('auto_idle_days',receipt['config_error'])
+        self.assertEqual(calls,['auto'])
+
+    def test_overlapping_wake_is_a_quiet_skip_not_a_failure(self):
+        lock=service.state_root(self.home)/'periodic-storage.lock'; lock.parent.mkdir(parents=True)
+        with lock.open('a') as held:
+            import fcntl; fcntl.flock(held,fcntl.LOCK_EX)
+            self.assertEqual(service.tick_storage(self.home)['status'],'busy')
+            env=dict(os.environ,HOME=str(self.home))
+            run=subprocess.run([sys.executable,str(ROOT/'scripts/service.py'),'tick-storage'],capture_output=True,text=True,env=env)
+        self.assertEqual((run.returncode,run.stderr),(0,''))
+
+    def test_storage_job_runs_through_the_app_and_reloads_from_wrapper_when_idle(self):
+        app=self.home/service.APP_EXECUTABLE; app.parent.mkdir(parents=True); app.write_text('app'); app.chmod(0o755)
+        p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
+        wrapper=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=wrapper,StartInterval=service.STORAGE_WAKE_SECONDS)))
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'state = not running\n','')) as run:
+            service.enable_job(self.home,'storage',ROOT)
+            self.assertTrue(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['ProgramArguments'],[str(app),'--run-tick'])
 
 if __name__=='__main__':unittest.main()

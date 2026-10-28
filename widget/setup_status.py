@@ -42,9 +42,48 @@ def loaded(home, kind):
                           capture_output=True).returncode == 0
 
 
+def tier_rows(home):
+    """Switches and state of the tiered cleanup; the settings file stays the single source."""
+    for folder in ('runtime/storage', 'scripts'):
+        if str(engine_root() / folder) not in sys.path:
+            sys.path.insert(0, str(engine_root() / folder))
+    import ask_tier, tiers_config
+    settings_file = tiers_config.settings_path(home)
+    edit = 'open -e ' + shlex.quote(str(settings_file))
+    try:
+        cfg = tiers_config.load(home)
+    except ValueError as error:
+        bad = row('tier-config', '分档清理设置', '设置有误，分档清理本轮不执行：{}'.format(error), str(settings_file), command=edit)
+        bad['outcome'] = '设置有误'
+        return [bad]
+    roots = '；'.join(str(r['path']) + (' → 外接盘 ' + str(r['external']) if r['external'] else '') for r in cfg['task_roots'])
+    auto = row('auto-tier', '自动档（不丢东西的清理）',
+               ('已打开：' if cfg['auto_enabled'] else '未打开：打开后，') +
+               '空间低于提醒线时把闲置满 {} 天的任务目录挪到外接盘（原路径留链接），外接盘不在就删可重新生成的构建产物，再清不可用的模拟器和工具缓存。'.format(cfg['auto_idle_days']) +
+               ('任务根目录：' + roots if roots else '还没配置任务根目录，请在设置文件里填写 task_roots。'), str(settings_file), command=edit)
+    auto['outcome'] = '已打开' if cfg['auto_enabled'] else '未打开'
+    pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
+    count = sum(1 for i in pending['items'] if i['state'] == 'pending' and not i.get('unreachable'))
+    ask = row('ask-tier', '询问档（会丢东西的清理先问你）',
+              ('已打开：' if cfg['ask_enabled'] else '未打开：') + '关机满 {} 天的模拟器、开着 {} 小时没人连的模拟器、闲置满 {} 天且已全部推送的任务目录、没人用的运行时，先通知你确认。当前 {} 项待确认。'.format(
+                  cfg['ask']['simulator_unused_days'], cfg['ask']['simulator_unattached_hours'], cfg['ask']['task_idle_days'], count),
+              str(settings_file), command=edit)
+    ask['outcome'] = '已打开' if cfg['ask_enabled'] else '未打开'
+    result = [auto, ask]
+    error = home / '.local/state/dev-resource-guard/ask-error.json'
+    if error.is_file():
+        try:
+            failed = row('ask-error', '询问档最近一轮', '扫描出错：' + json.loads(error.read_text()).get('error', ''))
+            failed['outcome'] = '失败'
+            result.append(failed)
+        except (OSError, ValueError):
+            pass
+    return result
+
+
 def status(home):
     sys.path.insert(0, str(engine_root() / 'scripts'))
-    from service import schedulers
+    from service import FAMILIES, schedulers
     installation = home / '.local/state/dev-resource-guard/installation.json'
     active = installation.is_file()
     rows = [row('common', '已有 Xcode 缓存', '已内置：扫描默认 DerivedData 中四类中间缓存，无需改构建脚本；手动确认清理。')]
@@ -68,22 +107,51 @@ def status(home):
                        if any(j['ours'] for j in jobs) else '；旧调度清理范围未确认' if jobs else '；完成安装后覆盖托管槽和已有 Xcode 中间缓存')
         rows.append(row(kind, title, reason))
         rows[-1]['outcome'] = '暂停' if enabled and is_paused else ('已加载' if enabled else '未启用')
+    tiers = tier_rows(home)
+    ask_on = any(r['id'] == 'ask-tier' and r['outcome'] == '已打开' for r in tiers)
     rows.append(row('devices', '模拟器自动收尾',
-                    '已检测到 devlease；实际可用性与占用须在诊断时复核。' if (home / '.local/bin/devlease').is_file()
+                    '询问档已打开：久未使用的模拟器需要你在「待确认」里确认后才会关闭或删除；系统标为不可用的由自动档清理。' if ask_on
+                    else '已检测到 devlease；实际可用性与占用须在诊断时复核。' if (home / '.local/bin/devlease').is_file()
                     else '未接入设备占用协议：不会关闭或删除模拟器。磁盘页仍可查看其占用。'))
+    rows.extend(tiers)
     rows.append(row('broker', 'MCP 自动收尾', '需要兼容 broker；未接入的实例保留，不强杀。'))
     if active:
         info = json.loads(installation.read_text())
         rows.append(row('installation', '安装结果', info.get('error', '完整引擎已安装；调度状态以上方实际检查为准。'), info.get('runtime', '')))
         rows[-1]['outcome'] = {'active':'已完成','partial':'部分完成','configuring':'正在配置'}.get(info.get('status'),'未知')
     auto = home / '.local/state/dev-resource-guard/automatic-storage.json'
+    failure = home / '.local/state/dev-resource-guard/storage-scheduler.err'
+    data = None
     if auto.is_file():
-        data = json.loads(auto.read_text())
-        completed = sum(len(r['result'].get('deleted', [])) for r in data.get('results', []))
-        amount = sum(e.get('directory_accounting_bytes', 0) for r in data.get('results', []) for e in r['result'].get('deleted', []))
+        try:
+            data = json.loads(auto.read_text())
+        except (OSError, ValueError):
+            data = dict(at=auto.stat().st_mtime, status='unreadable', results=[], error='回执不可读，不视为成功')
+    # A run that dies before writing a receipt only reaches launchd's error log.
+    crashed = (failure.is_file() and failure.stat().st_size > 0 and
+               (data is None or failure.stat().st_mtime > data.get('at', 0) + 60))
+    if crashed:
+        with failure.open('rb') as stream:  # launchd only appends; the tail is enough
+            stream.seek(max(0, failure.stat().st_size - 4096))
+            lines = [line for line in stream.read().decode(errors='replace').splitlines() if line.strip()]
+        when = datetime.fromtimestamp(failure.stat().st_mtime).astimezone().strftime('%m-%d %H:%M')
+        rows.append(row('automatic-last', '自动清理最近结果', '定时清理报错（{}）：{}'.format(when, lines[-1][-300:] if lines else '无输出'), str(failure)))
+        rows[-1]['outcome'] = '失败'
+    elif data is not None:
+        results = data.get('results', [])
+        completed = sum(len(r.get('result', {}).get('deleted', [])) for r in results)
+        amount = sum(e.get('directory_accounting_bytes', 0) for r in results for e in r.get('result', {}).get('deleted', []))
         when = datetime.fromtimestamp(data['at']).astimezone().strftime('%m-%d %H:%M')
-        rows.append(row('automatic-last', '自动清理最近结果', '{} 项完成；{}；大小为目录计量。{}'.format(completed, when, data.get('error','')), size=amount))
-        rows[-1]['outcome'] = {'complete':'已完成','running':'运行中','paused':'已暂停','error':'失败','busy':'等待空闲'}.get(data.get('status'),'未知')
+        reason = '{} 项完成；{}；大小为目录计量。'.format(completed, when)
+        if data.get('error'):
+            reason += '失败原因：' + data['error'] + '。'
+        skipped = ['{}已跳过：{}'.format(FAMILIES.get(r['family'], r['family']), r['skipped']) for r in results if r.get('skipped')]
+        reason += '；'.join(skipped)
+        rows.append(row('automatic-last', '自动清理最近结果', reason, size=amount))
+        outcome = {'complete':'已完成','running':'运行中','paused':'已暂停','error':'失败','busy':'等待空闲','unreadable':'失败'}.get(data.get('status'),'未知')
+        if outcome == '已完成' and skipped:
+            outcome = '已跳过' if len(skipped) == len(results) else '部分跳过'
+        rows[-1]['outcome'] = outcome
     project = home / '.local/state/dev-resource-guard/project.json'
     if project.is_file():
         info = json.loads(project.read_text())

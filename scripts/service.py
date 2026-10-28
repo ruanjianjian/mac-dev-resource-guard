@@ -17,11 +17,19 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'runtime/storage'))
-from storage import StorageManager, atomic_json
+from storage import GIB, StorageManager, atomic_json
 from portable_config import configure
+import ask_tier
+import auto_tier
 import common
+import tiers_config
 
 LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-resource-guard.storage'}
+# launchd wakes the storage job often; each part keeps its own pace inside tick_storage.
+STORAGE_WAKE_SECONDS = 300
+CACHE_INTERVAL = 12 * 3600
+# launchd jobs may not touch removable volumes; run through the app so macOS asks the user once for 资源看板.
+APP_EXECUTABLE = 'Applications/资源看板.app/Contents/MacOS/ResourceDashboard'
 
 
 def schedulers(home, kind):
@@ -54,6 +62,10 @@ def state_root(home):
     return home / '.local/state/dev-resource-guard'
 
 
+class Busy(ValueError):
+    """Another run holds the lock; callers that wake on a timer skip quietly."""
+
+
 @contextlib.contextmanager
 def operation_lock(home, name):
     path = state_root(home) / (name + '.lock')
@@ -62,7 +74,7 @@ def operation_lock(home, name):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError('维护或安装正在进行，请稍后重试')
+            raise Busy('维护或安装正在进行，请稍后重试')
         yield
 
 
@@ -139,6 +151,19 @@ def install_runtime(home):
     return target
 
 
+def stop_idle_job(domain, label):
+    # Disable future dispatch first; disable does not terminate a running job.
+    subprocess.run(['launchctl','disable',domain+'/'+label],check=True,capture_output=True)
+    probe = subprocess.run(['launchctl','print',domain+'/'+label],capture_output=True,text=True)
+    if probe.returncode or re.search(r'^\s*pid = \d+',probe.stdout,re.M):
+        subprocess.run(['launchctl','enable',domain+'/'+label],check=True,capture_output=True)
+        raise ValueError('旧维护本轮仍在运行，保留并恢复调度；结束后重新完成安装即可迁移')
+    result = subprocess.run(['launchctl','bootout',domain+'/'+label],capture_output=True)
+    if result.returncode:
+        subprocess.run(['launchctl','enable',domain+'/'+label],check=True,capture_output=True)
+        raise ValueError('旧调度退出未确认，原配置保留')
+
+
 def enable_job(home, kind, runtime):
     existing = schedulers(home, kind)
     foreign = [j for j in existing if not j['ours']]
@@ -153,16 +178,24 @@ def enable_job(home, kind, runtime):
     domain = f'gui/{os.getuid()}'
     # launchd keeps a stable path; an atomic wrapper update affects only the next
     # invocation. In-flight work retains its immutable runtime and all locks.
-    command = [str(home/'.local/bin/resource-guard-service'), 'tick-storage'] if kind == 'storage' else [
-        str(home/'.local/bin/resource-guard-memory'), 'tick']
-    body = dict(Label=label, ProgramArguments=command, StartInterval=43200 if kind == 'storage' else 60,
+    wrapper_tick = [str(home/'.local/bin/resource-guard-service'), 'tick-storage']
+    app_tick = [str(home/APP_EXECUTABLE), '--run-tick']
+    if kind == 'storage':
+        command = app_tick if (home/APP_EXECUTABLE).is_file() else wrapper_tick
+    else:
+        command = [str(home/'.local/bin/resource-guard-memory'), 'tick']
+    body = dict(Label=label, ProgramArguments=command, StartInterval=STORAGE_WAKE_SECONDS if kind == 'storage' else 60,
                 RunAtLoad=True, EnvironmentVariables={'HOME': str(home), 'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')},
                 StandardOutPath='/dev/null', StandardErrorPath=str(state_root(home)/(kind+'-scheduler.err')))
     # Do not boot out a running job during an upgrade. It finishes with the old code.
     migrated = False
     if existing and existing[0]['loaded']:
         previous = plistlib.loads(path.read_bytes())
-        if previous.get('ProgramArguments') != command:
+        if kind == 'storage' and previous.get('ProgramArguments') != command and previous.get('ProgramArguments') in (wrapper_tick, app_tick):
+            # Our own job moving between the wrapper and the app launcher: reload only while idle.
+            stop_idle_job(domain, label)
+            migrated = True
+        elif previous.get('ProgramArguments') != command:
             old_command = home/'.local/bin'/('dev-'+kind)
             old_args = [str(old_command), 'tick'] if kind=='memory' else [str(old_command),'maintain','--apply']
             relative = 'runtime/memory/scripts/dev_memory.py' if kind=='memory' else 'runtime/storage/cli.py'
@@ -172,18 +205,13 @@ def enable_job(home, kind, runtime):
             if (previous.get('ProgramArguments') != old_args or len(words)!=4 or words[0]!='exec' or
                     not Path(words[1]).name.startswith('python3') or words[2:]!=[str(canonical),'$@']):
                 raise ValueError('同名调度不是可识别的公开旧版本，保留原维护')
-            # Disable future dispatch first; disable does not terminate a running job.
-            subprocess.run(['launchctl','disable',domain+'/'+label],check=True,capture_output=True)
-            probe = subprocess.run(['launchctl','print',domain+'/'+label],capture_output=True,text=True)
-            if probe.returncode or re.search(r'^\s*pid = \d+',probe.stdout,re.M):
-                subprocess.run(['launchctl','enable',domain+'/'+label],check=True,capture_output=True)
-                raise ValueError('旧维护本轮仍在运行，保留并恢复调度；结束后重新完成安装即可迁移')
-            result = subprocess.run(['launchctl','bootout',domain+'/'+label],capture_output=True)
-            if result.returncode:
-                subprocess.run(['launchctl','enable',domain+'/'+label],check=True,capture_output=True)
-                raise ValueError('旧调度退出未确认，原配置保留')
+            stop_idle_job(domain, label)
             migrated = True
-        else:
+        elif previous.get('StartInterval') != body['StartInterval']:
+            # Same command, older pace (1.3 ran every 12 hours): reload only while idle.
+            stop_idle_job(domain, label)
+            migrated = True
+        if not migrated:
             return {'kind': kind, 'reused': existing}
     def write_plist(value):
         # A failed write must not truncate the last working schedule.
@@ -243,15 +271,83 @@ def activate(home):
         return receipt
 
 
-def tick_storage(home):
-    """Same guarded delete path for periodic and manual cleanup, even on roomy disks."""
-    results = []
-    with operation_lock(home, 'periodic-storage'):
+FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存'}
+
+
+def tick_storage(home, now=None):
+    """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace."""
+    now = time.time() if now is None else now
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(operation_lock(home, 'periodic-storage'))
+        except Busy:
+            return {'status': 'busy', 'results': []}   # the previous wake is still working (e.g. a long move)
         if (state_root(home)/'storage-paused').exists():
             return {'status': 'paused', 'results': []}
-        for name, manager in [('managed', StorageManager(configure(home))), ('existing-xcode', common.manager(home))]:
-            if (state_root(home)/'storage-paused').exists(): break
-            started = time.time()
+        previous = read_json(state_root(home)/'automatic-storage.json')
+        if previous and previous.get('status') != 'running' and now - previous.get('at', 0) < CACHE_INTERVAL - 60:
+            receipt = {'status': 'not-due', 'results': [], 'cache_status': previous.get('status')}
+        else:
+            receipt = clean_caches(home)
+        if not (state_root(home)/'storage-paused').exists():
+            tick_tiers(home, now)
+        return receipt
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text()) if path.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def tick_tiers(home, now):
+    """Auto and ask tiers (design C1-C6). Their failures land in their own receipts."""
+    root = state_root(home)
+    last = read_json(root/'tiers-last.json') or {}
+    if now - last.get('at', 0) < last.get('interval_minutes', 30) * 60 - 30:
+        return None
+    empty = dict(schema=1, at=now, config_error=None, actions=[], kept=[], external_missing=[])
+    try:
+        settings = configure(home)
+        cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, root])
+    except ValueError as error:
+        atomic_json(root/'tiers-last.json', dict(at=now, interval_minutes=30))
+        auto_tier.write_receipt(home, dict(empty, status='config_error', config_error=str(error)))
+        return 'config_error'
+    atomic_json(root/'tiers-last.json', dict(at=now, interval_minutes=cfg['check_interval_minutes']))
+    dashboard = root/'dashboard'/'operation.lock'
+    dashboard.parent.mkdir(parents=True, exist_ok=True)
+    with dashboard.open('a') as busy:
+        try:
+            fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            auto_tier.write_receipt(home, dict(empty, status='busy'))   # someone is cleaning by hand
+            return 'busy'
+        try:
+            auto_tier.run(home, cfg, settings, now=now)
+        except Exception as error:
+            auto_tier.write_receipt(home, dict(empty, status='error', error=str(error) or type(error).__name__))
+        if cfg['ask_enabled']:
+            try:
+                pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
+                free = shutil.disk_usage(str(settings.volume)).free
+                ask_tier.maybe_notify(home, pending, free, settings.critical_free_gib * GIB, now)
+                (root/'ask-error.json').unlink(missing_ok=True)
+            except Exception as error:
+                atomic_json(root/'ask-error.json', dict(at=now, error=str(error) or type(error).__name__))
+    return 'ran'
+
+
+def clean_caches(home):
+    """1.3 cleanup of the managed slots and the existing Xcode caches."""
+    results = []
+    for name, build in [('managed', lambda: StorageManager(configure(home))), ('existing-xcode', lambda: common.manager(home))]:
+        if (state_root(home)/'storage-paused').exists(): break
+        started = time.time()
+        # Each family stands alone: a failure is recorded for the dashboard, never hides the other.
+        try:
+            manager = build()
             plan = manager.plan(activity=common.activity(manager.settings.lease_root))
             def protected_activity():
                 activity = common.activity(manager.settings.lease_root)
@@ -260,11 +356,23 @@ def tick_storage(home):
                 return activity
             result = manager.apply(plan, activity_factory=protected_activity, manual=True)
             results.append(dict(family=name, started=started, eligible_bytes=plan['eligible_accounting_bytes'], result=result))
-            atomic_json(state_root(home)/'automatic-storage.json', dict(at=time.time(), status='running', results=results))
-        status = 'paused' if (state_root(home)/'storage-paused').exists() else 'error' if any(r['result']['errors'] for r in results) else 'busy' if any(r['result']['status']=='busy' for r in results) else 'complete'
-        receipt = dict(at=time.time(), status=status, results=results)
-        atomic_json(state_root(home)/'automatic-storage.json', receipt)
-        return receipt
+        except common.CacheUnavailable as reason:
+            results.append(dict(family=name, started=started, skipped=str(reason)))
+        except Exception as error:
+            results.append(dict(family=name, started=started, error=str(error) or type(error).__name__))
+        atomic_json(state_root(home)/'automatic-storage.json', dict(at=time.time(), status='running', results=results))
+    errors = []
+    for r in results:
+        if r.get('error'):
+            errors.append(FAMILIES[r['family']] + '：' + r['error'])
+        elif r.get('result', {}).get('errors'):
+            errors.append('{}：{} 项删除失败'.format(FAMILIES[r['family']], len(r['result']['errors'])))
+    status = 'paused' if (state_root(home)/'storage-paused').exists() else 'error' if errors else 'busy' if any(r.get('result', {}).get('status')=='busy' for r in results) else 'complete'
+    receipt = dict(at=time.time(), status=status, results=results)
+    if errors:
+        receipt['error'] = '；'.join(errors)
+    atomic_json(state_root(home)/'automatic-storage.json', receipt)
+    return receipt
 
 
 def set_enabled(home, kind, enabled):
@@ -296,6 +404,10 @@ def integrate(home, project):
     path.parent.mkdir(exist_ok=True)
     with path.open('w') as f: f.write(content)
     path.chmod(0o755)
+    # Keep the local entry out of git status without editing the project's own .gitignore.
+    ignore = path.parent / '.gitignore'
+    if not ignore.exists() and not ignore.is_symlink():
+        ignore.write_text('# Local build entry generated by mac-dev-resource-guard; not part of the project.\n*\n')
     atomic_json(state_root(home)/'project.json', dict(path=str(project), wrapper=str(path), at=time.time()))
     return {'path': str(project), 'wrapper': str(path)}
 
@@ -305,6 +417,8 @@ def main():
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     result = activate(home) if a.action=='activate' else tick_storage(home) if a.action=='tick-storage' else integrate(home,a.project)
     print(json.dumps(result,ensure_ascii=False))
+    if a.action=='tick-storage' and result['status']=='error':
+        print(result['error'],file=sys.stderr);sys.exit(2)
 
 if __name__=='__main__':
     try: main()

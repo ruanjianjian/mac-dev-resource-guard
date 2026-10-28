@@ -1,4 +1,5 @@
-"""Explicit manual maintenance of existing Xcode caches; never used by tick/maintain."""
+"""Existing Xcode caches: manual cleanup and the periodic service tick, never dev-storage maintain."""
+import os
 import re
 from pathlib import Path
 
@@ -22,13 +23,34 @@ def activity(lease_root):
     return CommonActivity(**vars(base))
 
 
+class CacheUnavailable(ValueError):
+    """The standard cache links to a location that is absent now, e.g. an unplugged drive."""
+
+
+def standard_root(home, settings):
+    root = home / 'Library/Developer/Xcode/DerivedData'
+    target = root.resolve()
+    if target == root:
+        return root
+    # A relocated cache (often on an external drive) is cleaned where it really lives,
+    # unless the link widens the scope to a home, a whole volume or our own roots.
+    owned = [Path(p) for p in settings.cache_roots] + [Path(settings.state_root)]
+    if (target == Path(target.anchor) or target == home or target in home.parents or os.path.ismount(target) or
+            any(target == p or target in p.parents or p in target.parents for p in owned)):
+        raise ValueError('Xcode 缓存链接指向的范围过大：{}；这一类不清理'.format(target))
+    if not target.is_dir():
+        raise CacheUnavailable('Xcode 缓存链接指向的位置不存在：{}（外接盘未连接？）；本轮跳过'.format(target))
+    try:
+        os.listdir(target)
+    except PermissionError:
+        raise ValueError('没有读取 {} 的权限：请在系统提示里允许「资源看板」访问可移除宗卷；这一类本轮未清理'.format(target))
+    return target
+
+
 def manager(home):
     settings = configure(home)
     home = Path(home).resolve()
-    root = home / 'Library/Developer/Xcode/DerivedData'
-    if root.resolve() != root:
-        raise ValueError('Xcode 缓存路径包含符号链接；请核实路径，未启用清理')
-    settings.cache_roots = [root]
+    settings.cache_roots = [standard_root(home, settings)]
     settings.work_roots = []
     # Native caches stay conservative even if the disk is critically low.
     settings.normal_days = settings.pressure_days = settings.critical_days = 7

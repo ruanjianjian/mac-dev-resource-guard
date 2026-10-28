@@ -1,4 +1,4 @@
-# Mac Dev Resource Guard · 资源看板 1.3
+# Mac Dev Resource Guard · 资源看板 1.4
 
 **完整安装后自动维护开发缓存，项目接入后复用 Xcode 构建缓存。** 面板默认隐藏，需要时点击菜单栏图标或按 `⌃⌥⌘S` 打开。
 
@@ -30,7 +30,7 @@ App 位于 `~/Applications/资源看板.app`，启动后不打开面板。快捷
 
 | 能力 | 实际范围 |
 |---|---|
-| 磁盘维护 | 安装后一次，此后每 12 小时检查固定构建槽与默认 Xcode DerivedData；仅清理符合保留期和安全检查的四类中间缓存，默认 DerivedData 至少七天。 |
+| 磁盘维护 | 安装后一次，此后每 12 小时检查固定构建槽与默认 Xcode DerivedData；仅清理符合保留期和安全检查的四类中间缓存，默认 DerivedData 至少七天。DerivedData 换成指向外接盘的链接时按真实目录清理。 |
 | 内存维护 | 每分钟检查，有归属与闲置证明才收尾支持的托管后台；不是定时强制释放内存。 |
 | 占用保护 | 删除前复核进程、打开文件、槽锁、pin、lease、最近使用和路径身份；在用、受保护、状态不明的内容保留。 |
 | 原有安装 | 保留已有命令、合法缓存根和保护状态，复用可验证的旧守护；未知自定义调度会报告未完成，不启动第二套。 |
@@ -38,6 +38,30 @@ App 位于 `~/Applications/资源看板.app`，启动后不打开面板。快捷
 四类中间目录为 `Intermediates.noindex`、`Index.noindex`、`ModuleCache.noindex`、`SDKStatCaches.noindex`。保留源码、Products、任务目录、测试证据、模拟器数据和登录态；不强杀用户应用、不删除 swap。模拟器与 MCP 缺少兼容占用或排空协议时保留。
 
 Go 编译缓存、模拟器、Claude 会话和任务目录可查看占用，但不自动删除。没有安全候选时可清理量就是 0；目录计量不等于 APFS 全盘净释放空间，不承诺固定回收容量。磁盘空间目标只提醒，不阻止构建。
+
+## 分档自动清理（1.4）
+
+安全的自动做，会丢东西的先问你，判断不了的不碰。设置在 `~/.config/dev-resource-guard/auto-cleanup.json`（与 `config.json` 分开，旧命令照常读原配置），看板「接入设置」可开关两档。
+
+| 档 | 做什么 | 默认 |
+|---|---|---|
+| 自动档 | 空间低于提醒线时，把闲置满 N 天（默认 3）的任务目录整个挪到外接盘、原路径留链接；外接盘不在就删闲置任务里被 git 忽略的构建产物；再删系统标为不可用的模拟器，用 go/npm/pnpm 自带命令清缓存。回到目标线就停，每次都记在「自动记录」。 | 关闭，打开一次即授权 |
+| 询问档 | 关机满 7 天的模拟器删除、开着 4 小时没开发工具连着的模拟器关机、闲置满 7 天且全部提交推送的任务目录删除、没有模拟器在用的运行时删除。先发系统通知、菜单栏亮红点，你在「待确认」勾选后才执行，执行前逐项再核对。 | 打开 |
+| 永不档 | 有未提交或未推送改动、正在用、被 pin 保护、含代码仓库以外文件（如报告）的任务目录；有开发工具连着的模拟器。 | — |
+
+```json
+{
+  "schema": 1,
+  "auto_enabled": true,
+  "task_roots": [{"path": "/Users/me/work/worktrees", "external": "/Volumes/T9/work/worktrees"}],
+  "auto_idle_days": 3,
+  "ask": {"simulator_unused_days": 7, "simulator_unattached_hours": 4, "task_idle_days": 7}
+}
+```
+
+外接盘需要授权：macOS 不允许后台命令行任务读写外接盘，所以磁盘定时任务通过「资源看板」App 运行。第一次碰到外接盘时，系统会询问是否允许「资源看板」访问可移除宗卷，请点允许；没有授权时，自动档改为删构建产物，看板「自动记录」显示「需要授权」。每次重新安装（App 签名变化）后可能需要再允许一次。
+
+定时任务每 5 分钟唤醒：过期 Xcode 中间缓存仍 12 小时清一轮，分档清理按 `check_interval_minutes`（默认 30）检查。设置写错时本轮不清理，看板显示哪一项错了。完整契约见 [设计](docs/epics/auto-cleanup/design.md)。
 
 ## 接入 Xcode 构建缓存
 
@@ -57,7 +81,16 @@ cd "/你的项目目录"
   -scheme App -configuration Debug -sdk iphonesimulator build
 ```
 
-将工程路径和 scheme 换成项目实际值；平台可选 `ios-simulator`、`ios-device`、`macos`，入口配置与原构建参数保持一致，不另传 `-derivedDataPath`。原脚本和 Agent 必须实际调用这个入口才算接入。
+构建脚本自己调用 xcodebuild（例如 Flutter 项目先生成工程再编译）时，用整段脚本模式：入口把这份固定缓存的位置放进你指定的环境变量，脚本不用改，只要它支持用环境变量指定 DerivedData。
+
+```bash
+./.dev-resource-guard/xcode-build --platform ios-simulator --configuration Debug \
+  --cache-env ELYS_SIMULATOR_DERIVED_DATA_PATH -- ./tool/run_ios_simulator.sh build
+```
+
+缓存根配在外接盘上而盘没插时，入口直接报「缓存所在的盘未连接」，不会在内置盘另建一份。
+
+将工程路径和 scheme 换成项目实际值；平台可选 `ios-simulator`、`ios-device`、`macos`，入口配置与原构建参数保持一致，不另传 `-derivedDataPath`。原脚本和 Agent 必须实际调用这个入口才算接入。生成的 `.dev-resource-guard/` 自带忽略规则，不会出现在 `git status` 里，也不改项目的 `.gitignore`。
 
 同一工作树、工具链、平台和配置使用同一个槽，并通过跨进程锁串行写入；不同工作树的可变构建输出保持隔离。Go、npm、pnpm、pub、Gradle 用户下载缓存沿用工具默认全局位置，不给每个任务复制一份。Flutter 自身构建继续使用每工作树输出，不强行重定向。
 
@@ -81,6 +114,8 @@ python3 scripts/install.py
 ## 验证与边界
 
 1.3 已在真实 Mac 完整安装，自动清理 5 项真实缓存，目录计量约 4.86 GiB；真实 Xcode 连续构建验证了同槽复用，项目查询不会计作成功构建。此结果不是每台机器的容量承诺。
+
+1.3.1 修复：DerivedData 是链接时整轮自动清理失败；某一类失败后看板仍只显示「已加载」；项目接入后仓库多出未跟踪文件。自动化增至 253 项（238 通过、15 项外部集成条件跳过）。
 
 自动化共 245 项：230 通过、15 项外部集成条件跳过；CI 通过。最终原生交互复验按用户要求停止，后台实测不替代原生验收，未宣称人工验收完成。[实现与验证 PR #4](https://github.com/ruanjianjian/mac-dev-resource-guard/pull/4)
 
