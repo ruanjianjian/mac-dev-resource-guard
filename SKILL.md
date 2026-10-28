@@ -1,46 +1,70 @@
 ---
 name: mac-dev-resource-guard
-description: 在 macOS 上用桌面看板诊断内存压力、安全回收有闲置证据的开发后台，并为 App、iOS 模拟器自动化构建复用固定缓存。用于电脑内存吃满、开发缓存重复增长、安装或分享本机资源治理工具。
+description: Mac 开发者的磁盘空间管家（资源看板）。安装资源看板，按用户定的空间目标出计划，处理需要取舍和判断的部分；各任务共享构建缓存、用好外接盘；通用清理借力 Mole。用于：磁盘或内存吃满、开发缓存增长太快、用户发来本仓库链接要安装、用户粘贴了「用 mac-dev-resource-guard 这个 skill 帮我看一下磁盘空间」。
 ---
 
-# Mac 开发资源守护
+# 资源看板（mac-dev-resource-guard）
 
-## 1.5 推荐安装
+资源看板是菜单栏里的一张封面：还剩多少、在帮你管什么、有什么要你拍板。后台脚本负责规则内的事（共享缓存、挪闲置任务、删能重新生成的产物）；**为了凑够用户的空间目标、需要取舍和判断的部分，由你（用户的 agent）来做**，每一项都先跟用户确认。命令都在 `~/.local/bin/resource-guard-service`，下文简写为 `rgs`，可以先定义：`rgs() { ~/.local/bin/resource-guard-service "$@"; }`。
 
-用户要装或升级时，运行 `curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash`（或在克隆里运行 `python3 scripts/install.py`）。装好后不弹面板，App 在后台体检并发「体检完成」通知；用户在体检页一次确认「共享构建缓存 / 自动清理 / 使用外接盘」。替用户打开这些开关、改 Xcode 全局设置前，先征得用户同意。详见 [装好就省心](docs/epics/one-click-setup/brief.md)。
+## 1. 用户发来仓库链接、要安装时
 
-## 1.3 完整安装说明
+1. 安装（会下载源码、在本机编译、装好 App、后台任务和这份 skill）：
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash
+   ```
+   缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。
+2. 记下你是谁，以后看板要交接时会打开你：`rgs agent-app claude`（Claude Code）或 `rgs agent-app codex`（Codex）。
+3. **主动问用户空间目标**：「内置盘至少想留多少？」给一个建议值（磁盘约 10%，取整到 10 GB）。用户答了就 `rgs target 50`。
+4. 问用户要不要打开三项（共享构建缓存、自动清理、使用外接盘）。同意后：
+   ```bash
+   python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-apply --ids caches,clean,external
+   ```
+   打开共享构建缓存会全局打开 Xcode 编译缓存（改 `~/.zshenv` 一段带标记的设置），先讲清楚再做。macOS 问「资源看板」能否访问外接盘时，请用户点允许。
+5. 按第 2 节出计划、处理。
 
-用户要求安装即自动维护时，运行 `python3 scripts/install.py`：安装 App、独立完整引擎和安全调度。首次与每12小时处理固定槽及默认 DerivedData 过期中间缓存，内存每分钟观察并复用可验证的已有 tick。原命令不覆盖，缓存根、pin、lease 与锁共用；未知自定义调度明确 partial，不假称成功。接入设置可暂停本工具维护。
+## 2. 出计划、处理
 
-通过接入设置选择项目生成 `.dev-resource-guard/xcode-build`，原构建参数经入口执行。真实成功 build 两次才计为同槽复用，查询不计数；不擅自改写原构建脚本。仅 `widget/build.py` 构建 App 不开启调度，需完成安装动作。下文 `setup.py install` 是保留的低层兼容入口，仍不自动开启；对新用户使用上面的完整安装命令。
+`rgs plan --json` 输出计划：目标、还差多少、三段（`auto` 会自动做的 / `ask` 等你点头的 / `judge` 需要判断的）、全做完能到多少、还差时的建议。没体检过时会提示先体检。
 
-把内存治理和构建缓存治理配合使用：减少无消费者的后台进程，避免同一任务每轮构建都生成新缓存。适用于 macOS、Python 3.9+，无需 pip 包。包内含可执行实现和隔离测试，不能只复制这份 SKILL.md。
+- **auto**：交给后台脚本，不要自己动手。只告诉用户「这部分会自动做，约 N GB」。
+- **ask**：逐项讲清楚是什么、为什么能删、会失去什么，用户同意的才执行。执行走看板的确认命令（执行前会逐项复核）：
+  ```bash
+  B=~/Applications/资源看板.app/Contents/Resources/backend.py
+  python3 $B pending-preview            # 拿到 token 和各项 id
+  python3 $B pending-clean --token <token> --ids <id1,id2>
+  ```
+- **judge**：工具判断不了的，比如「一个任务里有 3 份 Xcode 构建产物」「一个大任务最近还动过」。你去看证据再给建议：
+  - 多份构建产物：看各自最近的修改时间、对应哪个分支或脚本、构建脚本现在指向哪一份；只建议删明显没人用的。用户同意后 `rgs prune <目录>`（只删可重建产物名单里的目录，正在用的会被拒绝）。
+  - 想收尾的任务：先确认所有仓库都已提交并推送，再问用户，同意后用 `git worktree remove` 收尾。有未提交或未推送的改动绝不删。
+  - 想让构建以后不再各编一份：可以改项目的构建脚本（例如让 DerivedData 指向共享位置）。**先把改动给用户看，同意后在新分支上改**，按项目自己的流程提交。
+- 资源看板自己的设置（目标、闲置天数、开关）可以直接改，改完告诉用户。
+- 全做完仍不够时，如实告诉用户还差多少，给出建议（收尾不用的任务、换更大的外接盘），**不要为了凑数放宽规则**。
 
-## 桌面可视化
+## 3. 看板叫你来时
 
-用户需要随时查看资源时，运行 `python3 widget/build.py`，生成 `~/Applications/资源看板.app`。它启动后只显示菜单栏小图标，默认隐藏面板；左键图标或全局快捷键呼出，右键图标可刷新或退出。面板可置顶，每15秒只采样状态。App 内置已有 Xcode 缓存扫描与手动清理，优先复用已有命令；接入设置可显式安装命令、启停调度，写操作须确认。全局唤起默认⌃⌥⌘S，注册冲突时自动选择备用组合。已有同名App时构建器保留并要求另选输出；核实本任务生成物后再更新。详细行为见 [桌面组件](docs/widget.md)。
+出意外时（脚本做完仍低于目标，或某处一天涨了 10 GB 以上），看板会发通知，用户点通知后会把一句话粘给你。照第 2 节处理，并说明这次多出来的是什么。
 
-## 首次使用
+## 4. 通用清理：借力 Mole
 
-先读 [安装与能力边界](references/install.md)，执行 `scripts/setup.py doctor`。安装请求授权安装工具，不自动授权周期清理；已有授权足够时直接推进。安装不覆盖现有同名命令、配置或调度，不导入其他人的设备、账号、会话或保护记录。
+系统缓存、日志、App 残留、安装包、找大文件这些通用清理，交给 [Mole](https://github.com/tw93/Mole)（`mo`）。
 
-- 内存压力、交换空间、闲置进程：读 [内存治理](references/memory.md)。先 `dev-memory status --json`，区分压力与进程 RSS，不把低 free RAM 当故障。
-- App／模拟器重复编译缓存、依赖共享：读 [缓存复用](references/cache.md)，接入正在修改的构建入口。不要只告诉调用方一个路径，却让它绕过锁共写。
-- 冷缓存清理：先 `dev-storage plan`。获得对应范围授权后才 `dev-storage maintain --apply`。只清本工具专用缓存根下四类中间目录，独立于内存回收。
-- 定期治理：沿用已有调度；没有时，按安装说明选择一个调度方式。每分钟内存观测不是每分钟强制清理。磁盘维护每 12 小时。
+- 没装就先问用户，同意后安装：`brew install mole`，或照 Mole README 的脚本安装。
+- **每次调用 Mole 前先运行 `rgs mole-guard`**：把资源看板管的地方（共享缓存、任务目录、外接盘目录）写进 Mole 的白名单，免得它清掉共享缓存。
+- 先预演给用户看：`mo clean --dry-run`、`mo purge --dry-run`、`mo installer --dry-run`；找大文件用 `mo analyze --json <目录>`。用户确认后再去掉 `--dry-run` 执行。
+- 用户在看板里关掉共享构建缓存时，运行 `rgs mole-guard remove` 撤掉白名单里资源看板加的那一段。
+
+## 5. 内存
+
+只回收有闲置证据的开发后台（资源看板已有，`dev-memory status --json` 查看）。用户说卡、内存紧时，用 `mo status` 看谁在占用、给建议。**不做「一键释放内存」**：不 purge、不删 swap、不 killall、不强杀用户的 App、容器、数据库或调试器。
 
 ## 不变的边界
 
-1. 空间阈值只提醒，永远不是编译、安装依赖或测试的准入门槛。遇到实际写入失败再处理错误，不擅自停工或换旧包。
-2. 活跃或状态未知的资源保留。CPU=0、进程老、PPID=1 都不是闲置证明；不使用 purge、删除 swap、killall、SIGKILL 清内存，不停止用户 App、容器、数据库、代理、调试器或共享联调栈。
-3. 模拟器只有两条路径：兼容占用协议证明原任务结束并原子复核后正常关机；或进入分档清理的询问档，由用户在看板「待确认」逐项勾选后关机或删除，执行前再复核。系统已标为不可用的模拟器由自动档删除。删除含登录态的设备数据永远不自动执行。
-4. 保护源码、Git、未提交或未推送修改、验收包、报告、登录态、pin/lease。只由拥有者释放保护。删除范围只按 [分档自动清理](docs/epics/auto-cleanup/brief.md) 的三档规则扩大：自动档只做不丢东西的事（挪到外接盘留链接、删被 git 忽略的构建产物、清不可用模拟器和工具自带缓存）；会丢东西的进询问档；判断不了的保留。
-5. 全局下载缓存共享；不同工作树的可变 build、Pods、node_modules、.dart_tool、SwiftPM checkout 隔离。固定缓存键不含时间、PID、commit 或回归轮次。
-6. 报告关闭／清理对象、理由、失败或待核实结果，以及前后系统指标。目录块数、RSS 估计、全机空间净变化分别报告，不能当作相同的实际释放量。
+1. 空间目标只决定何时整理、整理到多少，永远不拦编译、装依赖或跑测试。
+2. 正在用、被保护（pin、lease）、有未提交或未推送改动、状态判断不了的，一律保留。
+3. 删除和挪动只走看板的命令、`rgs prune` 或 Mole（先预演、用户确认）；不直接 `rm -rf`。
+4. 模拟器不放外接盘；删除含登录状态的模拟器只走「等你确认」或用户在对话里点头。
+5. 外接盘拔掉时，用到它的构建会报错，不要在内置盘另建一份去「修好」它；告诉用户插回即可。
+6. 汇报时分清：目录大小、实际腾出的空间、还差多少，不混为一谈。
 
-本包不携带特定项目的 hooks、账号池、broker 插件或自动化脚本。不可宣称安装后已有旧脚本全部改用固定缓存；逐个修改构建入口、验证实际路径及锁后才算接入。已有编译和验收链路继续保留，不在线迁移它们的缓存。
-
-## 验证
-
-`python3 scripts/verify.py` 在临时 HOME 和假设备／假进程夹具中验证安装、保护检查、固定缓存及并发锁；不会压满本机或关闭真实开发任务。外部 Gradle／broker 集成默认跳过，详见 [验证范围](references/validation.md)。
+更多：[README](README.md) · [装好就省心](docs/epics/one-click-setup/brief.md) · [安装与兼容入口](references/install.md) · [内存](references/memory.md) · [缓存复用](references/cache.md) · 测试：`python3 scripts/verify.py`。

@@ -41,13 +41,14 @@ extension Snapshot {
     }
 }
 
-enum CoverPage { case cover, pending, space, switches }
+enum CoverPage { case cover, pending, space, switches, plan }
 
 /// Loads the checkup and the pending list on its own, so the cover never waits for the old panel's work.
 final class CoverStore: ObservableObject {
     @Published var page: CoverPage = .cover
     @Published var checkup: BackendReply?
     @Published var pending: BackendReply?
+    @Published var plan: BackendReply?
     @Published var working = ""
     @Published var message = ""
     private var loading = false
@@ -59,24 +60,27 @@ final class CoverStore: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let checkup = try? DashboardActions.call(scan ? "checkup-scan" : "checkup-preview")
             let pending = try? DashboardActions.call("pending-preview")
+            let plan = try? DashboardActions.call("plan-preview")
             DispatchQueue.main.async {
                 if let checkup, checkup.status == "ok" { self.checkup = checkup }
                 if let pending, pending.status == "ok" { self.pending = pending }
+                if let plan, plan.status == "ok" { self.plan = plan }
                 self.loading = false
                 if scan { self.working = "" }
             }
         }
     }
 
-    func perform(_ action: String, ids: [String], token: String? = nil, doing: String) {
+    func perform(_ action: String, ids: [String], token: String? = nil, doing: String, path: String? = nil) {
         guard working.isEmpty else { return }
         working = doing; message = ""
         DispatchQueue.global(qos: .utility).async {
-            let reply = try? DashboardActions.call(action, token: token, ids: ids)
+            let reply = try? DashboardActions.call(action, token: token, path: path, ids: ids.isEmpty ? nil : ids)
             DispatchQueue.main.async {
                 self.working = ""
                 self.message = reply?.message ?? "没连上后台，请稍后再试。"
                 if action.hasPrefix("checkup"), let reply, reply.status == "ok" { self.checkup = reply }
+                if action == "plan-target", let reply, reply.status == "ok" { self.plan = reply; self.message = "" }
                 self.refresh()
                 (NSApp.delegate as? AppDelegate)?.model.refresh()
             }
@@ -92,6 +96,29 @@ final class CoverStore: ObservableObject {
         return String(title[title.index(after: a)..<b])
     }
     var pendingRows: [ResourceRow] { pending?.rows?.filter { $0.category == "待确认" } ?? [] }
+    var target: ResourceRow? { plan?.rows?.first { $0.category == "目标" } }
+    var targetGB: Double? { target.flatMap { Double($0.title.filter { $0.isNumber }) } }
+    /// Measured against the number on the cover, so the two never disagree.
+    func gapGB(_ free: Double?) -> Double { max(0, (targetGB ?? 0) - (free ?? 0)) }
+    func planRows(_ category: String) -> [ResourceRow] { plan?.rows?.filter { $0.category == category } ?? [] }
+
+    /// agent-handoff AC-04: the words for the agent go to the clipboard, and the agent App opens.
+    func handOff() {
+        DispatchQueue.global(qos: .utility).async {
+            let reply = try? DashboardActions.call("plan-handoff")
+            DispatchQueue.main.async {
+                guard let reply else { self.message = "没连上后台，请稍后再试。"; return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(reply.message, forType: .string)
+                if let app = reply.rows?.first, app.eligible {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: app.detail))
+                    self.message = "要说的话已复制，在 \(app.title) 里粘贴发送即可。"
+                } else {
+                    self.message = "要说的话已复制，粘到你的 agent 对话里发送即可。"
+                }
+            }
+        }
+    }
 }
 
 struct CoverPanel: View {
@@ -105,6 +132,7 @@ struct CoverPanel: View {
             case .pending: PendingPage(model: model, store: store)
             case .space: SpacePage(model: model, store: store)
             case .switches: SwitchesPage(model: model, store: store)
+            case .plan: PlanPage(model: model, store: store)
             }
         }
         .frame(width: 300, height: 340)
@@ -124,6 +152,14 @@ private struct Cover: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("还剩").font(.system(size: 12)).foregroundColor(soft)
                 Text("\(number0(s.free)) GB").font(.system(size: 22, weight: .medium)).foregroundColor(.white)
+                if let target = store.target {
+                    // The user's target and how far off it is (space-target-plan AC-03); tap for the plan.
+                    let gap = store.gapGB(s.free)
+                    Button { store.page = .plan } label: {
+                        Text(gap < 1 ? "\(target.title) · 已达到 ›" : "\(target.title) · 还差 \(number0(gap)) GB ›")
+                            .font(.system(size: 11)).foregroundColor(Ink.cream)
+                    }.buttonStyle(.plain).padding(.top, 2)
+                }
             }.padding(18)
             Button { store.page = .space } label: {
                 ZStack {
@@ -316,15 +352,88 @@ private struct SpacePage: View {
     }
 }
 
+private struct PlanPage: View {
+    @ObservedObject var model: Monitor
+    @ObservedObject var store: CoverStore
+    var body: some View {
+        Page(model: model, store: store, title: "计划") {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let target = store.target {
+                        let gap = store.gapGB(model.snapshot.free)
+                        Text(gap < 1 ? "\(target.title)，已达到。" : "\(target.title)，还差 \(number0(gap)) GB。")
+                            .font(.system(size: 12)).foregroundColor(Ink.text)
+                    }
+                    ForEach(store.planRows("计划")) { section in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(section.title).font(.system(size: 12, weight: .medium)).foregroundColor(Ink.navy)
+                                Spacer()
+                                Text((section.bytes ?? 0) > 0 ? size(section.bytes ?? 0) : "—").font(.system(size: 12)).foregroundColor(Ink.muted)
+                            }
+                            let items = store.planRows(section.id)
+                            if items.isEmpty {
+                                Text(section.id == "auto" ? "暂时没有，后台每 30 分钟看一次" : "没有").font(.system(size: 11)).foregroundColor(Ink.muted)
+                            }
+                            ForEach(items.prefix(2)) { entry in
+                                HStack(alignment: .top) {
+                                    Text(entry.title).lineLimit(1)
+                                    Spacer(minLength: 6)
+                                    if let bytes = entry.bytes { Text(size(bytes)) }
+                                }.font(.system(size: 11)).foregroundColor(Ink.muted)
+                            }
+                        }
+                        .padding(.bottom, 4)
+                        .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
+                    }
+                    if let reach = store.plan?.message, !reach.isEmpty {
+                        Text(reach + "。").font(.system(size: 12)).foregroundColor(Ink.text)
+                    }
+                    ForEach(store.planRows("建议")) { tip in
+                        Text("· " + tip.title + "：" + tip.reason).font(.system(size: 11)).foregroundColor(Ink.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            HStack {
+                Button("交给 agent") { store.handOff() }.buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium)).foregroundColor(Ink.navy)
+                Spacer()
+                if store.pendingRows.count > 0 {
+                    Button("去确认 ›") { store.page = .pending }.buttonStyle(.plain)
+                        .font(.system(size: 12)).foregroundColor(Ink.muted)
+                }
+            }.padding(.top, 8)
+        }
+    }
+}
+
 private struct SwitchesPage: View {
     @ObservedObject var model: Monitor
     @ObservedObject var store: CoverStore
     @State private var confirmingRestore = false
     private let names = ["caches": "共享构建缓存", "clean": "自动清理", "external": "外接盘"]
+    private func setTarget(_ gb: Double) {
+        store.perform("plan-target", ids: [], token: nil, doing: "正在改目标…", path: String(Int(gb)))
+    }
 
     var body: some View {
         Page(model: model, store: store, title: "帮你管着") {
             VStack(spacing: 0) {
+                // The one number the user sets (space-target-plan AC-01).
+                if let target = store.target, let gb = Double(target.title.filter { $0.isNumber }) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("空间目标").font(.system(size: 12)).foregroundColor(Ink.text)
+                            Text("内置盘至少留这么多").font(.system(size: 11)).foregroundColor(Ink.muted)
+                        }
+                        Spacer()
+                        Stepper("\(Int(gb)) GB", onIncrement: { setTarget(gb + 10) }, onDecrement: { setTarget(max(10, gb - 10)) })
+                            .font(.system(size: 12)).foregroundColor(Ink.navy).disabled(!store.working.isEmpty)
+                    }
+                    .padding(.vertical, 9)
+                    .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
+                }
                 ForEach(["caches", "clean", "external"], id: \.self) { id in
                     let row = store.suggestion(id)
                     HStack(alignment: .top) {

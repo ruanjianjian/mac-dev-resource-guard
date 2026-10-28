@@ -23,6 +23,8 @@ DEFAULTS = {
     'caches_enabled': False,
     'xcode_compile_cache': False,
     'external_root': None,
+    # agent-handoff: which agent App to open when the dashboard hands work over (claude / codex).
+    'agent_app': None,
 }
 FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache')
 
@@ -78,6 +80,8 @@ def load(home, owned=()):
     if not isinstance(names, list) or any(not isinstance(n, str) or not n or '/' in n or n in ('.', '..', '.git') for n in names):
         raise ConfigError('prune_names 必须是目录名列表')
     owned = [Path(p).resolve() for p in owned]
+    if cfg['agent_app'] not in (None, 'claude', 'codex'):
+        raise ConfigError('agent_app 只能是 claude 或 codex')
     if cfg['external_root'] is not None:
         external_root = Path(str(cfg['external_root']))
         if not external_root.is_absolute() or _too_broad(external_root, home, owned):

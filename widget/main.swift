@@ -17,6 +17,7 @@ struct Snapshot {
     var guardStatus = "未连接内存守护"
     var pending = 0
     var notice: (count: Int, critical: Bool)? = nil
+    var agentReason: String? = nil
     var at = Date()
     var errors: [String] = []
     var pressureLabel: String {
@@ -103,6 +104,11 @@ func sample() -> Snapshot {
         s.notice = (count, (notice["reason"] as? String) == "critical")
         try? FileManager.default.removeItem(at: request)   // one notice per request (design C6)
     }
+    let agent = tiers.appendingPathComponent("agent-request.json")
+    if let reason = readJSON(agent)["reason"] as? String {
+        s.agentReason = reason
+        try? FileManager.default.removeItem(at: agent)
+    }
     return s
 }
 
@@ -127,6 +133,9 @@ final class Monitor: ObservableObject {
                 self.snapshot = value; self.loading = false; self.busy = false
                 (NSApp.delegate as? AppDelegate)?.updateStatus(value)
                 if let notice = value.notice { (NSApp.delegate as? AppDelegate)?.notify(notice.count, critical: notice.critical) }
+                if let reason = value.agentReason {
+                    (NSApp.delegate as? AppDelegate)?.post(title: "有新占用需要判断", body: reason + "。点一下交给 agent。", tab: "agent")
+                }
             }
         }
     }
@@ -323,7 +332,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
         let tab = response.notification.request.content.userInfo["tab"] as? String ?? "pending"
-        DispatchQueue.main.async { self.showPanel(page: tab == "pending" ? .pending : .cover) }
+        DispatchQueue.main.async {
+            if tab == "agent" { self.store.handOff() }
+            self.showPanel(page: tab == "pending" ? .pending : tab == "agent" ? .plan : .cover)
+        }
         done()
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -371,7 +383,8 @@ func renderCover(_ tab: String, to out: String) throws {
     let store = CoverStore()
     store.checkup = try DashboardActions.call("checkup-preview")
     store.pending = try DashboardActions.call("pending-preview")
-    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches][tab] ?? .cover
+    store.plan = try DashboardActions.call("plan-preview")
+    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-plan": .plan][tab] ?? .cover
     if let message = store.checkup?.message, !message.isEmpty { print("体检 · " + message) }
     for row in store.checkup?.rows ?? [] where ["建议", "提醒", "外接盘"].contains(row.category) { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
     for row in store.pendingRows { print("待确认 · \(row.title) · \(row.reason)") }

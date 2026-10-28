@@ -24,6 +24,9 @@ import auto_tier
 import common
 import tiers_config
 import toolcaches
+import checkup
+import mole
+import plan as space_plan
 from storage import Activity
 
 LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-resource-guard.storage'}
@@ -339,7 +342,138 @@ def tick_tiers(home, now):
                 (root/'ask-error.json').unlink(missing_ok=True)
             except Exception as error:
                 atomic_json(root/'ask-error.json', dict(at=now, error=str(error) or type(error).__name__))
+        try:
+            refresh_plan(home, cfg, settings, now)
+            (root/'plan-error.json').unlink(missing_ok=True)
+        except Exception as error:
+            atomic_json(root/'plan-error.json', dict(at=now, error=str(error) or type(error).__name__))
     return 'ran'
+
+
+AGENT_REQUEST = 'agent-request.json'
+
+
+def current_plan(home, cfg, settings, report=None, now=None):
+    report = report or checkup.load_report(home)
+    if report is None:
+        return None
+    pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
+    external = cfg['external_root']
+    ready = external is not None and auto_tier.volume_ready(external)
+    free = shutil.disk_usage(str(settings.volume)).free
+    return space_plan.build(home, cfg, settings, report, pending, free, ready, now=now)
+
+
+def refresh_plan(home, cfg, settings, now):
+    """Keep the checkup fresh, save the plan, and wake the agent only for the unexpected (agent-handoff AC-05)."""
+    report = checkup.load_report(home)
+    if report is None or now - report.get('at', 0) > 6 * 3600:
+        report = checkup.scan(home, cfg, now=now)
+    plan = current_plan(home, cfg, settings, report, now)
+    space_plan.save(home, plan)
+    reason = space_plan.agent_needed(home, plan, space_plan.growth(home, report, now), now)
+    if reason:
+        atomic_json(state_root(home)/AGENT_REQUEST, dict(at=now, reason=reason, prompt=space_plan.AGENT_PROMPT))
+        ask_tier.launch_app()
+    return plan
+
+
+def set_target(home, gib):
+    """The user's one number (space-target-plan AC-01): warning = target, stop at 110%, critical at half."""
+    value = float(gib)
+    capacity = shutil.disk_usage(str(home)).total / GIB
+    if not 5 <= value <= capacity * 0.9:
+        raise ValueError('空间目标要在 5 GB 到 {:.0f} GB 之间'.format(capacity * 0.9))
+    path = home / '.config/dev-resource-guard/config.json'
+    body = json.loads(path.read_text()) if path.exists() else {}
+    previous = dict(body)
+    body.update(space_plan.thresholds(value))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(path, body)
+    try:
+        configure(home)
+    except ValueError:
+        atomic_json(path, previous)
+        raise
+    return body
+
+
+SKILL = 'mac-dev-resource-guard'
+SKILL_MARKER = '.managed-by-resource-guard'
+SKILL_SKIP = {'.git', '.github', 'tests', '__pycache__', '.DS_Store'}
+
+
+def install_skill(home, source=ROOT):
+    """agent-handoff AC-01: put the companion skill where Codex and Claude Code look, and keep it current.
+
+    An older git clone with no local changes is backed up and replaced; one with changes is kept.
+    """
+    canonical = home / '.codex/skills' / SKILL
+    notes = []
+    if canonical.resolve() == Path(source).resolve():
+        return notes
+    if canonical.is_symlink() or canonical.exists() and not canonical.is_dir():
+        return ['已有同名 skill 不是目录，保留未替换：' + str(canonical)]
+    if canonical.is_dir() and not (canonical / SKILL_MARKER).exists():
+        if not (canonical / '.git').exists():
+            return ['已有同名 skill 不是本工具装的，保留未替换：' + str(canonical)]
+        status = subprocess.run(['git', '-C', str(canonical), 'status', '--porcelain'], capture_output=True, text=True)
+        if status.returncode or status.stdout.strip():
+            return ['旧 skill 有本地改动，保留未替换：' + str(canonical)]
+        backup = state_root(home) / 'skill-backups' / str(time.time_ns())
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(canonical, backup)
+        notes.append('旧 skill 已备份到 ' + str(backup))
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    staged = canonical.with_name('.' + SKILL + '.new')
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(source, staged, symlinks=True, ignore=lambda folder, names: [n for n in names if n in SKILL_SKIP])
+    (staged / SKILL_MARKER).write_text('installed {}\n'.format(time.strftime('%Y-%m-%d %H:%M')))
+    old = canonical.with_name('.' + SKILL + '.old')
+    if canonical.exists():
+        os.rename(canonical, old)
+    os.rename(staged, canonical)
+    if old.exists():
+        shutil.rmtree(old)
+    claude = home / '.claude/skills' / SKILL
+    if not claude.exists() and not claude.is_symlink():
+        claude.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(canonical, claude)
+    elif not (claude.is_symlink() and claude.resolve() == canonical.resolve()):
+        notes.append('Claude Code 那边已有同名 skill，保留：' + str(claude))
+    return notes
+
+
+def prune_output(home, path):
+    """The one delete the agent may ask for directly (agent-handoff AC-03): a rebuildable build folder, not in use."""
+    import tasks as T
+    from storage import Activity
+    target = Path(path).expanduser()
+    if target.is_symlink() or not target.is_dir():
+        raise ValueError('只能删真实的构建产物目录：' + str(target))
+    target = target.resolve()
+    if target.name not in T.PRUNE_NAMES and not space_plan.is_xcode_build(target.name):
+        raise ValueError('不在可重建产物名单里（{}，或名字里带 DerivedData）：{}'.format('、'.join(T.PRUNE_NAMES), target))
+    settings = configure(home)
+    cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    roots = [Path(r['path']).resolve() for r in cfg['task_roots']] + [Path(r['external']) for r in cfg['task_roots'] if r['external']]
+    if not any((p / '.git').exists() for p in target.parents) and not any(r in target.parents for r in roots):
+        raise ValueError('既不在 git 工作区里，也不在任务目录里，保留：' + str(target))
+    reasons = Activity.collect(settings.lease_root).reasons(target)
+    if reasons:
+        raise ValueError('正在使用，保留：' + '；'.join(reasons))
+    size = T.size(target)
+    T.remove_tree(target)
+    auto_tier.append_log(home, dict(schema=1, at=time.time(), status='agent', actions=[
+        dict(kind='prune', path=str(target), bytes=size or 0, result='done', reason='用户在对话里确认，由 agent 发起')]))
+    return {'removed': str(target), 'bytes': size}
+
+
+def guard_mole(home, remove=False):
+    settings = configure(home)
+    cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    return mole.guard(home, cfg, toolcaches.inspect(home, cfg['external_root'], sizes=False, touch_external=False), remove)
 
 
 def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
@@ -439,9 +573,25 @@ def integrate(home, project):
 
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate'])
+    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune'])
+    p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove')
+    p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
-    result = activate(home) if a.action=='activate' else tick_storage(home) if a.action=='tick-storage' else integrate(home,a.project)
+    if a.action in ('plan', 'agent-app'):
+        settings = configure(home)
+        owned = [settings.cache_roots[0], settings.state_root, state_root(home)]
+        if a.action == 'agent-app':
+            result = {k: str(v) for k, v in tiers_config.update(home, dict(agent_app=a.value), owned).items() if k == 'agent_app'}
+        else:
+            result = current_plan(home, tiers_config.load(home, owned=owned), settings) or {'status': 'no-checkup', 'message': '还没体检过：打开资源看板，或等下一轮后台检查'}
+    elif a.action == 'target':
+        result = set_target(home, a.value)
+    elif a.action == 'mole-guard':
+        result = {'protected': guard_mole(home, remove=a.value == 'remove')}
+    elif a.action == 'prune':
+        result = prune_output(home, a.value or '')
+    else:
+        result = activate(home) if a.action=='activate' else tick_storage(home) if a.action=='tick-storage' else integrate(home,a.project)
     print(json.dumps(result,ensure_ascii=False))
     if a.action=='tick-storage' and result['status']=='error':
         print(result['error'],file=sys.stderr);sys.exit(2)

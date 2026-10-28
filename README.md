@@ -4,7 +4,15 @@
 
 适合同时跑 Xcode、模拟器、多个任务目录和多个 Agent 的 Mac 开发同学。内置 dev-storage 与 dev-memory，无需另外安装；已有同名私有工具和保护记录保留。
 
-## 安装
+## 让你的 agent 来装（推荐）
+
+把这句话发给你的 Claude Code 或 Codex：
+
+> 帮我安装 https://github.com/ruanjianjian/mac-dev-resource-guard ，按仓库里的 SKILL.md 来。
+
+它会装好资源看板和随附的 skill，问你内置盘至少想留多少，然后按这个目标出一份计划：哪些后台会自动做、哪些要你点头、哪些需要判断，并在对话里逐项跟你确认。之后平时由后台脚本维护；出了意料之外的情况（比如某个目录一天涨了 10 GB 以上），看板会发通知，点一下就把要说的话复制好、打开你的 agent。
+
+## 自己装
 
 环境：macOS 13+，装好 Xcode 命令行工具（iOS 构建需要完整 Xcode）。打开「终端」，粘贴这一行：
 
@@ -27,7 +35,10 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 - 左上角是内置盘还剩多少，中间一个圆环是已用的比例；空间低于提醒线时，整张从深蓝变成暖色，左下角写还能腾出多少。
 - 左下角是正在帮你管的事（缓存共享、自动清理、外接盘就绪），右下角是有几项等你确认；外接盘没插时，那一行变色并写「插上就恢复」。
 - 点圆环看「空间去哪了」（任务目录、模拟器、Xcode 缓存、各工具缓存、设备支持文件、归档、下载里的安装包、废纸篓、Docker，每类一根细条）；点右下角进「等你确认」勾选；点左下角进「帮你管着」。
-- 「帮你管着」里是三个开关，另有「全部开启」：
+- 封面上还有一行「目标 50 GB · 还差 N GB」，点开是计划页：会自动做的、等你点头的、需要判断的，各能腾出多少，全做完能到多少；「交给 agent」会把要说的话复制好并打开你的 agent。
+![计划页](docs/images/plan.png)
+
+- 「帮你管着」里可以调空间目标，另有三个开关和「全部开启」：
 
 ![资源看板封面](docs/images/cover.png)
 
@@ -126,6 +137,10 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 ```
 
 安装器只更新本工具 App 和维护引擎；构建和维护进程保留原运行时直至结束。本地按当前架构编译并 ad-hoc 签名，无 Developer ID 公证，不修改 Gatekeeper；重新安装后 macOS 可能再问一次外接盘访问权限。
+
+## 和 Mole 一起用
+
+通用清理（系统缓存、App 残留、安装包、找大文件）推荐交给 [Mole](https://github.com/tw93/Mole)，资源看板专管开发相关的事。随附的 skill 会教你的 agent 先运行 `resource-guard-service mole-guard`，把资源看板管的地方写进 Mole 的白名单，再让 Mole 先预演、你确认后执行。为什么要这样做、和其他工具比怎样，见 [横评报告](docs/epics/one-click-setup/tool-eval.md)：不写白名单时，Mole 会把放在外接盘上的共享缓存一起清掉。
 
 ## 可直接转发的介绍
 
