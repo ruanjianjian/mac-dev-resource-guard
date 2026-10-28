@@ -129,7 +129,9 @@ struct CheckupPage: View {
                         Text(row.outcome ?? "").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Capsule().stroke(Color.secondary.opacity(0.5)))
                         Spacer()
-                        Text(row.bytes.map { $0 == 0 ? "空" : byteCount($0) } ?? "读不到").monospacedDigit().foregroundColor(.secondary)
+                        // Unmeasured on an external drive: the background checkup never reads it (macOS would ask).
+                        Text(row.bytes.map { $0 == 0 ? "空" : byteCount($0) } ?? (row.outcome == "外接盘" ? "在外接盘" : "读不到"))
+                            .monospacedDigit().foregroundColor(.secondary)
                     }
                     GeometryReader { g in
                         Capsule().fill(Color.accentColor.opacity(0.55))

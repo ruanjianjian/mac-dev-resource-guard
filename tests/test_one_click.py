@@ -257,6 +257,15 @@ class CheckupTest(CacheFixture):
         [drive] = checkup.disconnected(self.home, tiers_config.load(self.home))
         self.assertEqual((drive['name'], drive['caches'], drive['tasks']), ('NoSuchGuardDrive', ['npm'], 1))
 
+    def test_caches_without_a_drive_stay_put_but_xcode_cache_turns_on(self):
+        import service
+        npm = self.cache('.npm'); self.scan()
+        cfg, notes = checkup.apply(self.home, ['caches'], launchctl=self.launchctl, probe=lambda p: None)
+        self.assertTrue(cfg['caches_enabled'] and cfg['xcode_compile_cache'])
+        self.assertIsNone(cfg['external_root'])
+        self.assertIsNone(service.tick_caches(self.home, time.time(), launchctl=self.launchctl))
+        self.assertFalse(npm.is_symlink())
+
     def test_turning_caches_off_restores_and_switches_xcode_off(self):
         self.cache('.npm'); self.scan()
         checkup.apply(self.home, ['caches', 'external'], launchctl=self.launchctl, probe=lambda p: None)
@@ -294,6 +303,13 @@ class WiderCleanupTest(TierFixture):
         self.assertEqual(self.collect(), {})
         self.assertEqual(spaces.installers(self.home, foreground=True)[0]['path'], str(old))
         self.assertIn('installer-delete:' + str(old), self.collect())
+
+    def test_container_disk_images_are_only_reported(self):
+        orb = self.home / '.orbstack/data'; orb.mkdir(parents=True); (orb / 'disk.img').write_bytes(b'x' * 8192)
+        [orbstack] = [c for c in spaces.containers(self.home) if c['name'] == 'OrbStack']
+        self.assertGreater(orbstack['bytes'], 0)
+        self.assertIn('请在 OrbStack 里清理', orbstack['note'])
+        self.assertEqual(self.collect(), {}, 'never proposed for deletion')
 
     def test_old_big_installers_are_proposed_new_small_or_mounted_are_not(self):
         self.grant_downloads()
