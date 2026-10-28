@@ -199,3 +199,15 @@ https://github.com/ruanjianjian/mac-dev-resource-guard
 ```text
 分档清理这次怎么分工？三部分的接口已写进设计文档并冻结。 → 全部我来做
 ```
+
+## 2026-10-28 · Claude Code 会话 d63e22ae · 本机安装 1.4
+
+来源：当前 Claude Code 会话 JSONL（session-raw-input.py 逐字提取）。
+
+## RAW-28
+日期：2026-10-28T04:23:53Z；提出人：阮鉴鉴；场景：对话
+```text
+现在就用 PR #6 的版本在本机安装 1.4：任务根目录填 elys-monorepo/worktrees，外接盘填 T9 上对应目录，打开自动档，然后停掉后台搬家脚本。
+```
+
+本轮之后的方向调整（「不够傻瓜」）记在 [装好就省心](../one-click-setup/raw-input.md) 的 RAW-01 起。

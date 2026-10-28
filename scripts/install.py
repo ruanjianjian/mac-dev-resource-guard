@@ -38,4 +38,4 @@ except BaseException:
 # The storage job runs through the installed app, so activate only once it is in place.
 result = activate(home)
 subprocess.run(['open', str(app)], check=True)
-print('安装完成：安全自动维护已启用，面板默认隐藏。点击菜单栏图标查看结果。')
+print('安装完成：安全自动维护已启用，面板不会自己弹出。稍后会收到「体检完成」通知，点开即可一键开启共享构建缓存、自动清理和外接盘。')

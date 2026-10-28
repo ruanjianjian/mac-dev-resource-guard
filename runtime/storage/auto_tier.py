@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 
 from storage import GIB, Activity, StorageManager, atomic_json
@@ -72,16 +73,33 @@ def snapshot(path):
     return count, total, newest
 
 
+def force_rmtree(path):
+    """rmtree that also clears read-only folders (Go's module cache is read-only on purpose)."""
+    def writable(function, target, _):
+        os.chmod(os.path.dirname(target), 0o755)
+        if os.path.isdir(target) and not os.path.islink(target):
+            os.chmod(target, 0o755)
+        function(target)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=writable)
+
+
 def move(home, task, hook=None):
+    return move_dir(home, task.path, Path(task.external) / task.path.name, hook)
+
+
+def move_dir(home, src, dest, hook=None):
     """Copy, verify nothing changed, then swap in a link. Crash states are in MOVE_STATE."""
-    src, dest_dir = task.path, Path(task.external)
-    dest = dest_dir / src.name
-    tmp = dest_dir / ('.guard-moving-' + src.name)
+    src, dest = Path(src), Path(dest)
+    dest_dir = dest.parent
+    tmp = dest_dir / ('.guard-moving-' + dest.name)
     if dest.exists() or dest.is_symlink():
         raise Aborted('外接盘上已有同名目录：' + str(dest))
     dest_dir.mkdir(parents=True, exist_ok=True)
     if tmp.exists():
-        shutil.rmtree(tmp)
+        force_rmtree(tmp)
     marker = state_root(home) / MOVE_STATE
     before = snapshot(src)
     atomic_json(marker, dict(src=str(src), dest=str(dest), tmp=str(tmp), phase='copying', at=time.time()))
@@ -93,7 +111,8 @@ def move(home, task, hook=None):
         if before != after or after[:2] != copied[:2]:
             raise Aborted('搬迁中目录有变化，已放弃，下一轮再试')
     except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp.exists():
+            force_rmtree(tmp)
         marker.unlink(missing_ok=True)
         raise
     atomic_json(marker, dict(src=str(src), dest=str(dest), tmp=str(tmp), phase='swapping', at=time.time()))
@@ -101,7 +120,7 @@ def move(home, task, hook=None):
     old = src.with_name('.guard-old-' + src.name)
     os.rename(src, old)
     os.symlink(dest, src)
-    shutil.rmtree(old)
+    force_rmtree(old)
     marker.unlink(missing_ok=True)
     return dest
 
@@ -117,7 +136,7 @@ def recover(home):
     if src.is_symlink():
         outcome = '上次搬迁已完成，清理旧副本'
         if old.exists():
-            shutil.rmtree(old)
+            force_rmtree(old)
     elif src.is_dir():
         outcome = '上次搬迁未完成，原目录保留，删除外接盘上的不完整副本'
         shutil.rmtree(tmp, ignore_errors=True)
@@ -125,7 +144,7 @@ def recover(home):
             shutil.rmtree(dest, ignore_errors=True)
     elif old.is_dir() and dest.is_dir():
         os.symlink(dest, src)
-        shutil.rmtree(old)
+        force_rmtree(old)
         outcome = '上次搬迁停在换链接前，已补上链接'
     else:
         # Never guess with data at stake; keep the marker for a person to look at.
@@ -180,6 +199,13 @@ def write_receipt(home, receipt):
     root = state_root(home)
     root.mkdir(parents=True, exist_ok=True)
     atomic_json(root / RECEIPT, receipt)
+    append_log(home, receipt)
+
+
+def append_log(home, receipt):
+    """The 「自动记录」 tab reads every action from this log, cache moves included."""
+    root = state_root(home)
+    root.mkdir(parents=True, exist_ok=True)
     log = root / LOG
     lines = log.read_text().splitlines() if log.exists() else []
     lines.append(json.dumps(receipt, ensure_ascii=False))

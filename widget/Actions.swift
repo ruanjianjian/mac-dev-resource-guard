@@ -83,8 +83,10 @@ final class DashboardActions: ObservableObject {
     /// A notification click asks the panel to open a tab.
     @Published var requestedTab: String?
 
+    private func command(_ family: String, _ action: String?) -> String { action ?? family + "-preview" }
+
     func run(_ family: String, clean: Bool = false, action: String? = nil, path: String? = nil, ids: [String]? = nil) {
-        guard !busy, ["storage", "common", "memory", "setup", "task", "project", "pending", "auto"].contains(family) else { return }
+        guard !busy, ["storage", "common", "memory", "setup", "task", "project", "pending", "auto", "checkup"].contains(family) else { return }
         let preview = previews[family]
         if clean && preview?.canClean != true {
             message = "请先重新扫描，查看本次预览。"; return
@@ -93,7 +95,8 @@ final class DashboardActions: ObservableObject {
         previews[family] = nil  // Neither failed requests nor old results enable cleaning.
         busy = true; message = ""
         activity = clean ? "后端正在重新核对保护并执行，请等待完成…" :
-            (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" : "正在检查，请稍候…")
+            (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" :
+             command(family, action) == "checkup-scan" ? "正在体检：统计任务目录和各类缓存，任务多时要几分钟…" : "正在检查，请稍候…")
         let command = action ?? (family + (clean ? "-clean" : "-preview"))
         DispatchQueue.global(qos: .utility).async {
             let reply: BackendReply
@@ -137,7 +140,7 @@ struct Dashboard: View {
             HStack {
                 Text(CommandLine.arguments.contains("--test-home") ? "资源看板 · 隔离验证" : "资源看板").font(.title2.weight(.semibold))
                 Spacer()
-                Text("\(model.snapshot.pressureLabel) · 可用 \(number(model.snapshot.free)) GiB")
+                Text("\(model.snapshot.pressureLabel) · 可用 \(number(model.snapshot.free)) GB")
                     .font(.callout).foregroundColor(.secondary)
                 Button {
                     model.pinned.toggle()

@@ -23,6 +23,8 @@ import ask_tier
 import auto_tier
 import common
 import tiers_config
+import toolcaches
+from storage import Activity
 
 LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-resource-guard.storage'}
 # launchd wakes the storage job often; each part keeps its own pace inside tick_storage.
@@ -290,6 +292,7 @@ def tick_storage(home, now=None):
         else:
             receipt = clean_caches(home)
         if not (state_root(home)/'storage-paused').exists():
+            tick_caches(home, now)
             tick_tiers(home, now)
         return receipt
 
@@ -337,6 +340,29 @@ def tick_tiers(home, now):
             except Exception as error:
                 atomic_json(root/'ask-error.json', dict(at=now, error=str(error) or type(error).__name__))
     return 'ran'
+
+
+def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
+    """Shared build caches (toolchain-cache-takeover): keep the Xcode setting alive, move local caches to the drive."""
+    try:
+        settings = configure(home)
+        cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    except ValueError:
+        return None   # tick_tiers records the settings error
+    try:
+        if cfg['xcode_compile_cache']:
+            toolcaches.ensure_env(home, launchctl)
+        toolcaches.clear_leftovers(home)
+        if not cfg['caches_enabled'] or cfg['external_root'] is None:
+            return None
+        if not any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
+            return None
+        actions = toolcaches.take_over(home, cfg['external_root'], Activity.collect(settings.lease_root))
+    except Exception as error:
+        actions = [dict(kind='cache-move', path=str(cfg['external_root']), bytes=0, result='failed', reason=str(error) or type(error).__name__)]
+    if actions:
+        auto_tier.append_log(home, dict(schema=1, at=now, status='caches', actions=actions))
+    return actions
 
 
 def clean_caches(home):

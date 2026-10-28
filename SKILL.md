@@ -5,7 +5,11 @@ description: 在 macOS 上用桌面看板诊断内存压力、安全回收有闲
 
 # Mac 开发资源守护
 
-## 1.3 推荐安装
+## 1.5 推荐安装
+
+用户要装或升级时，运行 `curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash`（或在克隆里运行 `python3 scripts/install.py`）。装好后不弹面板，App 在后台体检并发「体检完成」通知；用户在体检页一次确认「共享构建缓存 / 自动清理 / 使用外接盘」。替用户打开这些开关、改 Xcode 全局设置前，先征得用户同意。详见 [装好就省心](docs/epics/one-click-setup/brief.md)。
+
+## 1.3 完整安装说明
 
 用户要求安装即自动维护时，运行 `python3 scripts/install.py`：安装 App、独立完整引擎和安全调度。首次与每12小时处理固定槽及默认 DerivedData 过期中间缓存，内存每分钟观察并复用可验证的已有 tick。原命令不覆盖，缓存根、pin、lease 与锁共用；未知自定义调度明确 partial，不假称成功。接入设置可暂停本工具维护。
 

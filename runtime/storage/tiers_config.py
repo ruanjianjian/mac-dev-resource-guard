@@ -19,7 +19,12 @@ DEFAULTS = {
     'auto_idle_days': 3,
     'ask': {'simulator_unused_days': 7, 'simulator_unattached_hours': 4, 'task_idle_days': 7},
     'prune_names': [],
+    # 装好就省心: the checkup page writes these; people can still edit them by hand.
+    'caches_enabled': False,
+    'xcode_compile_cache': False,
+    'external_root': None,
 }
+FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache')
 
 
 class ConfigError(ValueError):
@@ -62,7 +67,7 @@ def load(home, owned=()):
     cfg['ask'].update(ask)
     if cfg['schema'] != 1:
         raise ConfigError('schema 只支持 1')
-    for key in ('auto_enabled', 'ask_enabled'):
+    for key in FLAGS:
         if not isinstance(cfg[key], bool):
             raise ConfigError(key + ' 必须是 true 或 false')
     _positive(cfg['check_interval_minutes'], 'check_interval_minutes')
@@ -73,6 +78,11 @@ def load(home, owned=()):
     if not isinstance(names, list) or any(not isinstance(n, str) or not n or '/' in n or n in ('.', '..', '.git') for n in names):
         raise ConfigError('prune_names 必须是目录名列表')
     owned = [Path(p).resolve() for p in owned]
+    if cfg['external_root'] is not None:
+        external_root = Path(str(cfg['external_root']))
+        if not external_root.is_absolute() or _too_broad(external_root, home, owned):
+            raise ConfigError('external_root 必须是外接盘上的一个目录：' + str(external_root))
+        cfg['external_root'] = external_root
     roots = []
     if not isinstance(cfg['task_roots'], list):
         raise ConfigError('task_roots 必须是列表')
@@ -99,12 +109,35 @@ def load(home, owned=()):
     return cfg
 
 
+def read_raw(home):
+    path = settings_path(home)
+    return json.loads(path.read_text()) if path.exists() else {'schema': 1}
+
+
+def update(home, changes, owned=()):
+    """Merge changes into what the user wrote; nothing is saved unless the result is valid."""
+    raw = read_raw(home)
+    raw.update(changes)
+    path = settings_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous = path.read_bytes() if path.exists() else None
+    atomic_json(path, raw)
+    try:
+        return load(home, owned)
+    except ConfigError:
+        if previous is None:
+            path.unlink()
+        else:
+            path.write_bytes(previous)
+        raise
+
+
 def set_flag(home, key, value):
     """Change one switch, keeping everything else the user wrote."""
-    if key not in ('auto_enabled', 'ask_enabled') or not isinstance(value, bool):
-        raise ValueError('只能切换 auto_enabled / ask_enabled')
+    if key not in FLAGS or not isinstance(value, bool):
+        raise ValueError('只能切换 ' + ' / '.join(FLAGS))
     path = settings_path(home)
-    raw = json.loads(path.read_text()) if path.exists() else {'schema': 1}
+    raw = read_raw(home)
     raw[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(path, raw)
