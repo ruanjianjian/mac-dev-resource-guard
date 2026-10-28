@@ -42,7 +42,7 @@
 | AC-05 | [核] | 可用空间低于提醒线，系统里有被标为「不可用」的模拟器（例如它依赖的 iOS 版本已删除），开发工具的缓存在这块盘上 | 到了检查时间 | 删掉不可用的模拟器，用开发工具自带的清理命令清它们的缓存；正常的模拟器一台不动 | CLI后端 | ✅ | auto: test_unavailable_simulators_and_tool_caches；实测：真实 simctl 不可用 0 台未误删；npm 进程在跑时工具缓存跳过 |
 | AC-06 | [核] | 可用空间高于提醒线，或自动档开关没打开（安装和从 1.3 升级后的默认状态） | 到了检查时间 | 自动档什么都不删、不搬，1.3 原有的过期缓存清理照常；看板显示「自动档未打开」及打开方法，或显示「空间充足」 | CLI后端、mac原生 | ✅ | auto: test_disabled_or_roomy_does_nothing、test_automatic 缓存 12 小时节奏；实测步骤 1：默认 disabled 零动作 |
 | AC-07 | [核] | 上一轮还没跑完，1.3 的过期缓存清理正在跑，或用户正在看板里手动清理 | 新一轮检查触发 | 新一轮直接跳过，同一目录不会被两轮同时处理 | CLI后端 | ✅ | auto: test_automatic.test_tier_step_paces_reports_config_errors_and_yields_to_manual_cleanup（看板操作锁占用 → busy）；与 1.3 共用 periodic-storage 锁 |
-| AC-08 | [核] | 自动档处理过若干项 | 打开看板 | 在 1.3 的「自动清理最近结果」旁看到「自动处理记录」：每次处理了哪些目录或缓存、做的是搬迁还是删除、腾出多少空间，以及保留下来的项和原因 | mac原生 | ✅ | auto: test_tier_actions.test_auto_records_show_actions_kept_and_missing_drive；ui(离屏渲染真实后端数据): e2e-tiers/evidence/auto.png；原生窗口按 CH-01 未弹出 |
+| AC-08 | [核] | 自动档处理过若干项 | 打开看板 | 在 1.3 的「自动清理最近结果」旁看到「自动处理记录」：每次处理了哪些目录或缓存、做的是搬迁还是删除、腾出多少空间，以及保留下来的项和原因 | mac原生 | ✅ | auto: test_tier_actions.test_auto_records_show_actions_kept_and_missing_drive；ui(离屏渲染真实后端数据，测试报告动线 J6-tiered-board：自动记录、设置有误、未打开三张截图)；原生窗口按 CH-01 未弹出 |
 | AC-09 | [边] | 搬迁到一半时断电、拔盘或进程被杀 | 下一次检查 | 先收拾半成品：原目录还在，就删掉外接盘上不完整的副本；原目录已换成链接、外接盘上副本完整，就算完成。不会出现原目录和链接都不在的情况 | CLI后端 | ✅ | auto: test_recovers_each_interrupted_phase（copying / swapping 两种中断） |
 | AC-10 | [边] | 用户改了闲置天数、任务根目录、外接盘路径或检查间隔 | 下一轮检查 | 按新值执行；配置写错（路径不存在、天数不是正数）时自动档这一轮不清理，看板提示哪一项错了。这些设置单独存放，1.3 和更早版本的命令照常读取原有配置，不因新设置报错 | CLI后端、mac原生 | ✅ | auto: test_wrong_values_name_the_field、test_switch_keeps_other_settings_and_old_config_untouched、tick config_error、test_wrong_settings_are_shown_not_hidden |
 

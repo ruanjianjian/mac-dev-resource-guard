@@ -38,7 +38,7 @@
 
 | ID | 级 | Given | When | Then | 落点 | 状态 | 证据 |
 |---|---|---|---|---|---|---|---|
-| AC-01 | [核] | 出现上表任一类候选 | 后台检查完成 | 看板「待确认」列出每一项：对象名称、占用大小、为什么建议、做了会失去什么；菜单栏图标出现红点；发出一条系统通知，点通知打开看板并停在「待确认」 | CLI后端、mac原生 | ✅ | auto: test_ask_tier.test_four_kinds_listed_with_what_is_lost、test_tier_actions.test_preview_lists…；实测：真实 simctl 列表识别 11 台关机 8 天的默认模拟器 + 临时模拟器；ui(离屏): e2e-tiers/evidence/pending.png；红点只由自检覆盖计数（pendingCount），原生菜单栏未截图 |
+| AC-01 | [核] | 出现上表任一类候选 | 后台检查完成 | 看板「待确认」列出每一项：对象名称、占用大小、为什么建议、做了会失去什么；菜单栏图标出现红点；发出一条系统通知，点通知打开看板并停在「待确认」 | CLI后端、mac原生 | ✅ | auto: test_ask_tier.test_four_kinds_listed_with_what_is_lost、test_tier_actions.test_preview_lists…；实测：真实 simctl 列表识别 11 台关机 8 天的默认模拟器 + 临时模拟器；ui(离屏，测试报告动线 J8-ask-board：列表、勾选执行结果、上次失败、已忽略四张截图)；红点只由自检覆盖计数（pendingCount），原生菜单栏未截图 |
 | AC-02 | [核] | 待确认列表里有多项 | 用户勾选其中几项并确认 | 只执行勾选的项；每一项执行前重新核对条件（仍关机、仍闲置、仍无未推送改动、仍没人用），核对不过的跳过并写明原因；结果逐项显示「已完成 / 已跳过 / 失败」，红点随列表清空消失 | CLI后端、mac原生 | ✅ | auto: test_only_confirmed_items_run_after_recheck（执行前开机的那台跳过）；实测：只确认临时模拟器 → 真实删除，其余 11 台不动；红: 新功能，基线 b6c7436 无此模块 |
 | AC-03 | [核] | 待确认列表里有某一项 | 用户点「忽略」 | 该项不执行，也不再为它发通知；它的状态变化后（例如模拟器又被用过，之后再次闲置满天数）才会重新出现 | CLI后端、mac原生 | ✅ | auto: test_ignore_until_object_changes |
 | AC-04 | [核] | 有候选但空间仍高于低水位 | 连续多轮检查 | 同一天最多发一次通知；可用空间跌破低水位时立即发一次（同一次跌破只发一次），通知写明当前剩余空间 | CLI后端 | ✅ | auto: test_notice_throttle_daily_and_critical |
