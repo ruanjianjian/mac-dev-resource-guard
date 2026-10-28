@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 [ask-first-confirm.raw-input.md](./ask-first-confirm.raw-input.md)；首轮 RAW-01～09：需求主体是 RAW-06，拍板的选择题回答是 RAW-07～09。本轮新增 RAW-10～11：改到 1.3 基线上。
+原话全量在 [ask-first-confirm.raw-input.md](./ask-first-confirm.raw-input.md)；首轮 RAW-01～09：需求主体是 RAW-06，拍板的选择题回答是 RAW-07～09。本轮新增 RAW-10～11：改到 1.3 基线上。RAW-12～13：确认方案并开始实现。
 
 ## 意图
 

@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 [tiered-auto-cleanup.raw-input.md](./tiered-auto-cleanup.raw-input.md)；首轮 RAW-01～19：需求主体是 RAW-14～16，拍板的选择题回答是 RAW-17～19。本轮新增 RAW-20～21：改到 1.3 基线上。
+原话全量在 [tiered-auto-cleanup.raw-input.md](./tiered-auto-cleanup.raw-input.md)；首轮 RAW-01～19：需求主体是 RAW-14～16，拍板的选择题回答是 RAW-17～19。本轮新增 RAW-20～21：改到 1.3 基线上。RAW-22～23：确认方案并开始实现。
 
 ## 意图
 

@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 [build-slot-wrapper.raw-input.md](./build-slot-wrapper.raw-input.md)；首轮 RAW-01～05：需求来自 RAW-05 里的追问「我们的构建缓存共享的能力加进来了吗」。本轮新增 RAW-06～07：改到 1.3 基线上。
+原话全量在 [build-slot-wrapper.raw-input.md](./build-slot-wrapper.raw-input.md)；首轮 RAW-01～05：需求来自 RAW-05 里的追问「我们的构建缓存共享的能力加进来了吗」。本轮新增 RAW-06～07：改到 1.3 基线上。RAW-08～09：确认方案并开始实现。
 
 ## 意图
 
