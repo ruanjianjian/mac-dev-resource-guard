@@ -308,6 +308,8 @@ func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [
     let view = NSHostingView(rootView: Dashboard(model: model, actions: actions, initialTab: tab, initialSelected: selecting)
         .frame(width: 620, height: height))
     view.frame = NSRect(x: 0, y: 0, width: 620, height: height)
+    // The rows behind the picture, so the journal records what was really shown.
+    for row in actions.previews[tab]?.rows ?? [] { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
     let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = view
@@ -355,12 +357,14 @@ if CommandLine.arguments.contains("--self-test") {
     }
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.prohibited)
-    func list(_ flag: String) -> [String] {
-        CommandLine.arguments.firstIndex(of: flag).map { CommandLine.arguments[$0 + 1].split(separator: ",").map(String.init) } ?? []
+    // Ids come through the environment: on the command line they would make this very process
+    // look like a tool using those simulators and folders, and the recheck would rightly skip them.
+    func list(_ name: String) -> [String] {
+        (ProcessInfo.processInfo.environment[name] ?? "").split(separator: ",").map(String.init)
     }
     let height = CommandLine.arguments.firstIndex(of: "--height").flatMap { Double(CommandLine.arguments[$0 + 1]) } ?? 700
-    do { try renderTab(CommandLine.arguments[index + 1], selecting: Set(list("--select")), height: CGFloat(height),
-                       ignore: list("--ignore"), clean: list("--clean"), to: CommandLine.arguments[index + 2]) }
+    do { try renderTab(CommandLine.arguments[index + 1], selecting: Set(list("RENDER_SELECT")), height: CGFloat(height),
+                       ignore: list("RENDER_IGNORE"), clean: list("RENDER_CLEAN"), to: CommandLine.arguments[index + 2]) }
     catch { fputs("render failed: \(error)\n", stderr); exit(1) }
 } else {
     let app = NSApplication.shared
