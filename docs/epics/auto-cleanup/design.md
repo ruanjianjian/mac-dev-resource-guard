@@ -1,4 +1,4 @@
-# Design: 分档自动清理（契约 v1）
+# Design: 分档自动清理（契约 v1.1）
 
 服务于 [brief](brief.md) 与三份 spec：[tiered-auto-cleanup](specs/tiered-auto-cleanup.md)、[ask-first-confirm](specs/ask-first-confirm.md)、[build-slot-wrapper](specs/build-slot-wrapper.md)。本文冻结跨模块契约（C1～C6），多人并行实现时以本文为唯一真源；改契约先改本文并升版本号，再通知受影响的实现者。
 
@@ -128,3 +128,11 @@
 - 锁、清单、`last_used` 和 1.3 相同。整段命令退出码为 0 时 `successful_builds` 加 1（不再要求参数里出现 xcodebuild 动作）。
 - 缓存根在 `/Volumes/<盘名>/` 下而 `/Volumes/<盘名>` 不是挂载点时，报错「缓存所在的盘未连接：<路径>」，退出码 2，不建目录。带不带 `--cache-env` 都做这项检查。
 - 不带 `--cache-env` 时，行为与 1.3 完全一致（AC-06）。
+
+## v1.1 实现补充（2026-10-28）
+
+- 模拟器「多久没开过」= max(`lastBootedAt`, `device.plist` 修改时间)。不看数据目录：本机实测 CoreSimulator 曾同时改写所有设备的数据目录。
+- 询问档的任务目录还要求：顶层只有 git 工作区（`.DS_Store` 除外）；目录内的主仓库没有别的工作区依赖它。
+- 工具缓存：`go clean -cache`、`npm cache verify`、`pnpm store prune`，缓存目录须与 HOME 在同一卷，且该工具没有构建/安装进程在跑。
+- launchd `StartInterval` 为 300 秒；1.3 的 12 小时任务在空闲时重新加载为 300 秒，忙时保留并提示稍后重试。
+- 界面证据：`ResourceDashboard --test-home <带标记的目录> --render-tab <页签> <out.png> [--select id]` 离屏渲染，不显示窗口。

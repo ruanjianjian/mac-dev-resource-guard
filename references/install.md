@@ -10,6 +10,10 @@
 
 下面的 setup.py 分步安装为兼容接口，新用户无需逐项执行。
 
+## 分档自动清理（1.4）
+
+升级到 1.4 后重跑 `python3 scripts/install.py`：本工具的磁盘定时任务从 12 小时改为每 5 分钟唤醒（空闲时才重新加载，忙时保留并提示稍后重试）。自动档默认关闭；询问档默认打开，只通知、不自动执行。设置写在 `~/.config/dev-resource-guard/auto-cleanup.json`，至少填 `task_roots` 才会处理任务目录；字段与默认值见 [设计 C1](../docs/epics/auto-cleanup/design.md)。首次发通知时 macOS 会请求通知权限，由你决定是否允许；不允许时只亮菜单栏红点。
+
 ## App 内置入口（1.2）
 
 仅构建 App 即包含扫描与手动清理引擎。默认 DerivedData 不要求构建包装接入；Go、模拟器、Claude 会话与用户选定任务目录只统计。已有命令优先复用，旧版本不支持单次回收时明确提示升级，不临时 resume 再 pause。

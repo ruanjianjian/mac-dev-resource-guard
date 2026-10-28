@@ -1,4 +1,4 @@
-# Mac Dev Resource Guard · 资源看板 1.3
+# Mac Dev Resource Guard · 资源看板 1.4
 
 **完整安装后自动维护开发缓存，项目接入后复用 Xcode 构建缓存。** 面板默认隐藏，需要时点击菜单栏图标或按 `⌃⌥⌘S` 打开。
 
@@ -39,6 +39,28 @@ App 位于 `~/Applications/资源看板.app`，启动后不打开面板。快捷
 
 Go 编译缓存、模拟器、Claude 会话和任务目录可查看占用，但不自动删除。没有安全候选时可清理量就是 0；目录计量不等于 APFS 全盘净释放空间，不承诺固定回收容量。磁盘空间目标只提醒，不阻止构建。
 
+## 分档自动清理（1.4）
+
+安全的自动做，会丢东西的先问你，判断不了的不碰。设置在 `~/.config/dev-resource-guard/auto-cleanup.json`（与 `config.json` 分开，旧命令照常读原配置），看板「接入设置」可开关两档。
+
+| 档 | 做什么 | 默认 |
+|---|---|---|
+| 自动档 | 空间低于提醒线时，把闲置满 N 天（默认 3）的任务目录整个挪到外接盘、原路径留链接；外接盘不在就删闲置任务里被 git 忽略的构建产物；再删系统标为不可用的模拟器，用 go/npm/pnpm 自带命令清缓存。回到目标线就停，每次都记在「自动记录」。 | 关闭，打开一次即授权 |
+| 询问档 | 关机满 7 天的模拟器删除、开着 4 小时没开发工具连着的模拟器关机、闲置满 7 天且全部提交推送的任务目录删除、没有模拟器在用的运行时删除。先发系统通知、菜单栏亮红点，你在「待确认」勾选后才执行，执行前逐项再核对。 | 打开 |
+| 永不档 | 有未提交或未推送改动、正在用、被 pin 保护、含代码仓库以外文件（如报告）的任务目录；有开发工具连着的模拟器。 | — |
+
+```json
+{
+  "schema": 1,
+  "auto_enabled": true,
+  "task_roots": [{"path": "/Users/me/work/worktrees", "external": "/Volumes/T9/work/worktrees"}],
+  "auto_idle_days": 3,
+  "ask": {"simulator_unused_days": 7, "simulator_unattached_hours": 4, "task_idle_days": 7}
+}
+```
+
+定时任务每 5 分钟唤醒：过期 Xcode 中间缓存仍 12 小时清一轮，分档清理按 `check_interval_minutes`（默认 30）检查。设置写错时本轮不清理，看板显示哪一项错了。完整契约见 [设计](docs/epics/auto-cleanup/design.md)。
+
 ## 接入 Xcode 构建缓存
 
 安装 App 不会改写已有项目脚本。每个项目接入一次，之后通过生成的入口构建，才会使用固定缓存槽。可在面板“接入设置 → 接入项目构建缓存”选择项目，也可以全程用终端：
@@ -56,6 +78,15 @@ cd "/你的项目目录"
   xcodebuild -workspace ios/App.xcworkspace \
   -scheme App -configuration Debug -sdk iphonesimulator build
 ```
+
+构建脚本自己调用 xcodebuild（例如 Flutter 项目先生成工程再编译）时，用整段脚本模式：入口把这份固定缓存的位置放进你指定的环境变量，脚本不用改，只要它支持用环境变量指定 DerivedData。
+
+```bash
+./.dev-resource-guard/xcode-build --platform ios-simulator --configuration Debug \
+  --cache-env ELYS_SIMULATOR_DERIVED_DATA_PATH -- ./tool/run_ios_simulator.sh build
+```
+
+缓存根配在外接盘上而盘没插时，入口直接报「缓存所在的盘未连接」，不会在内置盘另建一份。
 
 将工程路径和 scheme 换成项目实际值；平台可选 `ios-simulator`、`ios-device`、`macos`，入口配置与原构建参数保持一致，不另传 `-derivedDataPath`。原脚本和 Agent 必须实际调用这个入口才算接入。生成的 `.dev-resource-guard/` 自带忽略规则，不会出现在 `git status` 里，也不改项目的 `.gitignore`。
 
