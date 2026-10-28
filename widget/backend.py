@@ -148,7 +148,9 @@ SUGGESTION_TITLES = {'caches': '共享构建缓存', 'clean': '自动清理', 'e
 
 
 def gb(value):
-    return '{:.0f} GB'.format(value / 1073741824) if value is not None else '读不到'
+    if value is None:
+        return '读不到'
+    return '{:.1f} TB'.format(value / 1099511627776) if value >= 1099511627776 else '{:.0f} GB'.format(value / 1073741824)
 
 
 def short(home, path):
@@ -168,9 +170,17 @@ def rows_checkup(home, cfg, report, freed, gone):
     states = checkup.suggestion_state(home, cfg, report)
     effect = dict(caches=sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local') if (cfg['external_root'] or report.get('recommended')) else None,
                   clean=sum(t['bytes'] or 0 for t in report['tasks'] if t['idle'] and not t['linked']) or None, external=None)
+    drive = next((d for d in report['drives'] if cfg['external_root'] and str(cfg['external_root']).startswith(d['path'] + '/')),
+                 report.get('recommended'))
+    tools = len({c['tool'] for c in report['caches']})
+    short_lines = dict(
+        caches='{} 个工具 · Xcode 编译缓存'.format(tools),
+        clean='闲置 {} 天{}'.format(cfg['auto_idle_days'], '挪到 ' + drive['name'] if drive else '删构建产物'),
+        external=('未连接' if gone else '剩 ' + gb(drive['free'])) if cfg['external_root'] and drive
+        else ('未连接' if cfg['external_root'] else ('用「{}」，剩 {}'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘')))
     for key in checkup.SUGGESTIONS:
         state = states[key]
-        rows.append(dict(id=key, kind='suggestion', title=SUGGESTION_TITLES[key], category='建议', reason=state['detail'], detail='',
+        rows.append(dict(id=key, kind='suggestion', title=SUGGESTION_TITLES[key], category='建议', reason=state['detail'], detail=short_lines[key],
                          bytes=effect[key] or None, eligible=state['available'], command=None,
                          outcome='已开启' if state['on'] else ('未开启' if state['available'] else '不可用')))
     for root in report['roots']:

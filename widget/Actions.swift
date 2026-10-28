@@ -119,7 +119,7 @@ final class DashboardActions: ObservableObject {
 struct Dashboard: View {
     @ObservedObject var model: Monitor
     @ObservedObject var actions: DashboardActions
-    @State private var tab = "checkup"
+    @State private var tab = "overview"
     @State private var confirming = false
     @State private var storageFamily = "common"
     @State private var setupAction = ""
@@ -127,7 +127,7 @@ struct Dashboard: View {
     @State private var selected: Set<String> = []
     @State private var confirmingPending = false
 
-    init(model: Monitor, actions: DashboardActions, initialTab: String = "checkup", initialSelected: Set<String> = []) {
+    init(model: Monitor, actions: DashboardActions, initialTab: String = "overview", initialSelected: Set<String> = []) {
         _model = ObservedObject(wrappedValue: model); _actions = ObservedObject(wrappedValue: actions)
         _tab = State(initialValue: initialTab); _selected = State(initialValue: initialSelected)
     }
@@ -151,7 +151,6 @@ struct Dashboard: View {
                     .accessibilityLabel(model.pinned ? "取消置顶" : "置顶窗口")
             }.padding(.horizontal, 22).padding(.top, 18)
             Picker("查看", selection: $tab) {
-                Text("体检").tag("checkup")
                 Text("实时概览").tag("overview")
                 Text("磁盘缓存").tag("storage")
                 Text("开发后台").tag("memory")
@@ -159,9 +158,7 @@ struct Dashboard: View {
                 Text("自动记录").tag("auto")
                 Text("接入设置").tag("setup")
             }.pickerStyle(.segmented).padding(18)
-            if tab == "checkup" {
-                CheckupPage(model: model, actions: actions)
-            } else if tab == "overview" {
+            if tab == "overview" {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("先看占用，再决定清理").font(.headline)
@@ -221,7 +218,6 @@ struct Dashboard: View {
         .onChange(of: tab) { value in
             selected = []
             if ["setup", "pending", "auto"].contains(value) && !actions.busy { actions.run(value) }
-            if value == "checkup" && actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") }
         }
         .onReceive(actions.$requestedTab) { value in
             if let value { tab = value; actions.requestedTab = nil; if !actions.busy { actions.run(value) } }

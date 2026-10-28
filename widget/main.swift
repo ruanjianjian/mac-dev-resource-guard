@@ -209,6 +209,8 @@ struct Overview: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     let model = Monitor()
     let actions = DashboardActions()
+    let store = CoverStore()
+    var panel: NSPopover!
     var window: NSWindow!
     var status: NSStatusItem!
     let statusMenu = NSMenu()
@@ -227,6 +229,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         if !window.setFrameUsingName("resource-dashboard") { window.center() }
         window.level = model.pinned ? .floating : .normal
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel = NSPopover()
+        panel.behavior = .transient
+        panel.appearance = NSAppearance(named: .aqua)
+        panel.contentSize = NSSize(width: 300, height: 340)
+        panel.contentViewController = NSHostingController(rootView: CoverPanel(model: model, store: store))
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "gauge", accessibilityDescription: "资源看板")
         status.button?.image?.isTemplate = true
@@ -243,11 +250,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        shortcut = GlobalShortcut { [weak self] in self?.show() }
+        shortcut = GlobalShortcut { [weak self] in self?.togglePanel() }
         shortcut?.register()
         model.shortcut = shortcut?.label ?? "未注册，可从菜单栏打开"
         let menu = statusMenu
         menu.addItem(withTitle: "显示资源看板", action: #selector(show), keyEquivalent: "").target = self
+        // Everything that used to be a tab now waits here, one click away from the cover.
+        let more = NSMenu()
+        for (title, tab) in [("实时概览", "overview"), ("磁盘缓存", "storage"), ("开发后台", "memory"),
+                             ("待确认列表", "pending"), ("自动记录", "auto"), ("接入设置", "setup")] {
+            let item = NSMenuItem(title: title, action: #selector(openTab(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = tab
+            more.addItem(item)
+        }
+        let moreItem = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
+        moreItem.submenu = more
+        menu.addItem(moreItem)
         menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r").target = self
         let shortcutItem = NSMenuItem(title: "全局唤起：\(model.shortcut)", action: nil, keyEquivalent: "")
         shortcutItem.isEnabled = false
@@ -305,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
         let tab = response.notification.request.content.userInfo["tab"] as? String ?? "pending"
-        DispatchQueue.main.async { self.show(); self.actions.requestedTab = tab }
+        DispatchQueue.main.async { self.showPanel(page: tab == "pending" ? .pending : .cover) }
         done()
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -314,22 +332,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     @objc func statusClicked() {
         if let event = NSApp.currentEvent, event.type == .rightMouseUp, let button = status.button {
             NSMenu.popUpContextMenu(statusMenu, with: event, for: button)
-        } else { show() }
+        } else { togglePanel() }
     }
-    @objc func show() {
+    @objc func show() { showPanel(page: .cover) }
+    /// The cover drops down from the menu-bar icon; data loads only when it is opened.
+    func showPanel(page: CoverPage) {
+        guard let button = status.button else { return }
+        store.page = page
+        store.refresh()
+        model.refresh()
+        if !panel.isShown { panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    func togglePanel() { panel.isShown ? panel.performClose(nil) : showPanel(page: .cover) }
+    /// The old full window, kept for the less common tools under 「更多」.
+    func showWindow(tab: String) {
+        panel.performClose(nil)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-        // The checkup tab loads when the panel is first shown, never at launch while it is hidden.
-        if actions.previews["checkup"] == nil && !actions.busy { actions.run("checkup") }
+        actions.requestedTab = tab
     }
+    @objc func openTab(_ sender: NSMenuItem) { showWindow(tab: sender.representedObject as? String ?? "overview") }
     @objc func refresh() { model.refresh() }
     @objc func quit() {
-        if actions.busy { show(); return }
+        if actions.busy { showWindow(tab: "overview"); return }
         NSApp.terminate(nil)
     }
 }
 
 /// Isolated UI evidence: draw one panel tab into a PNG; no window is ever shown on screen.
+/// Isolated evidence for the menu-bar cover: cover, cover-pending, cover-space, cover-switches.
+/// RENDER_FREE / RENDER_CAPACITY / RENDER_PENDING pin the numbers so pictures do not depend on this Mac's disk.
+func renderCover(_ tab: String, to out: String) throws {
+    let env = ProcessInfo.processInfo.environment
+    let model = Monitor(); model.snapshot = sample(); model.loading = false
+    if let free = env["RENDER_FREE"].flatMap(Double.init) { model.snapshot.free = free }
+    if let capacity = env["RENDER_CAPACITY"].flatMap(Double.init) { model.snapshot.capacity = capacity }
+    if let pending = env["RENDER_PENDING"].flatMap(Int.init) { model.snapshot.pending = pending }
+    let store = CoverStore()
+    store.checkup = try DashboardActions.call("checkup-preview")
+    store.pending = try DashboardActions.call("pending-preview")
+    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches][tab] ?? .cover
+    if let message = store.checkup?.message, !message.isEmpty { print("体检 · " + message) }
+    for row in store.checkup?.rows ?? [] where ["建议", "提醒", "外接盘"].contains(row.category) { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
+    for row in store.pendingRows { print("待确认 · \(row.title) · \(row.reason)") }
+    let view = NSHostingView(rootView: CoverPanel(model: model, store: store))
+    view.frame = NSRect(x: 0, y: 0, width: 300, height: 340)
+    let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.appearance = NSAppearance(named: .aqua)
+    window.contentView = view
+    view.layoutSubtreeIfNeeded()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw NSError(domain: "Dashboard", code: 4) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
+}
+
 func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [String], clean: [String], to out: String) throws {
+    if tab.hasPrefix("cover") { return try renderCover(tab, to: out) }
     let model = Monitor(); model.snapshot = sample(); model.loading = false
     let actions = DashboardActions()
     if !ignore.isEmpty {
