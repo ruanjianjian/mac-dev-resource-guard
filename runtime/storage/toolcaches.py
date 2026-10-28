@@ -87,8 +87,18 @@ def volume_of(path):
     return str(Path(*parts[:index + 2])) if index is not None else None
 
 
-def inspect(home, external_root=None, sizes=True):
-    """One row per cache path the user actually has: where it is and what will happen to it."""
+def link_target(path):
+    """Where a link points, read from the link itself without stepping onto the other disk."""
+    target = os.readlink(path)
+    return target if os.path.isabs(target) else os.path.normpath(os.path.join(os.path.dirname(path), target))
+
+
+def inspect(home, external_root=None, sizes=True, touch_external=True):
+    """One row per cache path the user actually has: where it is and what will happen to it.
+
+    touch_external=False never reads anything on an external drive: after a reinstall macOS asks
+    again before 资源看板 may read one, and a background run would sit waiting for that answer.
+    """
     home = Path(home)
     state = load_state(home)
     custom = custom_locations(home)
@@ -105,9 +115,10 @@ def inspect(home, external_root=None, sizes=True):
                            note='你已改过位置：' + target + '，保持不动')
                 measured = target
             elif path.is_symlink():
-                real = os.path.realpath(path)
+                real = os.path.realpath(path) if touch_external else link_target(path)
                 ours = bool(record and record.get('state') == 'moved')
-                reachable = os.path.exists(real)
+                volume = volume_of(real)
+                reachable = (os.path.exists(real) if touch_external or not volume else os.path.ismount(volume))
                 row.update(where='外接盘' if volume_of(real) else '内置盘', dest=real,
                            status='moved' if ours else 'linked',
                            note=('原位置留了链接，工具照常用' if ours else '原位置已是链接，保持不动') + ('' if reachable else '；外接盘未连接'))
@@ -117,7 +128,7 @@ def inspect(home, external_root=None, sizes=True):
                 measured = path
             else:
                 continue
-            if sizes and measured:
+            if sizes and measured and (touch_external or not volume_of(measured)):
                 row['bytes'] = T.size(measured)
             rows.append(row)
     return rows

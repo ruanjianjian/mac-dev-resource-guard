@@ -80,9 +80,11 @@ def _scan(home, cfg, simulators_bytes, now, volumes, info, is_mount, foreground)
     """Measure and discover; slow (du over the task folders), so the result is kept in checkup.json."""
     home = Path(home)
     now = time.time() if now is None else now
-    found = discover.scan(home, [dict(path=str(r['path']), external=r['external']) for r in cfg['task_roots']], volumes, info, is_mount)
+    # A background checkup reads nothing on external drives or in Downloads (macOS would ask and wait).
+    found = discover.scan(home, [dict(path=str(r['path']), external=r['external']) for r in cfg['task_roots']], volumes, info, is_mount,
+                          look_inside=foreground)
     task_list = task_rows(found['roots'], now, cfg['auto_idle_days'])
-    caches = toolcaches.inspect(home, cfg['external_root'])
+    caches = toolcaches.inspect(home, cfg['external_root'], touch_external=foreground)
     xcode = home / 'Library/Developer/Xcode'
     derived = [c for c in caches if c['tool'] == 'xcode']
     if simulators_bytes is None:
@@ -176,7 +178,8 @@ def disconnected(home, cfg, is_mount=os.path.ismount):
     for volume in sorted(v for v in volumes if v):
         if is_mount(volume):
             continue
-        caches = [c['name'] for c in toolcaches.inspect(home, sizes=False) if c.get('dest') and c['dest'].startswith(volume + '/')]
+        caches = [c['name'] for c in toolcaches.inspect(home, sizes=False, touch_external=False)
+                  if c.get('dest') and c['dest'].startswith(volume + '/')]
         tasks = 0
         for root in cfg['task_roots']:
             try:

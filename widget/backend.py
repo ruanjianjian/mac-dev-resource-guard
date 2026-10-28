@@ -533,7 +533,7 @@ class Adapter:
             # Only a scan started from the open panel may touch Downloads (macOS asks about it once).
             report = checkup.scan(self.home, cfg, volumes=volumes, info=info, is_mount=is_mount, foreground=verb in ('scan', 'preview'))
         elif verb in ('apply', 'off'):
-            report['caches'] = toolcaches.inspect(self.home, cfg['external_root'])
+            report['caches'] = toolcaches.inspect(self.home, cfg['external_root'], touch_external=False)
         ask_tier, _, _ = tier_modules()
         pending = ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())
         pending_bytes = sum(i.get('bytes') or 0 for i in pending['items'] if i['state'] == 'pending')

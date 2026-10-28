@@ -136,6 +136,17 @@ class CacheTest(CacheFixture):
         toolcaches.restore(self.home)
         self.assertEqual(os.readlink(self.home / '.npm'), str(mine))
 
+    def test_background_inspection_never_reads_the_external_drive(self):
+        drive = self.home / 'Volumes/T9/dev-cache/npm'; drive.mkdir(parents=True)
+        os.symlink(drive, self.home / '.npm')
+        self.cache('Library/Caches/pip')
+        measured = []
+        with unittest.mock.patch.object(toolcaches.T, 'size', lambda p: measured.append(str(p)) or 1):
+            rows = {r['key']: r for r in toolcaches.inspect(self.home, touch_external=False)}
+        self.assertEqual(rows['npm:.npm']['dest'], str(drive))
+        self.assertIsNone(rows['npm:.npm']['bytes'])
+        self.assertEqual(measured, [str(self.home / 'Library/Caches/pip')])
+
     def test_restore_brings_tools_back_and_removes_the_copies(self):
         self.cache('.npm')
         toolcaches.take_over(self.home, self.managed, idle())

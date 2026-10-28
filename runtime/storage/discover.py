@@ -83,12 +83,12 @@ def disk_info(mount, run=subprocess.run):
     return plistlib.loads(out.stdout) if out.returncode == 0 and out.stdout else {}
 
 
-def is_time_machine(mount, info):
+def is_time_machine(mount, info, look_inside=True):
     roles = info.get('VolumeRoles') or []
-    return 'Backup' in roles or any((Path(mount) / name).exists() for name in ('Backups.backupdb', '.timemachine'))
+    return 'Backup' in roles or look_inside and any((Path(mount) / name).exists() for name in ('Backups.backupdb', '.timemachine'))
 
 
-def external_drives(volumes=Path('/Volumes'), info=disk_info, is_mount=os.path.ismount):
+def external_drives(volumes=Path('/Volumes'), info=disk_info, is_mount=os.path.ismount, look_inside=True):
     """Writable local APFS drives that are not the startup disk or a Time Machine target, largest free first."""
     drives = []
     try:
@@ -107,7 +107,7 @@ def external_drives(volumes=Path('/Volumes'), info=disk_info, is_mount=os.path.i
             reasons.append('格式不是 APFS')
         if not detail.get('WritableVolume', False):
             reasons.append('只读')
-        if is_time_machine(mount, detail):
+        if is_time_machine(mount, detail, look_inside):
             reasons.append('是时间机器备份盘')
         try:
             free = shutil.disk_usage(str(mount)).free
@@ -126,7 +126,7 @@ def managed_external(drive_path):
     return Path(drive_path) / 'dev-resource-guard'
 
 
-def scan(home, configured_roots=(), volumes=Path('/Volumes'), info=disk_info, is_mount=os.path.ismount):
+def scan(home, configured_roots=(), volumes=Path('/Volumes'), info=disk_info, is_mount=os.path.ismount, look_inside=True):
     """Everything the checkup page lists for confirmation."""
     found = task_roots(worktrees(main_repositories(home)), home)
     configured = [Path(r['path']) for r in configured_roots]
@@ -135,5 +135,5 @@ def scan(home, configured_roots=(), volumes=Path('/Volumes'), info=disk_info, is
         entry = next((r for r in configured_roots if Path(r['path']) == path), None)
         roots.append(dict(path=str(path), tasks=task_count(path), configured=entry is not None,
                           external=str(entry['external']) if entry and entry.get('external') else None))
-    drives = external_drives(volumes, info, is_mount)
+    drives = external_drives(volumes, info, is_mount, look_inside)
     return dict(roots=roots, drives=drives, recommended=recommended_drive(drives))
