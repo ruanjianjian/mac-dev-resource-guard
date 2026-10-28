@@ -309,6 +309,7 @@ func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [
         .frame(width: 620, height: height))
     view.frame = NSRect(x: 0, y: 0, width: 620, height: height)
     // The rows behind the picture, so the journal records what was really shown.
+    if let reply = actions.previews[tab] { print("状态 \(reply.status) · \(reply.message)") }
     for row in actions.previews[tab]?.rows ?? [] { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
     let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: .darkAqua)
