@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "装好就省心全景（基于 1.4）",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "output": "overview.html"
+  },
+  "lanes": [
+    { "id": "user", "label": "用户" },
+    { "id": "app", "label": "看板" },
+    { "id": "bg", "label": "后台" },
+    { "id": "drive", "label": "外接盘", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "setup", "label": "装好", "fromCol": 0, "toCol": 1 },
+    { "id": "confirm", "label": "确认一次", "fromCol": 2, "toCol": 2, "variant": "emphasis" },
+    { "id": "run", "label": "之后不用管", "fromCol": 3, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["install", "notify", "checkup", "takeover", "external"],
+  "nodes": [
+    { "id": "install", "lane": "user", "col": 0, "type": "external", "label": "一条命令安装", "sublabel": "不用克隆仓库", "width": 132 },
+    { "id": "notify", "lane": "app", "col": 1, "type": "frontend", "label": "体检完成通知", "sublabel": "不弹面板", "width": 132 },
+    { "id": "discover", "lane": "bg", "col": 1, "type": "backend", "label": "自动找任务和外接盘", "sublabel": "不用手写路径", "width": 140 },
+    { "id": "checkup", "lane": "user", "col": 2, "type": "external", "label": "体检页确认一次", "sublabel": "全部按推荐开启", "width": 140 },
+    { "id": "takeover", "lane": "bg", "col": 3, "type": "backend", "label": "接管工具缓存", "sublabel": "开 Xcode 编译缓存", "width": 140 },
+    { "id": "clean", "lane": "bg", "col": 4, "type": "security", "label": "三档清理", "sublabel": "范围扩大到废纸篓等", "width": 140 },
+    { "id": "menubar", "lane": "app", "col": 5, "type": "frontend", "label": "菜单栏剩余 GB", "sublabel": "按颜色提醒", "width": 132 },
+    { "id": "external", "lane": "drive", "col": 4, "type": "database", "label": "缓存 + 闲置任务", "sublabel": "插着就用", "width": 140 },
+    { "id": "unplug", "lane": "drive", "col": 5, "type": "security", "label": "拔盘：报错并提醒", "sublabel": "不在内置盘另建", "width": 140 },
+    { "id": "dedup", "lane": "bg", "col": 5, "type": "database", "label": "重复文件合并", "sublabel": "第二期", "width": 132 }
+  ],
+  "edges": [
+    { "id": "e1", "from": "install", "to": "notify", "variant": "emphasis" },
+    { "id": "e2", "from": "notify", "to": "checkup", "label": "点开", "variant": "emphasis" },
+    { "id": "e3", "from": "discover", "to": "checkup", "label": "列出来" },
+    { "id": "e4", "from": "checkup", "to": "takeover", "label": "共享缓存", "variant": "emphasis" },
+    { "id": "e5", "from": "checkup", "to": "clean", "label": "自动清理" },
+    { "id": "e6", "from": "takeover", "to": "external", "label": "放外接盘", "variant": "emphasis" },
+    { "id": "e7", "from": "clean", "to": "external", "label": "挪闲置任务" },
+    { "id": "e8", "from": "external", "to": "unplug", "label": "拔掉时", "variant": "security", "role": "branch" },
+    { "id": "e9", "from": "clean", "to": "menubar", "label": "剩余空间" },
+    { "id": "e10", "from": "clean", "to": "dedup", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "1.4 已有", "items": ["三档清理与待确认", "闲置任务挪外接盘"] },
+    { "dot": "rose", "title": "不做", "items": ["拔盘后在内置盘另建缓存", "清 Docker 镜像、改系统安全设置"] }
+  ]
+}
