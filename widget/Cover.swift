@@ -214,8 +214,15 @@ private struct PendingPage: View {
                         }
                     }
                 }
-                HStack {
-                    Text(selected.isEmpty ? "勾选要删的" : "已选 \(size(chosen.reduce(0) { $0 + ($1.bytes ?? 0) }))")
+                HStack(spacing: 8) {
+                    // One tap selects everything that can run now; tap again to clear.
+                    Button { selected = allSelected ? [] : Set(selectable) } label: {
+                        HStack(spacing: 6) {
+                            Checkbox(on: allSelected, partly: !selected.isEmpty && !allSelected)
+                            Text("全选").foregroundColor(Ink.text)
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.plain).disabled(selectable.isEmpty)
+                    Text(selected.isEmpty ? "" : "已选 \(size(chosen.reduce(0) { $0 + ($1.bytes ?? 0) }))")
                         .foregroundColor(Ink.muted)
                     Spacer()
                     Button("删除所选") { confirming = true }.buttonStyle(.plain)
@@ -241,8 +248,21 @@ private struct PendingPage: View {
         (ProcessInfo.processInfo.environment["RENDER_SELECT"] ?? "").split(separator: ",").map(String.init)
     }
     private var chosen: [ResourceRow] { store.pendingRows.filter { selected.contains($0.id) } }
+    private var selectable: [String] { store.pendingRows.filter(\.eligible).map(\.id) }
+    private var allSelected: Bool { !selectable.isEmpty && Set(selectable).isSubset(of: selected) }
     private func toggle(_ row: ResourceRow) {
         if selected.contains(row.id) { selected.remove(row.id) } else { selected.insert(row.id) }
+    }
+}
+
+private struct Checkbox: View {
+    let on: Bool
+    var partly = false
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3).fill(on ? Ink.navy : Color.clear)
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(on || partly ? Ink.navy : Color(hex: 0xB4B2A9), lineWidth: 1))
+            .overlay(Rectangle().fill(Ink.navy).frame(width: 7, height: 1.5).opacity(partly ? 1 : 0))
+            .frame(width: 13, height: 13)
     }
 }
 
@@ -251,9 +271,7 @@ private struct PendingLine: View {
     let on: Bool
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            RoundedRectangle(cornerRadius: 3).fill(on ? Ink.navy : Color.clear)
-                .overlay(RoundedRectangle(cornerRadius: 3).stroke(on ? Ink.navy : Color(hex: 0xB4B2A9), lineWidth: 1))
-                .frame(width: 13, height: 13).padding(.top, 2)
+            Checkbox(on: on).padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title.split(separator: "：", maxSplits: 1).last.map(String.init) ?? row.title)
                     .font(.system(size: 12)).foregroundColor(Ink.text).lineLimit(1)
