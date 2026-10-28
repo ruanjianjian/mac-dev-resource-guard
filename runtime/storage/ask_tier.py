@@ -189,8 +189,15 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
     return pending
 
 
+def dashboard_running(ps_output):
+    """The menu-bar dashboard, not the short-lived instance that runs the scheduled tick."""
+    return any('ResourceDashboard' in line and '--run-tick' not in line and '--render-tab' not in line
+               for line in ps_output.splitlines())
+
+
 def app_running():
-    return subprocess.run(['/usr/bin/pgrep', '-f', 'ResourceDashboard'], capture_output=True).returncode == 0
+    listing = subprocess.run(['/bin/ps', '-axo', 'command='], capture_output=True, text=True)
+    return listing.returncode == 0 and dashboard_running(listing.stdout)
 
 
 def launch_app():

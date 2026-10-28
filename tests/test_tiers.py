@@ -134,6 +134,14 @@ class LatestWriteTests(TierFixture):
         self.assertLess(tasks.latest_write(self.task('old', 5), tasks.skip_names({}), stop_after=cutoff), cutoff)
 
 
+class UnreadableTests(TierFixture):
+    def test_unreadable_folder_is_never_idle(self):
+        task = self.task('t', 9); locked = task / 'app/private'; locked.mkdir(); age(task, 9); locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        reasons, _ = tasks.idle_check(tasks.Task(self.root, task, task), Activity(), {}, 3, self.cfg())
+        self.assertTrue(any('无法完整读取' in r for r in reasons), reasons)
+
+
 class AutoTierTests(TierFixture):
     def test_moves_oldest_idle_first_and_stops_at_target(self):
         old, mid = self.task('old', 6), self.task('mid', 4)
@@ -155,6 +163,14 @@ class AutoTierTests(TierFixture):
         self.assertEqual(sorted(Path(a['path']).name for a in receipt['actions'] if a['kind'] == 'prune'), ['build', 'node_modules'])
         self.assertFalse((task / 'app/build').exists()); self.assertTrue((task / 'app/Pods/tracked.txt').exists())
         self.assertTrue((task / 'app/main.swift').exists()); self.assertEqual(receipt['external_missing'], ['/Volumes/NoSuchGuardDrive/worktrees'])
+
+    def test_denied_external_drive_falls_back_to_pruning_and_says_why(self):
+        task = self.task('old', 6)
+        with patch.object(auto_tier, 'external_access', return_value='后台任务没有访问外接盘的权限'):
+            receipt = self.run_tier(self.cfg(), free=lambda: GIB)
+        self.assertFalse(task.is_symlink()); self.assertFalse((task / 'app/build').exists())
+        self.assertEqual(receipt['external_denied'], [{'path': str(self.external), 'reason': '后台任务没有访问外接盘的权限'}])
+        self.assertEqual(receipt['external_missing'], [])
 
     def test_in_use_recent_or_pinned_untouched_but_dirty_idle_moves(self):
         busy, pinned = self.task('busy', 6), self.task('pinned', 6)

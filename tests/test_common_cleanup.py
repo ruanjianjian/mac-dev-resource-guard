@@ -115,6 +115,12 @@ class CommonCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(common.CacheUnavailable, '不存在'):
             common.manager(self.home)
 
+    def test_unreadable_relocated_cache_is_an_error_not_an_empty_result(self):
+        self.link_root()
+        with patch.object(common.os, 'listdir', side_effect=PermissionError(1, 'Operation not permitted')):
+            with self.assertRaisesRegex(ValueError, '没有读取'):
+                common.manager(self.home)
+
     def test_scheduler_settings_do_not_discover_standard_cache(self):
         from portable_config import configure
         from storage import StorageManager

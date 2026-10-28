@@ -244,4 +244,14 @@ class AutomaticTests(unittest.TestCase):
             run=subprocess.run([sys.executable,str(ROOT/'scripts/service.py'),'tick-storage'],capture_output=True,text=True,env=env)
         self.assertEqual((run.returncode,run.stderr),(0,''))
 
+    def test_storage_job_runs_through_the_app_and_reloads_from_wrapper_when_idle(self):
+        app=self.home/service.APP_EXECUTABLE; app.parent.mkdir(parents=True); app.write_text('app'); app.chmod(0o755)
+        p=self.home/'Library/LaunchAgents'/f'{service.LABELS["storage"]}.plist';p.parent.mkdir(parents=True)
+        wrapper=[str(self.home/'.local/bin/resource-guard-service'),'tick-storage']
+        p.write_bytes(plistlib.dumps(dict(Label=service.LABELS['storage'],ProgramArguments=wrapper,StartInterval=service.STORAGE_WAKE_SECONDS)))
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'state = not running\n','')) as run:
+            service.enable_job(self.home,'storage',ROOT)
+            self.assertTrue(any('bootout' in c.args[0] for c in run.call_args_list))
+        self.assertEqual(plistlib.loads(p.read_bytes())['ProgramArguments'],[str(app),'--run-tick'])
+
 if __name__=='__main__':unittest.main()

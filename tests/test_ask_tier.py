@@ -146,6 +146,10 @@ class AskTierTests(AskFixture):
         self.assertIsNone(ask_tier.maybe_notify(self.home, pending, 50 * GIB, 10 * GIB, now + 240, quiet))
         self.assertEqual(ask_tier.maybe_notify(self.home, pending, 5 * GIB, 10 * GIB, now + 300, quiet), 'critical')
 
+    def test_tick_instance_is_not_the_dashboard(self):
+        self.assertFalse(ask_tier.dashboard_running('/Apps/资源看板.app/Contents/MacOS/ResourceDashboard --run-tick\n/bin/zsh'))
+        self.assertTrue(ask_tier.dashboard_running('/Apps/资源看板.app/Contents/MacOS/ResourceDashboard\n'))
+
     def test_task_delete_unregisters_worktree(self):
         task = self.worktree_task('done-task', 10)
         self.refresh(FakeSimctl({}))

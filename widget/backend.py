@@ -164,6 +164,9 @@ def rows_auto(home):
                  bytes=sum(a.get('bytes') or 0 for a in done) or None, eligible=False, command=None,
                  outcome={'complete': '已完成', 'partial': '部分失败', 'disabled': '未打开', 'healthy': '空间充足',
                           'busy': '让路', 'config_error': '设置有误', 'error': '失败'}.get(status, status))]
+    for denied in receipt.get('external_denied', []):
+        rows.append(dict(id='denied:' + denied['path'], title='外接盘没有访问权限', category='自动处理记录', reason=denied['reason'] + '；本轮改为删构建产物',
+                         detail=denied['path'], bytes=None, eligible=False, command=None, outcome='需要授权'))
     for path in receipt.get('external_missing', []):
         rows.append(dict(id='external:' + path, title='外接开发盘未连接', category='自动处理记录', reason='本轮改为删构建产物：' + path,
                          detail=path, bytes=None, eligible=False, command=None, outcome='提示'))

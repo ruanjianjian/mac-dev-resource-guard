@@ -41,6 +41,20 @@ def volume_ready(path):
     return True
 
 
+def external_access(path):
+    """None when this process may write there; otherwise why not (macOS keeps removable volumes private)."""
+    probe = Path(path) / '.guard-access-{}'.format(os.getpid())
+    try:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        probe.write_text('')
+        probe.unlink()
+        return None
+    except PermissionError:
+        return '后台任务没有访问外接盘的权限：请在系统提示里允许「资源看板」访问可移除宗卷'
+    except OSError as error:
+        return '外接盘无法写入：' + str(error)
+
+
 def snapshot(path):
     """Entry count, file bytes and newest mtime, never following links."""
     count = total = 0
@@ -180,7 +194,7 @@ def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_
     target, warning = settings.target_free_gib * GIB, settings.warning_free_gib * GIB
     receipt = dict(schema=1, at=now, status='complete', free_before=round(free() / GIB, 2), free_after=None,
                    target_free_gib=settings.target_free_gib, warning_free_gib=settings.warning_free_gib,
-                   config_error=None, recovered=recover(home), external_missing=[], actions=[], kept=[])
+                   config_error=None, recovered=recover(home), external_missing=[], external_denied=[], actions=[], kept=[])
     current = free()
     if not cfg['auto_enabled']:
         receipt['status'] = 'disabled'
@@ -208,7 +222,10 @@ def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_
                 continue
             idle_days = '闲置 {:.1f} 天'.format((now - latest) / T.DAY)
             external = task.external
-            if external is not None and volume_ready(external):
+            denied = external_access(external) if external is not None and volume_ready(external) else None
+            if denied and not any(d['path'] == str(external) for d in receipt['external_denied']):
+                receipt['external_denied'].append(dict(path=str(external), reason=denied))
+            if external is not None and volume_ready(external) and not denied:
                 bytes_ = T.size(task.real) or 0
                 probe = Path(external)
                 while not probe.exists():
@@ -225,7 +242,7 @@ def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_
                 except (OSError, subprocess.SubprocessError) as error:
                     receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='failed', reason=str(error)))
             else:
-                if external is not None and str(external) not in receipt['external_missing']:
+                if external is not None and not denied and str(external) not in receipt['external_missing']:
                     receipt['external_missing'].append(str(external))
                 for output in T.rebuildable(task, cfg):
                     bytes_ = T.size(output) or 0

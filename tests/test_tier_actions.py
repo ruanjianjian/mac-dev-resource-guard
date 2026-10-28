@@ -72,6 +72,13 @@ class TierActionTests(AskFixture):
         self.assertEqual((rows['auto']['title'], rows['auto']['outcome']), ('搬到外接盘：old', '已完成'))
         self.assertEqual(rows['kept']['outcome'], '保留')
 
+    def test_denied_drive_access_is_shown(self):
+        auto_tier.write_receipt(self.home, dict(schema=1, at=time.time(), status='complete', free_before=3.0, free_after=3.0, config_error=None,
+                                                external_missing=[], external_denied=[dict(path='/Volumes/T9/w', reason='后台任务没有访问外接盘的权限')],
+                                                actions=[], kept=[]))
+        rows = {r['id'].split(':')[0]: r for r in self.adapter.run('auto-preview')['rows']}
+        self.assertEqual(rows['denied']['outcome'], '需要授权'); self.assertIn('改为删构建产物', rows['denied']['reason'])
+
     def test_wrong_settings_are_shown_not_hidden(self):
         (self.home / '.config/dev-resource-guard/auto-cleanup.json').write_text('{"auto_idle_days": -1}')
         setup = {r['id']: r for r in self.adapter.run('setup-preview')['rows']}

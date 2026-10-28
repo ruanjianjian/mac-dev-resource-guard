@@ -28,6 +28,8 @@ LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-res
 # launchd wakes the storage job often; each part keeps its own pace inside tick_storage.
 STORAGE_WAKE_SECONDS = 300
 CACHE_INTERVAL = 12 * 3600
+# launchd jobs may not touch removable volumes; run through the app so macOS asks the user once for 资源看板.
+APP_EXECUTABLE = 'Applications/资源看板.app/Contents/MacOS/ResourceDashboard'
 
 
 def schedulers(home, kind):
@@ -176,8 +178,12 @@ def enable_job(home, kind, runtime):
     domain = f'gui/{os.getuid()}'
     # launchd keeps a stable path; an atomic wrapper update affects only the next
     # invocation. In-flight work retains its immutable runtime and all locks.
-    command = [str(home/'.local/bin/resource-guard-service'), 'tick-storage'] if kind == 'storage' else [
-        str(home/'.local/bin/resource-guard-memory'), 'tick']
+    wrapper_tick = [str(home/'.local/bin/resource-guard-service'), 'tick-storage']
+    app_tick = [str(home/APP_EXECUTABLE), '--run-tick']
+    if kind == 'storage':
+        command = app_tick if (home/APP_EXECUTABLE).is_file() else wrapper_tick
+    else:
+        command = [str(home/'.local/bin/resource-guard-memory'), 'tick']
     body = dict(Label=label, ProgramArguments=command, StartInterval=STORAGE_WAKE_SECONDS if kind == 'storage' else 60,
                 RunAtLoad=True, EnvironmentVariables={'HOME': str(home), 'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')},
                 StandardOutPath='/dev/null', StandardErrorPath=str(state_root(home)/(kind+'-scheduler.err')))
@@ -185,7 +191,11 @@ def enable_job(home, kind, runtime):
     migrated = False
     if existing and existing[0]['loaded']:
         previous = plistlib.loads(path.read_bytes())
-        if previous.get('ProgramArguments') != command:
+        if kind == 'storage' and previous.get('ProgramArguments') != command and previous.get('ProgramArguments') in (wrapper_tick, app_tick):
+            # Our own job moving between the wrapper and the app launcher: reload only while idle.
+            stop_idle_job(domain, label)
+            migrated = True
+        elif previous.get('ProgramArguments') != command:
             old_command = home/'.local/bin'/('dev-'+kind)
             old_args = [str(old_command), 'tick'] if kind=='memory' else [str(old_command),'maintain','--apply']
             relative = 'runtime/memory/scripts/dev_memory.py' if kind=='memory' else 'runtime/storage/cli.py'

@@ -40,6 +40,10 @@ def standard_root(home, settings):
         raise ValueError('Xcode 缓存链接指向的范围过大：{}；这一类不清理'.format(target))
     if not target.is_dir():
         raise CacheUnavailable('Xcode 缓存链接指向的位置不存在：{}（外接盘未连接？）；本轮跳过'.format(target))
+    try:
+        os.listdir(target)
+    except PermissionError:
+        raise ValueError('没有读取 {} 的权限：请在系统提示里允许「资源看板」访问可移除宗卷；这一类本轮未清理'.format(target))
     return target
 
 

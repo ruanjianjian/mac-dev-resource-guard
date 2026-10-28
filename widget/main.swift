@@ -323,7 +323,15 @@ func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [
 
 func require(_ condition: Bool) { if !condition { fputs("Self-test failed\n", stderr); exit(1) } }
 
-if CommandLine.arguments.contains("--self-test") {
+if CommandLine.arguments.contains("--run-tick") {
+    // launchd runs the storage tick through the app: macOS then asks once whether 资源看板 may use the
+    // external drive, instead of silently refusing a background command-line job.
+    let task = Process()
+    task.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/resource-guard-service")
+    task.arguments = ["tick-storage"]
+    do { try task.run(); task.waitUntilExit(); exit(task.terminationStatus) }
+    catch { fputs("resource-guard tick did not start: \(error)\n", stderr); exit(2) }
+} else if CommandLine.arguments.contains("--self-test") {
     var s = Snapshot(); require(s.pressureLabel == "内存状态未知")
     for (raw,label) in [(UInt32(1),"内存正常"),(2,"内存有压力"),(4,"内存压力高")] { s.pressure=raw; require(s.pressureLabel == label) }
     require(number(nil) == "—"); require(gib(1_073_741_824) == 1)

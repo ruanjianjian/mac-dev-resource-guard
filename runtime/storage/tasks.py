@@ -12,6 +12,10 @@ IGNORED_FILES = {'.DS_Store'}
 DAY = 86400
 
 
+class Unreadable(OSError):
+    """Part of the folder could not be read (often a missing privacy permission)."""
+
+
 @dataclasses.dataclass
 class Task:
     root: Path
@@ -53,7 +57,9 @@ def latest_write(path, skipped, stop_after=None):
     answered quickly, while an idle one still gets its real age for ordering.
     """
     newest = 0.0
-    for folder, dirs, files in os.walk(path, followlinks=False):
+    def failed(error):
+        raise Unreadable(error.errno, '目录无法完整读取：' + str(error.filename))
+    for folder, dirs, files in os.walk(path, followlinks=False, onerror=failed):
         dirs[:] = [d for d in dirs if d not in skipped]
         for name in dirs + files:
             try:
@@ -142,7 +148,10 @@ def idle_check(task, activity, pins, days, cfg, now=None):
     pinned = pin_reason(pins, task)
     if pinned:
         reasons.append(pinned)
-    latest = latest_write(task.real, skip_names(cfg), stop_after=now - days * DAY)
+    try:
+        latest = latest_write(task.real, skip_names(cfg), stop_after=now - days * DAY)
+    except Unreadable as error:
+        return reasons + [str(error) + '（可能缺少访问权限），保留'], now
     if now - latest < days * DAY:
         reasons.append('{:.1f} 天内有改写（要求闲置 {} 天）'.format(max(0.0, (now - latest) / DAY), days))
     return reasons, latest
