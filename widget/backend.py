@@ -161,7 +161,7 @@ def rows_auto(home):
     reason = TIER_STATUS[status].format(**{k: receipt.get(k) for k in ('free_before', 'warning_free_gib', 'config_error', 'error')}) \
         if status in TIER_STATUS else '{} 项完成，可用空间 {} → {} GiB。'.format(len(done), receipt.get('free_before'), receipt.get('free_after'))
     rows = [dict(id='auto-status', title='自动档 · ' + when, category='自动处理记录', reason=reason, detail='',
-                 bytes=sum(a.get('bytes') or 0 for a in done), eligible=False, command=None,
+                 bytes=sum(a.get('bytes') or 0 for a in done) or None, eligible=False, command=None,
                  outcome={'complete': '已完成', 'partial': '部分失败', 'disabled': '未打开', 'healthy': '空间充足',
                           'busy': '让路', 'config_error': '设置有误', 'error': '失败'}.get(status, status))]
     for path in receipt.get('external_missing', []):
@@ -174,7 +174,7 @@ def rows_auto(home):
             stamp = time.strftime('%m-%d %H:%M', time.localtime(entry['at']))
             rows.append(dict(id='auto:{}:{}'.format(entry['at'], index), title='{}：{}'.format(KIND_TITLES.get(action['kind'], action['kind']), Path(action['path']).name or action['path']),
                              category='自动处理记录', reason=action.get('reason', ''), detail=stamp + ' · ' + action['path'] + (' → ' + action['dest'] if action.get('dest') else ''),
-                             bytes=action.get('bytes'), eligible=False, command=None, outcome=OUTCOMES.get(action['result'], action['result'])))
+                             bytes=action.get('bytes') or None, eligible=False, command=None, outcome=OUTCOMES.get(action['result'], action['result'])))
     for index, kept in enumerate(receipt.get('kept', [])):
         rows.append(dict(id='kept:{}'.format(index), title='保留：' + Path(kept['path']).name, category='保留原因', reason=kept['reason'],
                          detail=kept['path'], bytes=None, eligible=False, command=None, outcome='保留'))

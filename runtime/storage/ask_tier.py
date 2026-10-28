@@ -52,15 +52,18 @@ def parse_time(value):
 
 
 def last_used(device):
-    """lastBootedAt is often empty; device.plist changes on every boot and shutdown."""
+    """lastBootedAt is often empty; device.plist changes on every boot and shutdown.
+
+    The data folder is not used: CoreSimulator touches every device's data folder
+    at once (seen after a service update), which would make all of them look new.
+    """
     times = [parse_time(device.get('lastBootedAt'))]
     data = device.get('dataPath')
     if data:
-        for path in (Path(data), Path(data).parent / 'device.plist'):
-            try:
-                times.append(path.stat().st_mtime)
-            except OSError:
-                pass
+        try:
+            times.append((Path(data).parent / 'device.plist').stat().st_mtime)
+        except OSError:
+            pass
     times = [t for t in times if t]
     return max(times) if times else None
 

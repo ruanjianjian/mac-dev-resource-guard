@@ -120,6 +120,11 @@ class AskTierTests(AskFixture):
         simctl.fail = set()
         self.assertEqual(ask_tier.execute(self.home, cfg, self.settings, ['runtime-delete:R1'], simctl, Activity())[0]['outcome'], '已完成')
 
+    def test_bulk_touched_data_folder_does_not_hide_an_unused_simulator(self):
+        simctl = self.sims()
+        os.utime(simctl.devices[self.IOS][0]['dataPath'], None)     # CoreSimulator touched every data folder
+        self.assertIn('simulator-delete:OLD', self.ids(self.refresh(simctl, task_roots=[])))
+
     def test_ignore_until_object_changes(self):
         simctl = self.sims()
         pending = self.refresh(simctl, task_roots=[])

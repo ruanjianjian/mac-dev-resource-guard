@@ -292,6 +292,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 }
 
+/// Isolated UI evidence: draw one panel tab into a PNG; no window is ever shown on screen.
+func renderTab(_ tab: String, selecting: Set<String>, to out: String) throws {
+    let model = Monitor(); model.snapshot = sample(); model.loading = false
+    let actions = DashboardActions()
+    if tab != "overview" { actions.previews[tab] = try DashboardActions.call(tab + "-preview") }
+    let view = NSHostingView(rootView: Dashboard(model: model, actions: actions, initialTab: tab, initialSelected: selecting))
+    view.frame = NSRect(x: 0, y: 0, width: 620, height: 700)
+    let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.appearance = NSAppearance(named: .darkAqua)
+    window.contentView = view
+    view.layoutSubtreeIfNeeded()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw NSError(domain: "Dashboard", code: 4) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
+}
+
 func require(_ condition: Bool) { if !condition { fputs("Self-test failed\n", stderr); exit(1) } }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -322,6 +339,16 @@ if CommandLine.arguments.contains("--self-test") {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
     print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding")
+} else if let index = CommandLine.arguments.firstIndex(of: "--render-tab"), index + 2 < CommandLine.arguments.count {
+    // Only against a marked fixture home, so evidence never reads or changes real data.
+    guard let home = try? testHomeArgument(CommandLine.arguments), FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
+        fputs("render needs --test-home with a fixture marker\n", stderr); exit(2)
+    }
+    _ = NSApplication.shared
+    NSApp.setActivationPolicy(.prohibited)
+    let selecting = CommandLine.arguments.firstIndex(of: "--select").map { Set(CommandLine.arguments[$0 + 1].split(separator: ",").map(String.init)) } ?? []
+    do { try renderTab(CommandLine.arguments[index + 1], selecting: selecting, to: CommandLine.arguments[index + 2]) }
+    catch { fputs("render failed: \(error)\n", stderr); exit(1) }
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate(); app.delegate = delegate

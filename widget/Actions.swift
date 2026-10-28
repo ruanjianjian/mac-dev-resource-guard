@@ -42,6 +42,39 @@ func testHomeArgument(_ arguments: [String]) throws -> String? {
 }
 
 final class DashboardActions: ObservableObject {
+    /// One synchronous backend call; the panel runs it off the main thread.
+    static func call(_ action: String, token: String? = nil, path: String? = nil, ids: [String]? = nil) throws -> BackendReply {
+        guard let script = Bundle.main.url(forResource: "backend", withExtension: "py") else {
+            throw NSError(domain: "Dashboard", code: 1, userInfo: [NSLocalizedDescriptionKey: "应用缺少后端适配器，请重新安装。"])
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        var args = [script.path, action]
+        if let token { args += ["--token", token] }
+        if let path { args += ["--path", path] }
+        if let ids { args += ["--ids", ids.joined(separator: ",")] }
+        // An explicit, marked disposable home is only for UI integration tests.
+        if let home = try testHomeArgument(CommandLine.arguments) {
+            guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
+                throw NSError(domain: "Dashboard", code: 2, userInfo: [NSLocalizedDescriptionKey: "隔离测试目录缺少标记，拒绝回退到真实工具。"])
+            }
+            args += ["--home", home]
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = home
+            task.environment = env
+        }
+        task.arguments = args
+        let pipe = Pipe(); task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try task.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else {
+            throw NSError(domain: "Dashboard", code: 3, userInfo: [NSLocalizedDescriptionKey: "后端连接失败，请检查工具安装。"])
+        }
+        return try JSONDecoder().decode(BackendReply.self, from: data)
+    }
+
     @Published var busy = false
     @Published var activity = ""
     @Published var message = ""
@@ -61,40 +94,13 @@ final class DashboardActions: ObservableObject {
         busy = true; message = ""
         activity = clean ? "后端正在重新核对保护并执行，请等待完成…" :
             (["storage", "common"].contains(family) ? "正在扫描缓存及占用；大目录可能需要几分钟…" : "正在检查，请稍候…")
+        let command = action ?? (family + (clean ? "-clean" : "-preview"))
         DispatchQueue.global(qos: .utility).async {
             let reply: BackendReply
             do {
-                guard let script = Bundle.main.url(forResource: "backend", withExtension: "py") else {
-                    throw NSError(domain: "Dashboard", code: 1, userInfo: [NSLocalizedDescriptionKey: "应用缺少后端适配器，请重新安装。"])
-                }
-                let task = Process()
-                task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                var args = [script.path, action ?? (family + (clean ? "-clean" : "-preview"))]
-                if let token { args += ["--token", token] }
-                if let path { args += ["--path", path] }
-                if let ids { args += ["--ids", ids.joined(separator: ",")] }
-                // An explicit, marked disposable home is only for UI integration tests.
-                if let home = try testHomeArgument(CommandLine.arguments) {
-                    guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
-                        throw NSError(domain: "Dashboard", code: 2, userInfo: [NSLocalizedDescriptionKey: "隔离测试目录缺少标记，拒绝回退到真实工具。"])
-                    }
-                    args += ["--home", home]
-                    var env = ProcessInfo.processInfo.environment
-                    env["HOME"] = home
-                    task.environment = env
-                }
-                task.arguments = args
-                let pipe = Pipe(); task.standardOutput = pipe
-                task.standardError = FileHandle.nullDevice
-                try task.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                task.waitUntilExit()
-                guard task.terminationStatus == 0 else {
-                    throw NSError(domain: "Dashboard", code: 3, userInfo: [NSLocalizedDescriptionKey: clean ? "后端连接中断，操作结果待核实；不会自动重试。" : "后端连接失败，请检查工具安装。"])
-                }
-                reply = try JSONDecoder().decode(BackendReply.self, from: data)
+                reply = try DashboardActions.call(command, token: token, path: path, ids: ids)
             } catch {
-                reply = BackendReply(status: "error", message: error.localizedDescription,
+                reply = BackendReply(status: "error", message: clean && (error as NSError).code == 3 ? "后端连接中断，操作结果待核实；不会自动重试。" : error.localizedDescription,
                                      rows: nil, token: nil, created: nil, eligible: nil, eligibleBytes: nil)
             }
             DispatchQueue.main.async {
@@ -117,6 +123,11 @@ struct Dashboard: View {
     @State private var confirmingSetup = false
     @State private var selected: Set<String> = []
     @State private var confirmingPending = false
+
+    init(model: Monitor, actions: DashboardActions, initialTab: String = "overview", initialSelected: Set<String> = []) {
+        _model = ObservedObject(wrappedValue: model); _actions = ObservedObject(wrappedValue: actions)
+        _tab = State(initialValue: initialTab); _selected = State(initialValue: initialSelected)
+    }
 
     private var family: String { tab == "storage" ? storageFamily : tab }
     private var preview: BackendReply? { actions.previews[family] }
