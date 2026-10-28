@@ -210,7 +210,7 @@ struct Dashboard: View {
                 Button("刷新状态") { model.refresh() }.buttonStyle(.borderless)
             }.padding(16)
         }
-        .frame(width: 620, height: 700)
+        .frame(minWidth: 620, minHeight: 700)
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: tab) { value in
             selected = []

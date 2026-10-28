@@ -293,12 +293,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 }
 
 /// Isolated UI evidence: draw one panel tab into a PNG; no window is ever shown on screen.
-func renderTab(_ tab: String, selecting: Set<String>, to out: String) throws {
+func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [String], clean: [String], to out: String) throws {
     let model = Monitor(); model.snapshot = sample(); model.loading = false
     let actions = DashboardActions()
-    if tab != "overview" { actions.previews[tab] = try DashboardActions.call(tab + "-preview") }
-    let view = NSHostingView(rootView: Dashboard(model: model, actions: actions, initialTab: tab, initialSelected: selecting))
-    view.frame = NSRect(x: 0, y: 0, width: 620, height: 700)
+    if !ignore.isEmpty {
+        actions.previews[tab] = try DashboardActions.call("pending-ignore", ids: ignore)
+    } else if !clean.isEmpty {
+        // The same confirmation path as the button: a fresh preview token, then only the ticked ids.
+        let preview = try DashboardActions.call("pending-preview")
+        actions.previews[tab] = try DashboardActions.call("pending-clean", token: preview.token, ids: clean)
+    } else if tab != "overview" {
+        actions.previews[tab] = try DashboardActions.call(tab + "-preview")
+    }
+    let view = NSHostingView(rootView: Dashboard(model: model, actions: actions, initialTab: tab, initialSelected: selecting)
+        .frame(width: 620, height: height))
+    view.frame = NSRect(x: 0, y: 0, width: 620, height: height)
     let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = view
@@ -346,8 +355,12 @@ if CommandLine.arguments.contains("--self-test") {
     }
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.prohibited)
-    let selecting = CommandLine.arguments.firstIndex(of: "--select").map { Set(CommandLine.arguments[$0 + 1].split(separator: ",").map(String.init)) } ?? []
-    do { try renderTab(CommandLine.arguments[index + 1], selecting: selecting, to: CommandLine.arguments[index + 2]) }
+    func list(_ flag: String) -> [String] {
+        CommandLine.arguments.firstIndex(of: flag).map { CommandLine.arguments[$0 + 1].split(separator: ",").map(String.init) } ?? []
+    }
+    let height = CommandLine.arguments.firstIndex(of: "--height").flatMap { Double(CommandLine.arguments[$0 + 1]) } ?? 700
+    do { try renderTab(CommandLine.arguments[index + 1], selecting: Set(list("--select")), height: CGFloat(height),
+                       ignore: list("--ignore"), clean: list("--clean"), to: CommandLine.arguments[index + 2]) }
     catch { fputs("render failed: \(error)\n", stderr); exit(1) }
 } else {
     let app = NSApplication.shared
