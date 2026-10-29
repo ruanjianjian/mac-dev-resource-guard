@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from service import activate, ask_consent, current_target, enable_recommended, install_skill, set_target, stop_menu_app, tiers_config, waiting_lock
+from service import activate, ask_consent, backup_path, current_target, enable_recommended, install_skill, register_app, set_target, stop_menu_app, tidy_backups, tiers_config, waiting_lock
 import discover
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'widget'))
 import local_signing
@@ -38,7 +38,7 @@ with waiting_lock(home, 'periodic-storage'):
         left = stop_menu_app(executable)
         if left:
             raise SystemExit('旧的资源看板（PID {}）没有退出，已保留原 App；请退出它后重试'.format(left))
-        backup = home / '.local/state/dev-resource-guard/app-backups' / str(time.time_ns())
+        backup = backup_path(home)
         backup.parent.mkdir(parents=True, exist_ok=True)
         os.rename(app, backup)
     app.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,9 @@ with waiting_lock(home, 'periodic-storage'):
         raise
     # The storage job runs through the installed app, so activate only once it is in place.
     result = activate(home)
+    # Spotlight and Finder: the new build with its icon, and no old copies beside it.
+    register_app(app)
+    tidy_backups(home)
 # The companion skill travels with the app so the user's agent always matches the installed version.
 for note in install_skill(home, root):
     print(note)
