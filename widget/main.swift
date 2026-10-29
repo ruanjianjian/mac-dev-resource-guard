@@ -188,8 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         anchor.level = .statusBar
         anchor.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status.button?.image = NSImage(systemSymbolName: "gauge", accessibilityDescription: "资源看板")
-        status.button?.image?.isTemplate = true
+        status.button?.image = Logo.glyph()
         status.button?.imagePosition = .imageLeading
         status.button?.setAccessibilityLabel("显示资源看板")
         status.button?.target = self
@@ -445,12 +444,17 @@ if CommandLine.arguments.contains("--run-tick") {
     let oldRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"a","title":"t","detail":"","category":"c","bytes":null,"eligible":false,"reason":"r","outcome":null,"command":null}"#.utf8))
     require(oldRow.loses == nil)
     require(PanelPlacement.selfTest())
+    require(Logo.selfTest())
     require(try! testHomeArgument(["app"]) == nil)
     require(try! testHomeArgument(["app", "--test-home", "/fixture"]) == "/fixture")
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays, motion")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays, motion, logo")
+} else if let index = CommandLine.arguments.firstIndex(of: "--render-icon"), index + 1 < CommandLine.arguments.count {
+    // The build packs this folder into AppIcon.icns, so the icon is drawn from the same code as the menu-bar mark.
+    do { try Logo.writeIconset(to: URL(fileURLWithPath: CommandLine.arguments[index + 1])) }
+    catch { fputs("icon render failed: \(error)\n", stderr); exit(1) }
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-tab"), index + 2 < CommandLine.arguments.count {
     // Only against a marked fixture home, so evidence never reads or changes real data.
     guard let home = try? testHomeArgument(CommandLine.arguments), FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
