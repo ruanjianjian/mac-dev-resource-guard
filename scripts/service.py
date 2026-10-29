@@ -597,8 +597,65 @@ def integrate(home, project):
     return {'path': str(project), 'wrapper': str(path)}
 
 
+CONSENT = 'consent.json'
+YES, NO = ('yes', 'y', '1', 'true'), ('no', 'n', '0', 'false')
+
+
+def consent_question(drive=None):
+    """The one question at the first install (RAW-36): what turning everything on changes, in plain words."""
+    lines = ['默认打开这几项：',
+             '  · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）',
+             '  · 自动清理：只做不丢东西的（挪闲置任务、删能重新生成的构建产物）；会丢东西的先问你']
+    if drive:
+        lines.append('  · 外接盘「{}」：缓存和闲置任务放过去'.format(drive))
+    return '\n'.join(lines) + '\n同意吗？[Y/n] '
+
+
+def ask_consent(home, drive=None, env=None, tty='/dev/tty', interactive=None):
+    """Asked once, at the first install: 'yes' / 'no', 'decided' on upgrades, 'unasked' when nobody could answer.
+    RESOURCE_GUARD_ENABLE=yes|no answers for an agent that asked the user in its chat."""
+    env = os.environ if env is None else env
+    path = state_root(home) / CONSENT
+    if path.exists():
+        return 'decided'
+    cfg = tiers_config.load(home)
+    if cfg['caches_enabled'] and cfg['auto_enabled'] and cfg['ask_enabled']:
+        atomic_json(path, dict(consent=True, at=time.time(), how='already on'))
+        return 'decided'
+    value = env.get('RESOURCE_GUARD_ENABLE', '').strip().lower()
+    if value in YES or value in NO:
+        answer = value in YES
+    else:
+        # Only a person at a terminal is asked; an agent's captured output never waits on a prompt.
+        if not (sys.stdout.isatty() if interactive is None else interactive):
+            return 'unasked'
+        try:
+            with open(tty) as reply, open(tty, 'a') as screen:
+                screen.write(consent_question(drive)); screen.flush()
+                answer = reply.readline().strip().lower() not in NO
+        except OSError:
+            return 'unasked'
+    atomic_json(path, dict(consent=answer, at=time.time()))
+    return 'yes' if answer else 'no'
+
+
+def enable_recommended(home, launchctl=toolcaches.default_launchctl, probe=auto_tier.external_access, kick=True, **scan):
+    """After the user agreed: one checkup, then shared caches, cleanup and the drive (if one is plugged in) on."""
+    settings = configure(home)
+    owned = [settings.cache_roots[0], settings.state_root, state_root(home)]
+    checkup.scan(home, tiers_config.load(home, owned=owned), **scan)
+    cfg, notes = checkup.apply(home, ['caches', 'clean', 'external'], owned, probe=probe, launchctl=launchctl)
+    on = [name for name, done in (('共享构建缓存', cfg['caches_enabled']), ('自动清理', cfg['auto_enabled'] and cfg['ask_enabled']),
+                                  ('外接盘「{}」'.format(Path(toolcaches.volume_of(str(cfg['external_root'])) or '').name), cfg['external_root']))
+          if done]
+    atomic_json(state_root(home) / CONSENT, dict(consent=True, at=time.time(), applied=on))
+    if kick:
+        subprocess.run(['/bin/launchctl', 'kickstart', 'gui/{}/local.dev-resource-guard.storage'.format(os.getuid())], capture_output=True)
+    return (['已打开：' + '、'.join(on)] if on else []) + notes
+
+
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune'])
+    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
@@ -617,6 +674,8 @@ def main():
         result = {'protected': guard_mole(home, remove=a.value == 'remove')}
     elif a.action == 'prune':
         result = prune_output(home, a.value or '')
+    elif a.action == 'enable':   # the user agreed in their agent's chat after an install that could not ask
+        result = {'enabled': enable_recommended(home)}
     else:
         result = activate(home) if a.action=='activate' else tick_storage(home) if a.action=='tick-storage' else integrate(home,a.project)
     print(json.dumps(result,ensure_ascii=False))

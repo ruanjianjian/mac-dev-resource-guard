@@ -262,10 +262,14 @@ def turn_off(home, which, owned=(), launchctl=toolcaches.default_launchctl):
     raise ValueError('不认识的建议：' + which)
 
 
-def first_run_message(report, freed):
+def first_run_message(report, freed, states=None):
+    on = [name for key, name in (('caches', '共享构建缓存'), ('clean', '自动清理'), ('external', '外接盘'))
+          if states and states[key]['on']]
+    if on:
+        return '{}都已开好。空间去哪了，点菜单栏图标看。'.format('、'.join(on))
     if freed >= GIB:
-        return '可腾出约 {:.0f} GB。点开体检页，一键开启。'.format(freed / GIB)
-    return '空间去哪了、可以怎么省，都在体检页里。'
+        return '把「帮你管着」里的开关打开，预计可腾出约 {:.0f} GB。'.format(freed / GIB)
+    return '空间去哪了、可以怎么省，都在面板里。'
 
 
 def free_space(volume):

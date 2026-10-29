@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Darwin
 import UserNotifications
+import Combine
 
 struct Snapshot {
     var pressure: UInt32? = nil
@@ -22,9 +23,6 @@ struct Snapshot {
     var errors: [String] = []
     var pressureLabel: String {
         switch pressure { case 1: return "内存正常"; case 2: return "内存有压力"; case 4: return "内存压力高"; default: return "内存状态未知" }
-    }
-    var tint: Color {
-        switch pressure { case 1: return Color(red: 0.40, green: 0.85, blue: 0.69); case 2: return .orange; case 4: return .red; default: return .secondary }
     }
 }
 
@@ -115,7 +113,9 @@ func sample() -> Snapshot {
 final class Monitor: ObservableObject {
     @Published var snapshot = Snapshot()
     @Published var loading = true
-    @Published var pinned = UserDefaults.standard.bool(forKey: "pinned")
+    /// What the background is moving or deleting right now (nil when idle); drives the motion.
+    @Published var work: Work? { didSet { pace() } }
+    private var fast: Timer?
     @Published var shortcut = "正在注册快捷键"
     private var timer: Timer?
     private var busy = false
@@ -123,6 +123,14 @@ final class Monitor: ObservableObject {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.refresh() }
         timer?.tolerance = 3
+    }
+    /// While the background works, sample every 2 s so the freed space counts up; back to 15 s after.
+    private func pace() {
+        if work != nil, fast == nil {
+            fast = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+        } else if work == nil, fast != nil {
+            fast?.invalidate(); fast = nil; refresh()
+        }
     }
     func refresh() {
         guard !busy else { return }
@@ -141,88 +149,19 @@ final class Monitor: ObservableObject {
     }
 }
 
-struct Overview: View {
-    @ObservedObject var model: Monitor
-    var body: some View {
-        let s = model.snapshot
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 8) {
-                    Circle().fill(s.tint).frame(width: 8, height: 8)
-                    Text(model.loading ? "正在读取…" : s.pressureLabel).font(.system(size: 17, weight: .medium))
-                    Spacer()
-                    Text("RAM").font(.system(size: 10, weight: .semibold)).foregroundColor(.secondary)
-                }
-                HStack(spacing: 0) {
-                    metric("物理内存", number(s.ram))
-                    Spacer()
-                    metric("压缩内存", number(s.compressed))
-                    Spacer()
-                    metric("交换空间", number(s.swap))
-                }
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("磁盘可用").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
-                    Spacer()
-                    Image(systemName: "internaldrive").foregroundColor(.secondary)
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(number(s.free)).font(.system(size: 43, weight: .light, design: .rounded)).monospacedDigit()
-                    Text("GiB").font(.system(size: 13)).foregroundColor(.secondary)
-                    Spacer()
-                }
-                GeometryReader { g in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.primary.opacity(0.08))
-                        Capsule().fill(((s.free ?? 0) < (s.target ?? 0) ? Color.orange : Color(red: 0.40, green: 0.85, blue: 0.69)).opacity(0.8)).frame(width: g.size.width * CGFloat(min(1, max(0, (s.free ?? 0) / max(1, s.capacity ?? 1)))))
-                    }
-                }.frame(height: 5).accessibilityLabel("磁盘可用比例")
-                HStack {
-                    Text("总容量 \(number(s.capacity)) GiB")
-                    Spacer()
-                    if let goal = s.target { Text("目标 \(String(format: "%.0f", goal)) GiB") }
-                }.font(.system(size: 10)).foregroundColor(.secondary)
-                Text("空间目标仅提醒 · 构建照常进行").font(.system(size: 11)).foregroundColor(.secondary)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 9) {
-                Label(s.guardStatus, systemImage: "waveform.path").font(.system(size: 11))
-                Label("已记录 \(s.slots) 个固定构建槽", systemImage: "square.stack.3d.up").font(.system(size: 11)).foregroundColor(.secondary)
-                if !s.errors.isEmpty { Text(s.errors.joined(separator: " · ")).font(.system(size: 10)).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true) }
-            }
-            HStack {
-                Text(model.loading ? "读取中" : "更新于 \(s.at.formatted(date: .omitted, time: .standard))")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
-                Spacer()
-                Button("刷新") { model.refresh() }.buttonStyle(.borderless).font(.system(size: 11))
-                Button("活动监视器") { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")) }
-                    .buttonStyle(.borderless).font(.system(size: 11))
-            }
-        }
-        .padding(24).frame(width: 340).background(Color(nsColor: .windowBackgroundColor))
-    }
-    private func metric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.system(size: 10)).foregroundColor(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(value).font(.system(size: 19, weight: .medium, design: .rounded)).monospacedDigit()
-                Text("G").font(.system(size: 9)).foregroundColor(.secondary)
-            }
-        }
-    }
-
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
     let model = Monitor()
-    let actions = DashboardActions()
     let store = CoverStore()
+    let watcher = WorkWatcher()
+    private var watching: [AnyCancellable] = []
+    /// The menu-bar number rolls towards the new value; the dot after it pulses while something runs.
+    private var shownFree: Double?
+    private var roll: Timer?
+    private var pulse: Timer?
+    private var pulseOn = true
     var panel: NSPopover!
     /// An invisible spot on the display in use, for when the icon is not in that display's menu bar.
     let anchor = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2, height: 1), styleMask: [.borderless], backing: .buffered, defer: true)
-    var window: NSWindow!
     var status: NSStatusItem!
     let statusMenu = NSMenu()
     var shortcut: GlobalShortcut?
@@ -232,16 +171,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.setActivationPolicy(.accessory)
-        let view = NSHostingView(rootView: Dashboard(model: model, actions: actions))
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 700), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "资源看板"; window.titlebarAppearsTransparent = true
-        window.minSize = NSSize(width: 620, height: 700)
-        window.contentView = view; window.delegate = self; window.isReleasedWhenClosed = false
-        window.isRestorable = false
-        window.setFrameAutosaveName("resource-dashboard")
-        if !window.setFrameUsingName("resource-dashboard") { window.center() }
-        window.level = model.pinned ? .floating : .normal
-        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel = NSPopover()
         panel.behavior = .transient
         panel.appearance = NSAppearance(named: .aqua)
@@ -271,23 +200,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         shortcut = GlobalShortcut { [weak self] in self?.togglePanel() }
         shortcut?.register()
         model.shortcut = shortcut?.label ?? "未注册，可从菜单栏打开"
+        // Everything lives in the cover; the menu only opens it or quits (RAW-36).
         let menu = statusMenu
-        menu.addItem(withTitle: "显示资源看板", action: #selector(show), keyEquivalent: "").target = self
-        // Everything that used to be a tab now waits here, one click away from the cover.
-        let more = NSMenu()
-        for (title, tab) in [("实时概览", "overview"), ("磁盘缓存", "storage"), ("开发后台", "memory"),
-                             ("待确认列表", "pending"), ("自动记录", "auto"), ("接入设置", "setup")] {
-            let item = NSMenuItem(title: title, action: #selector(openTab(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = tab
-            more.addItem(item)
-        }
-        let moreItem = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
-        moreItem.submenu = more
-        menu.addItem(moreItem)
-        menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r").target = self
-        let shortcutItem = NSMenuItem(title: "全局唤起：\(model.shortcut)", action: nil, keyEquivalent: "")
-        shortcutItem.isEnabled = false
-        menu.addItem(shortcutItem)
+        menu.addItem(withTitle: "打开资源看板", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出资源看板", action: #selector(quit), keyEquivalent: "q").target = self
         let mainMenu = NSMenu()
@@ -298,6 +213,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
         NSApp.mainMenu = mainMenu
+        watcher.changed = { [weak self] work in self?.model.work = work }
+        watcher.start()
+        // Either the background or the panel working lights the dot.
+        watching = [model.$work.map { _ in () }.merge(with: store.$working.map { _ in () }).receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.setBusy() }]
         model.start()
         // A drive in use was unplugged: say what stopped working right away (external-drive AC-02).
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] note in
@@ -334,12 +254,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         let waiting = s.pending > 0 ? " · \(s.pending) 项待确认" : ""
         status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\(waiting)\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
         badge.isHidden = s.pending == 0
-        // Free space beside the icon; orange below the warning line, red below the critical line.
-        let text = s.free.map { String(format: " %.0fG", $0) } ?? ""
-        let colour: NSColor = [NSColor.labelColor, .systemOrange, .systemRed][s.freeLevel]
-        status.button?.attributedTitle = NSAttributedString(string: text, attributes: [
-            .foregroundColor: colour, .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .medium)])
+        watcher.read()
+        rollFree(to: s.free)
         badge.frame.origin.x = 14
+    }
+    private var busy: Bool { model.work != nil || !store.working.isEmpty }
+    /// The number moves from the old value to the new one in 0.6 s instead of jumping (no motion when reduced).
+    private func rollFree(to free: Double?) {
+        roll?.invalidate()
+        guard let free, let start = shownFree, abs(free - start) >= 0.5, !Motion.reduced else { shownFree = free; renderTitle(); return }
+        var step = 0.0
+        roll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
+            step += 1
+            let progress = min(1, step / 12)
+            self?.shownFree = start + (free - start) * Motion.easeOut(progress); self?.renderTitle()
+            if progress >= 1 { timer.invalidate() }
+        }
+    }
+    private func setBusy() {
+        if busy, pulse == nil, !Motion.reduced {
+            pulse = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in self?.pulseOn.toggle(); self?.renderTitle() }
+        } else if !busy {
+            pulse?.invalidate(); pulse = nil; pulseOn = true
+        }
+        renderTitle()
+    }
+    /// Free space beside the icon; orange below the warning line, red below the critical line.
+    private func renderTitle() {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .medium)
+        let colour: NSColor = [NSColor.labelColor, .systemOrange, .systemRed][model.snapshot.freeLevel]
+        let title = NSMutableAttributedString(string: shownFree.map { String(format: " %.0fG", $0) } ?? "",
+                                              attributes: [.foregroundColor: colour, .font: font])
+        if busy {
+            title.append(NSAttributedString(string: " •", attributes: [.font: font,
+                .foregroundColor: NSColor.labelColor.withAlphaComponent(pulseOn ? 1 : 0.25)]))
+        }
+        status.button?.attributedTitle = title
     }
     func post(title: String, body: String, tab: String) {
         let content = UNMutableNotificationContent()
@@ -403,21 +353,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         let here = PanelPlacement.screen(at: NSEvent.mouseLocation, in: NSScreen.screens.map(PanelScreen.init))?.frame
         panel.isShown && panelScreen == here ? panel.performClose(nil) : showPanel(page: .cover)
     }
-    /// The old full window, kept for the less common tools under 「更多」; it opens on the display in use.
-    func showWindow(tab: String) {
-        panel.performClose(nil)
-        if let frame = PanelPlacement.window(window.frame, screens: NSScreen.screens.map(PanelScreen.init), pointer: NSEvent.mouseLocation) {
-            window.setFrame(frame, display: false)
-        }
-        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-        actions.requestedTab = tab
-    }
-    @objc func openTab(_ sender: NSMenuItem) { showWindow(tab: sender.representedObject as? String ?? "overview") }
     @objc func refresh() { model.refresh() }
-    @objc func quit() {
-        if actions.busy { showWindow(tab: "overview"); return }
-        NSApp.terminate(nil)
-    }
+    @objc func quit() { NSApp.terminate(nil) }
 }
 
 /// Isolated UI evidence: draw one panel tab into a PNG; no window is ever shown on screen.
@@ -429,6 +366,9 @@ func renderCover(_ tab: String, to out: String) throws {
     if let free = env["RENDER_FREE"].flatMap(Double.init) { model.snapshot.free = free }
     if let capacity = env["RENDER_CAPACITY"].flatMap(Double.init) { model.snapshot.capacity = capacity }
     if let pending = env["RENDER_PENDING"].flatMap(Int.init) { model.snapshot.pending = pending }
+    if let parts = env["RENDER_WORK"]?.split(separator: ":").map(String.init), parts.count == 4 {
+        model.work = Work(kind: parts[0], title: parts[1], bytes: Int64(parts[2]) ?? 0, freeBefore: Double(parts[3]))
+    }
     let store = CoverStore()
     store.checkup = try DashboardActions.call("checkup-preview")
     store.pending = try DashboardActions.call("pending-preview")
@@ -441,35 +381,6 @@ func renderCover(_ tab: String, to out: String) throws {
     view.frame = NSRect(x: 0, y: 0, width: 300, height: 340)
     let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: .aqua)
-    window.contentView = view
-    view.layoutSubtreeIfNeeded()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw NSError(domain: "Dashboard", code: 4) }
-    view.cacheDisplay(in: view.bounds, to: rep)
-    try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
-}
-
-func renderTab(_ tab: String, selecting: Set<String>, height: CGFloat, ignore: [String], clean: [String], to out: String) throws {
-    if tab.hasPrefix("cover") { return try renderCover(tab, to: out) }
-    let model = Monitor(); model.snapshot = sample(); model.loading = false
-    let actions = DashboardActions()
-    if !ignore.isEmpty {
-        actions.previews[tab] = try DashboardActions.call("pending-ignore", ids: ignore)
-    } else if !clean.isEmpty {
-        // The same confirmation path as the button: a fresh preview token, then only the ticked ids.
-        let preview = try DashboardActions.call("pending-preview")
-        actions.previews[tab] = try DashboardActions.call("pending-clean", token: preview.token, ids: clean)
-    } else if tab != "overview" {
-        actions.previews[tab] = try DashboardActions.call(tab + "-preview")
-    }
-    let view = NSHostingView(rootView: Dashboard(model: model, actions: actions, initialTab: tab, initialSelected: selecting)
-        .frame(width: 620, height: height))
-    view.frame = NSRect(x: 0, y: 0, width: 620, height: height)
-    // The rows behind the picture, so the journal records what was really shown.
-    if let reply = actions.previews[tab] { print("状态 \(reply.status) · \(reply.message)") }
-    for row in actions.previews[tab]?.rows ?? [] { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
-    let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-    window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = view
     view.layoutSubtreeIfNeeded()
     RunLoop.current.run(until: Date().addingTimeInterval(0.8))
@@ -498,12 +409,7 @@ if CommandLine.arguments.contains("--run-tick") {
     require(fallback?.label == "⌃⌥⌘R"); require(attempts == 2)
     require(ShortcutChoice.firstAvailable { _ in false } == nil)
     require(ShortcutChoice.choices.allSatisfy { $0.label != "⌘S" })
-    let valid = BackendReply(status: "ok", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
-    require(valid.canClean)
-    let stale = BackendReply(status: "ok", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970 - 301, eligible: 1, eligibleBytes: 0)
-    require(!stale.canClean)
-    let failed = BackendReply(status: "busy", message: "", rows: [], token: "test", created: Date().timeIntervalSince1970, eligible: 1, eligibleBytes: 0)
-    require(!failed.canClean)
+    require(Motion.selfTest())
     require(pendingCount(["items": [["state": "pending"], ["state": "ignored"], ["state": "pending", "unreachable": true], ["state": "failed"]]]) == 1)
     require(pendingCount([:]) == 0)
     var space = Snapshot(); space.free = 80; space.warning = 69; space.critical = 46; require(space.freeLevel == 0)
@@ -519,7 +425,7 @@ if CommandLine.arguments.contains("--run-tick") {
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays, motion")
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-tab"), index + 2 < CommandLine.arguments.count {
     // Only against a marked fixture home, so evidence never reads or changes real data.
     guard let home = try? testHomeArgument(CommandLine.arguments), FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
@@ -527,14 +433,7 @@ if CommandLine.arguments.contains("--run-tick") {
     }
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.prohibited)
-    // Ids come through the environment: on the command line they would make this very process
-    // look like a tool using those simulators and folders, and the recheck would rightly skip them.
-    func list(_ name: String) -> [String] {
-        (ProcessInfo.processInfo.environment[name] ?? "").split(separator: ",").map(String.init)
-    }
-    let height = CommandLine.arguments.firstIndex(of: "--height").flatMap { Double(CommandLine.arguments[$0 + 1]) } ?? 700
-    do { try renderTab(CommandLine.arguments[index + 1], selecting: Set(list("RENDER_SELECT")), height: CGFloat(height),
-                       ignore: list("RENDER_IGNORE"), clean: list("RENDER_CLEAN"), to: CommandLine.arguments[index + 2]) }
+    do { try renderCover(CommandLine.arguments[index + 1], to: CommandLine.arguments[index + 2]) }
     catch { fputs("render failed: \(error)\n", stderr); exit(1) }
 } else {
     let app = NSApplication.shared

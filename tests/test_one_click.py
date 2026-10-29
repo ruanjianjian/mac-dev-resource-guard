@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_tiers import DAY, ROOT, TierFixture, age, git
 sys.path.insert(0, str(ROOT / 'scripts'))
 import ask_tier
+import auto_tier
 import checkup
+import service
 import discover
 import spaces
 import tiers_config
@@ -276,6 +278,62 @@ class CheckupTest(CacheFixture):
         self.assertFalse(cfg['caches_enabled'] or cfg['xcode_compile_cache'])
         self.assertFalse((self.home / '.npm').is_symlink())
         self.assertNotIn('XCODE_XCCONFIG_FILE', self.launchctl.env)
+
+
+class ConsentTest(CheckupTest):
+    """装完就开好，只问一次（RAW-36）."""
+    def answer(self, text):
+        tty = self.base / 'tty'; tty.write_text(text)
+        return service.ask_consent(self.home, 'T9', env={}, tty=str(tty), interactive=True)
+
+    def setUp(self):
+        super().setUp()
+        self.base = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__('shutil').rmtree(self.base, ignore_errors=True))
+
+    def test_enter_means_yes_and_the_question_is_asked_once(self):
+        self.assertEqual(self.answer('\n'), 'yes')
+        self.assertIn('外接盘「T9」', (self.base / 'tty').read_text())
+        self.assertEqual(self.answer('n\n'), 'decided', 'upgrades never ask again')
+
+    def test_no_and_agent_answers(self):
+        self.assertEqual(self.answer('n\n'), 'no')
+        other = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__('shutil').rmtree(other, ignore_errors=True))
+        with unittest.mock.patch.dict(os.environ, HOME=str(other)):
+            self.assertEqual(service.ask_consent(other, env={'RESOURCE_GUARD_ENABLE': 'yes'}), 'yes')
+
+    def test_an_agent_without_an_answer_is_never_blocked(self):
+        self.assertEqual(service.ask_consent(self.home, env={}, tty='/nonexistent/tty', interactive=True), 'unasked')
+        self.assertEqual(service.ask_consent(self.home, env={}, interactive=False), 'unasked')
+        self.assertFalse((service.state_root(self.home) / service.CONSENT).exists(), 'can still be asked next time')
+
+    def test_already_on_counts_as_agreed(self):
+        tiers_config.update(self.home, dict(caches_enabled=True, auto_enabled=True, ask_enabled=True))
+        self.assertEqual(service.ask_consent(self.home, env={}, interactive=False), 'decided')
+
+    def test_agreeing_turns_all_three_on_right_away(self):
+        self.task('20261001-old', idle_days=5)
+        (self.home / 'Volumes/T9').mkdir(parents=True, exist_ok=True)
+        tiers_config.update(self.home, dict(task_roots=[dict(path=str(self.root))]))
+        notes = service.enable_recommended(self.home, launchctl=self.launchctl, probe=lambda p: None, kick=False,
+                                           simulators_bytes=0, volumes=self.home / 'Volumes', info=drive_info({'T9': USB}),
+                                           is_mount=lambda m: True)
+        self.assertEqual(notes, ['已打开：共享构建缓存、自动清理、外接盘「T9」'])
+        cfg = tiers_config.load(self.home)
+        self.assertTrue(cfg['caches_enabled'] and cfg['auto_enabled'] and cfg['ask_enabled'] and cfg['xcode_compile_cache'])
+        self.assertEqual(cfg['external_root'], self.home / 'Volumes/T9/dev-resource-guard')
+        self.assertEqual(checkup.first_run_message(checkup.load_report(self.home), 0, checkup.suggestion_state(self.home, cfg, checkup.load_report(self.home))),
+                         '共享构建缓存、自动清理、外接盘都已开好。空间去哪了，点菜单栏图标看。')
+
+
+class LastAutoTest(TierFixture):
+    def test_one_line_about_the_last_time_space_was_freed(self):
+        sys.path.insert(0, str(ROOT / 'widget')); import backend
+        self.assertEqual(backend.last_auto(self.home), '')
+        now = time.time()
+        auto_tier.append_log(self.home, dict(at=now - 600, actions=[dict(result='done', bytes=3 << 30), dict(result='failed', bytes=0)]))
+        auto_tier.append_log(self.home, dict(at=now - 60, actions=[]))
+        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 3 GB'.format(backend.when(now - 600, now)))
+        self.assertTrue(backend.when(now - 600, now).startswith(('今天', '昨天')))
 
 
 class WiderCleanupTest(TierFixture):

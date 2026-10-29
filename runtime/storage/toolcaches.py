@@ -152,6 +152,15 @@ def take_over(home, external_root, activity, free_bytes=None):
     if denied:
         return [dict(kind='cache-move', path=str(external_root), bytes=0, result='skipped', reason=denied)]
     busy = busy_tools(activity)
+    free_before = round(auto_tier.shutil.disk_usage(str(home)).free / auto_tier.GIB, 2)
+    try:
+        _move_all(home, external_root, state, busy, actions, free_bytes, free_before)
+    finally:
+        auto_tier.working(home)
+    return actions
+
+
+def _move_all(home, external_root, state, busy, actions, free_bytes, free_before):
     for row in inspect(home, external_root, sizes=False):
         if row['status'] != 'local':
             continue
@@ -168,6 +177,7 @@ def take_over(home, external_root, activity, free_bytes=None):
         try:
             if dest.exists() and not dest.is_symlink() and not any(dest.iterdir()):
                 dest.rmdir()   # an empty copy left by an earlier restore
+            auto_tier.working(home, 'move', row['name'] + ' 缓存', bytes_, free_before)
             auto_tier.move_dir(home, path, dest)
             state['entries'][row['key']] = dict(state='moved', path=str(path), dest=str(dest), at=time.time())
             save_state(home, state)
@@ -176,7 +186,6 @@ def take_over(home, external_root, activity, free_bytes=None):
             actions.append(dict(kind='cache-move', path=str(path), bytes=0, result='aborted', reason=str(error)))
         except (OSError, subprocess.SubprocessError) as error:
             actions.append(dict(kind='cache-move', path=str(path), bytes=0, result='failed', reason=str(error)))
-    return actions
 
 
 def restore(home):

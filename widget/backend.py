@@ -158,6 +158,34 @@ def short(home, path):
     return '~' + path[len(str(home)):] if path.startswith(str(home) + '/') else path
 
 
+def when(at, now=None):
+    """今天 14:00 / 昨天 09:30 / 10-27 18:00"""
+    day = time.localtime(at); today = time.localtime(now if now is not None else time.time())
+    if day.tm_yday == today.tm_yday and day.tm_year == today.tm_year:
+        return time.strftime('今天 %H:%M', day)
+    if time.localtime((now if now is not None else time.time()) - 86400).tm_yday == day.tm_yday:
+        return time.strftime('昨天 %H:%M', day)
+    return time.strftime('%m-%d %H:%M', day)
+
+
+def last_auto(home, now=None):
+    """The one line under the switches: the last time the background freed space (or last looked)."""
+    log = Path(home) / '.local/state/dev-resource-guard/auto-tier-log.jsonl'
+    entries = []
+    for line in (log.read_text().splitlines()[-200:] if log.is_file() else []):
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    for entry in reversed(entries):
+        freed = sum(a.get('bytes') or 0 for a in entry.get('actions', []) if a.get('result') == 'done')
+        if freed > 0:
+            return '最近一次：{} 自动腾出 {}'.format(when(entry['at'], now), gb(freed))
+    if entries:
+        return '最近一次：{} 看过，暂时不用动'.format(when(entries[-1]['at'], now))
+    return ''
+
+
 def rows_checkup(home, cfg, report, freed, gone):
     """The checkup page in rows; the panel lays them out by category."""
     checkup, _ = checkup_modules()
@@ -174,15 +202,19 @@ def rows_checkup(home, cfg, report, freed, gone):
                  report.get('recommended'))
     tools = len({c['tool'] for c in report['caches']})
     short_lines = dict(
-        caches='{} 个工具 · Xcode 编译缓存'.format(tools),
-        clean='仅过期编译中间缓存 · 保留任务和模拟器',
-        external=('未连接' if gone else '剩 ' + gb(drive['free'])) if cfg['external_root'] and drive
-        else ('未连接' if cfg['external_root'] else ('用「{}」，剩 {}'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘')))
+        caches='{} 个工具共用一份 · Xcode 编译缓存'.format(tools),
+        clean='只清 7 天没用的编译中间缓存',
+        external=('未连接，插上就恢复' if gone else '缓存和构建产物放这里') if cfg['external_root']
+        else ('「{}」剩 {}，可以放缓存和构建产物'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘'))
     for key in checkup.SUGGESTIONS:
         state = states[key]
         rows.append(dict(id=key, kind='suggestion', title=SUGGESTION_TITLES[key], category='建议', reason=state['detail'], detail=short_lines[key],
                          bytes=effect[key] or None, eligible=state['available'], command=None,
                          outcome='已开启' if state['on'] else ('未开启' if state['available'] else '不可用')))
+    last = last_auto(home)
+    if last:
+        rows.append(dict(id='last-auto', title=last, category='最近', reason='', detail='', bytes=None, eligible=False,
+                         command=None, outcome=None))
     for root in report['roots']:
         external = next((str(r['external']) for r in cfg['task_roots'] if str(r['path']) == root['path'] and r['external']), None)
         rows.append(dict(id='root:' + root['path'], title=short(home, root['path']), category='任务目录', bytes=None, eligible=False,
@@ -561,10 +593,11 @@ class Adapter:
         if verb == 'firstrun':
             report['notified_version'] = version
             atomic_json(checkup.report_path(self.home), report)
-            return dict(status='ok', message=checkup.first_run_message(report, freed), rows=[], eligibleBytes=freed)
+            return dict(status='ok', message=checkup.first_run_message(report, freed, checkup.suggestion_state(self.home, cfg, report)),
+                        rows=[], eligibleBytes=freed)
         message = ''
         if freed >= 1073741824 and not all(checkup.suggestion_state(self.home, cfg, report)[k]['on'] for k in checkup.SUGGESTIONS):
-            message += '按推荐全部开启后，预计可腾出约 {}。'.format(gb(freed))
+            message += '把开关都打开，预计可腾出约 {}。'.format(gb(freed))
         if notes:
             message += '；'.join(notes)
         rows = rows_checkup(self.home, cfg, report, freed, checkup.disconnected(self.home, cfg, is_mount))

@@ -9,20 +9,22 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 
 ## 1. 用户发来仓库链接、要安装时
 
-1. 安装（会下载源码、在本机编译、装好 App、后台任务和这份 skill）：
+1. **装之前先问用户一次**（你的命令行没有终端，安装脚本问不到用户）。原话照这个说：
+   > 装好后我会默认打开这两项，可以吗？
+   > · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）；任务目录里的 Xcode 构建产物也放到外接盘
+   > · 外接盘：插着外接盘时，缓存和构建产物放过去
+   > （安全自动清理默认就开着：只清 7 天没用过的编译中间缓存，任务目录和模拟器不动。）
+
+   用户同意就带上 `RESOURCE_GUARD_ENABLE=yes`，不同意就写 `=no`，然后安装。安装会下载源码、在本机编译、装好 App、后台任务和这份 skill；同意时装完就已开好：
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | RESOURCE_GUARD_ENABLE=yes bash
    ```
-   缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。
+   缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。忘了带这个变量也没关系：安装会提示还没问，用户同意后运行 `rgs enable` 即可。升级时不会再问，原来的开关保持不变。
 2. 记下你是谁，以后看板要交接时会打开你：`rgs agent-app claude`（Claude Code）或 `rgs agent-app codex`（Codex）。
 3. **主动问用户空间目标**：「内置盘至少想留多少？」给一个建议值（磁盘约 10%，取整到 10 GB）。用户答了就 `rgs target 50`；不带数字的 `rgs target` 会显示当前目标和建议值。
-4. 问用户要不要打开三项（共享构建缓存、自动清理、使用外接盘）。同意后：
-   ```bash
-   python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-apply --ids caches,clean,external
-   ```
-   打开共享构建缓存会全局打开 Xcode 编译缓存（改 `~/.zshenv` 一段带标记的设置），先讲清楚再做。macOS 问「资源看板」能否访问外接盘时，请用户点允许。
-5. 不用外接盘且要求全程后台时，先 `checkup-firstrun`，再 `checkup-off --ids external`，最后 `checkup-apply --ids caches,clean`。不打开面板、不重启现有终端或 IDE。
-6. 1.6.1 的新安装和升级都限制为 `auto_scope=managed-caches`；旧 `standard` 设置不会恢复自动删除任务或模拟器。关闭自动清理的选择会保留，启用前确认已有授权。不要手动改回旧版规则。
+4. macOS 问「资源看板」能否访问外接盘时，请用户点允许。以后要单独开关某一项，让用户在面板「帮你管着」里点。
+5. 用户不用外接盘、又要求全程后台时：同意后照样带 `RESOURCE_GUARD_ENABLE=yes` 安装，再 `python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-off --ids external`。不打开面板、不重启现有终端或 IDE。
+6. 自动清理固定为 `auto_scope=managed-caches`（1.6.1 起）：只清至少 7 天没用的编译中间缓存；旧 `standard` 设置不会恢复自动删任务或模拟器。关闭自动清理的选择会保留，不要手动改回旧版规则。
 7. 按第 2 节出计划、处理。
 
 ## 2. 出计划、处理
