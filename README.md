@@ -1,6 +1,6 @@
-# Mac Dev Resource Guard · 资源看板 1.6
+# Mac Dev Resource Guard · 资源看板 1.6.1
 
-**一条命令装好，点一下就开启：帮你共享常用开发工具的构建缓存，盯住并清理占空间的东西，有外接盘就把它用起来。** 面板平时藏在菜单栏，图标旁直接显示内置盘还剩多少；点击图标或按 `⌃⌥⌘S` 打开。
+**一条命令安装，后台维护过期编译中间缓存；按需开启共享构建缓存，任务目录和模拟器先确认再处理。** 面板平时藏在菜单栏，图标旁直接显示内置盘还剩多少；点击图标或按 `⌃⌥⌘S` 打开。
 
 适合同时跑 Xcode、模拟器、多个任务目录和多个 Agent 的 Mac 开发同学。内置 dev-storage 与 dev-memory，无需另外安装；已有同名私有工具和保护记录保留。
 
@@ -23,10 +23,40 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 它会下载源码、在本机编译并装好 App 和后台任务，不用先克隆仓库；缺命令行工具时会弹出系统安装窗口，装好后再跑一次。看到以下输出才算装好：
 
 ```text
-安装完成：安全自动维护已启用，面板不会自己弹出。稍后会收到「体检完成」通知，点开即可一键开启共享构建缓存、自动清理和外接盘。
+安装完成：安全自动维护已启用，面板不会自己弹出。共享构建缓存和外接盘保持原有选择。
 ```
 
+升级前已暂停的维护仍保持关闭，安装输出会如实显示；旧维护正在运行时安装会要求稍后重试，不终止它。
+
 以后升级也是同一行命令。也可以克隆仓库后运行 `python3 scripts/install.py`，效果相同。
+
+**1.6.1 安全更新适用于所有用户。** 新安装默认使用安全自动维护；升级会把旧 `standard` 范围迁移到 `managed-caches`，保留空间目标、共享缓存开关、关闭自动清理的选择、已有命令与保护记录。旧的任务自动迁移/裁剪、不可用模拟器自动删除和整份 Go/npm/pnpm 缓存清理已停用。旧版未完成的搬迁记录保留现场，需核对后处理。
+
+### 全程后台开启共享缓存与安全清理（不使用外接盘）
+
+安装完成后执行；不会打开面板，也不会重启正在运行的构建：
+
+```bash
+B="$HOME/Applications/资源看板.app/Contents/Resources/backend.py"
+python3 "$B" checkup-firstrun
+python3 "$B" checkup-off --ids external
+python3 "$B" checkup-apply --ids caches,clean
+```
+
+共享缓存会在 `~/.zshenv` 写入带标记、可撤销的 `XCODE_XCCONFIG_FILE`，并为之后新开的图形 App 设置同名环境变量。有自定义全局 Xcode 设置时保留并报告冲突。现有终端/IDE 进程不会被重启，之后新开的终端和 Xcode 才会继承设置。依赖缓存沿用各工具的全局位置；没有外接盘时不迁移缓存，不把不同任务的 Pods、node_modules、Flutter build 或 SwiftPM checkout 合并共写。
+
+验证开关与计划：
+
+```bash
+cat "$HOME/.config/dev-resource-guard/auto-cleanup.json"
+launchctl getenv XCODE_XCCONFIG_FILE
+"$HOME/.local/bin/resource-guard-service" target
+"$HOME/.local/bin/resource-guard-service" plan --json
+```
+
+开关应为 `caches_enabled=true`、`xcode_compile_cache=true`、`auto_enabled=true`、`auto_scope=managed-caches`，且 `external_root=null`。开关开启不等于已经命中编译缓存或清出空间，请看构建日志里的 `CompilationCacheMetrics` 和实际维护记录；Xcode 缓存支持依赖工具链，已实测 Xcode 27.0。
+
+关闭安全自动清理可在面板设置中操作，或执行 `python3 "$B" checkup-off --ids clean`；关闭共享缓存用 `checkup-off --ids caches`。关闭外接盘不会删除或迁回过去已经迁移的内容。
 
 ## 装好之后：一张封面，点一下
 
@@ -45,8 +75,8 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 | 建议 | 打开后会做什么 |
 |---|---|
 | 共享构建缓存 | 找出你用过的开发工具（Xcode、CocoaPods、Flutter、npm、yarn、Go、Gradle、Cargo、Homebrew、pip），缓存统一管理；插着外接盘时搬到外接盘，原位置留链接，工具照常用。同时全局打开 Xcode 编译缓存：同一个任务里切分支、清空重编时直接用上次的编译结果。关掉即还原：链接去掉，各工具从空开始重建缓存。 |
-| 自动清理 | 沿用 1.4 的三档：闲置满 3 天的任务目录挪到外接盘（没外接盘就删能重新生成的构建产物）；会丢东西的（旧模拟器、已推送的久未用任务、久没动的大安装包、旧设备支持文件和归档、废纸篓）先发通知，你在「待确认」勾选才做。 |
-| 使用外接盘 | 自动挑一块空间最大、可写、不是时间机器备份盘的 APFS 外接盘，在上面建 `dev-resource-guard/` 放缓存和闲置任务。开启时 macOS 会问一次能否访问可移除宗卷，请点允许。 |
+| 自动清理 | 每 12 小时检查固定构建槽与默认 DerivedData，只清至少 7 天未用的四类编译中间缓存。任务目录、模拟器、Products、报告及整份工具缓存保留；其他删除只进入待确认列表。 |
+| 使用外接盘 | 自动挑一块空间最大、可写、不是时间机器备份盘的 APFS 外接盘，在上面建 `dev-resource-guard/` 放工具缓存，任务目录不会自动搬迁。开启时 macOS 会问一次能否访问可移除宗卷，请点允许。 |
 
 任务目录不用手写：工具从 git 的工作区记录（含 Claude、Codex 建的）里找出「放任务的文件夹」，开启时一并写进设置。以前手写的设置保留。
 
@@ -60,7 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 
 | 能力 | 实际范围 |
 |---|---|
-| 磁盘维护 | 安装后一次，此后每 12 小时检查固定构建槽与默认 Xcode DerivedData；仅清理符合保留期和安全检查的四类中间缓存，默认 DerivedData 至少七天。DerivedData 换成指向外接盘的链接时按真实目录清理。 |
+| 磁盘维护 | 安装后一次，此后每 12 小时检查固定构建槽与默认 Xcode DerivedData；仅清理符合保留期和安全检查的四类中间缓存，两类缓存都至少七天。DerivedData 换成指向外接盘的链接时按真实目录清理。 |
 | 内存维护 | 每分钟检查，有归属与闲置证明才收尾支持的托管后台；不是定时强制释放内存。 |
 | 占用保护 | 删除前复核进程、打开文件、槽锁、pin、lease、最近使用和路径身份；在用、受保护、状态不明的内容保留。 |
 | 原有安装 | 保留已有命令、合法缓存根和保护状态，复用可验证的旧守护；未知自定义调度会报告未完成，不启动第二套。 |
@@ -69,31 +99,33 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 
 Go 编译缓存、模拟器、Claude 会话和任务目录可查看占用，但不自动删除。没有安全候选时可清理量就是 0；目录计量不等于 APFS 全盘净释放空间，不承诺固定回收容量。磁盘空间目标只提醒，不阻止构建。
 
-## 分档自动清理（1.4）
+## 安全自动清理（1.6.1）
 
-在「帮你管着」里打开「自动清理」「外接盘」时，下面的设置会自动写好；想微调天数或路径，仍可直接改设置文件。
+`~/.config/dev-resource-guard/auto-cleanup.json` 与原有 `config.json` 分开；旧命令照常读原配置。安全范围由代码限制，不依赖某台机器手动配置。
 
-安全的自动做，会丢东西的先问你，判断不了的不碰。设置在 `~/.config/dev-resource-guard/auto-cleanup.json`（与 `config.json` 分开，旧命令照常读原配置），看板「接入设置」可开关两档。
-
-| 档 | 做什么 | 默认 |
-|---|---|---|
-| 自动档 | 空间低于提醒线时，把闲置满 N 天（默认 3）的任务目录整个挪到外接盘、原路径留链接；外接盘不在就删闲置任务里被 git 忽略的构建产物；再删系统标为不可用的模拟器，用 go/npm/pnpm 自带命令清缓存。回到目标线就停，每次都记在「自动记录」。 | 关闭，打开一次即授权 |
-| 询问档 | 关机满 7 天的模拟器删除、开着 4 小时没开发工具连着的模拟器关机、闲置满 7 天且全部提交推送的任务目录删除、没有模拟器在用的运行时删除。先发系统通知、菜单栏亮红点，你在「待确认」勾选后才执行，执行前逐项再核对。 | 打开 |
-| 永不档 | 有未提交或未推送改动、正在用、被 pin 保护、含代码仓库以外文件（如报告）的任务目录；有开发工具连着的模拟器。 | — |
+| 范围 | 行为 |
+|---|---|
+| 自动维护 | 每 12 小时只回收至少 7 天未用的四类编译中间目录，执行前复核进程、打开文件、锁、pin、lease、最近读写及路径身份。信息不完整时保留。 |
+| 待确认 | 旧模拟器、已推送的闲置任务、安装包、设备支持文件、归档等只列计划；明确选中确认后再次核对。 |
+| 保留 | 正在使用、被保护、状态未知的内容；源码、Products、测试证据和登录态。不因空间紧张扩大删除范围。 |
 
 ```json
 {
   "schema": 1,
   "auto_enabled": true,
-  "task_roots": [{"path": "/Users/me/work/worktrees", "external": "/Volumes/T9/work/worktrees"}],
-  "auto_idle_days": 3,
-  "ask": {"simulator_unused_days": 7, "simulator_unattached_hours": 4, "task_idle_days": 7}
+  "auto_scope": "managed-caches",
+  "ask_enabled": true,
+  "caches_enabled": true,
+  "xcode_compile_cache": true,
+  "external_root": null
 }
 ```
 
-外接盘需要授权：macOS 不允许后台命令行任务读写外接盘，所以磁盘定时任务通过「资源看板」App 运行。第一次碰到外接盘时，系统会询问是否允许「资源看板」访问可移除宗卷，请点允许；没有授权时，自动档改为删构建产物，看板「自动记录」显示「需要授权」。每次重新安装（App 签名变化）后可能需要再允许一次。
+定时任务每 5 分钟唤醒，缓存清理每 12 小时一轮，待确认扫描默认每 30 分钟。关闭自动档后停止周期缓存删除；重新开启后会恢复检查。配置错误会跳过并报告，不自动换回宽泛规则。
 
-定时任务每 5 分钟唤醒：过期 Xcode 中间缓存仍 12 小时清一轮，分档清理按 `check_interval_minutes`（默认 30）检查。设置写错时本轮不清理，看板显示哪一项错了。完整契约见 [设计](docs/epics/auto-cleanup/design.md)。
+外接盘仅在单独选择后用于工具缓存。未连接或没有权限时保留原内容，**不会退回删除任务构建产物**。已有的任务外接链接保留原样。
+
+当前契约与升级边界见 [安全自动维护规格](docs/epics/auto-cleanup/specs/safe-cache-maintenance.md)。
 
 ## 接入 Xcode 构建缓存（进阶）
 
@@ -144,13 +176,13 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 
 ## 可直接转发的介绍
 
-> **资源看板 1.6：给 Mac 开发同学的磁盘空间管家（开源）**
+> **资源看板 1.6.1：给 Mac 开发同学的磁盘空间管家（开源）**
 >
 > 开发机的空间总被吃光，多半不是代码本身，而是每个任务各编一份的构建产物、散在各处的工具缓存，还有不用的模拟器。资源看板帮你把它们管住：
 >
 > - **设一个目标**：比如「内置盘至少留 50 GB」。它按你这台机器的实际情况出计划：哪些自己会做，哪些要你点头，哪些需要判断，各能腾出多少。
 > - **共享构建缓存**：常用开发工具的缓存统一放一处，Xcode 编译缓存也帮你打开，不用改项目脚本。
-> - **用好外接盘**：缓存和闲置任务挪过去，原来的路径照常能用；拔盘时马上提醒你。
+> - **外接盘按需开启**：可迁移闲置工具缓存，原路径照常用；任务目录不自动搬迁，拔盘时提醒。
 > - **只动该动的**：会丢东西的一律先问你；正在用的、有未提交改动的、一周内用过的构建产物都不碰。
 > - **系统清理交给 Mole**：系统和 App 的通用清理交给 7 万星的开源工具 Mole，动手前先把你的共享缓存护住。
 > - **菜单栏一张封面**：还剩多少、在帮你管什么、有什么要你拍板，一眼看完。
@@ -175,3 +207,12 @@ curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard
 - [缓存复用](references/cache.md)
 
 隔离测试：`python3 scripts/verify.py`。真实独立 launchd 验证：`python3 scripts/verify_automatic.py --home <全新测试目录>`；它只清理自建测试缓存并保留 pin/Products，结束后卸载测试标签。
+
+## 1.6.1 真实 Mac 验证（2026-10-29）
+
+- 开启共享缓存后，同一测试项目首次清空构建 **0/31** 命中，再次清空重编 **31/31（100%）** 命中；两次构建成功，生成的程序运行成功。这是同一工作树的实测，不代表不同工作树能全部复用编译结果。
+- 在真实开发机执行安全维护，删除 **2 处旧 Intermediates.noindex，目录计量 180 KiB**。随后扫描 **105 项全部保留**：近期使用、pin、打开文件占用或包含受保护产物；剩余安全候选为 0。没有把测试夹具的容量当成真实清理收益。
+- 维护期间全盘可用空间净变化约 **-872 KiB**，受其他写入影响，因此不把目录计量当作 APFS 净释放空间。
+- 全程后台验证，面板窗口数为 **0**；原有目标、私有命令与 pin 记录哈希保持一致。未进行前台点击或快捷键复验，也没有终止开发任务。
+
+[完整验证记录与复现方法](docs/validation/1.6.1-safe-maintenance.md)。每台 Mac 的安全候选不同，没有候选时清理量就是 0。

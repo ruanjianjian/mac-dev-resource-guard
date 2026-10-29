@@ -1,0 +1,44 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>资源看板 1.6.1 验证报告</title><style>body{max-width:1000px;margin:40px auto;padding:0 24px;font:16px/1.75 system-ui;color:#192331;background:#f7f9fc}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;border:1px solid #dce2eb;border-radius:12px;padding:28px;font:inherit}</style><body><pre># 1.6.1 安全自动维护：验证与安装记录
+
+日期：2026-10-29。平台：Apple Silicon Mac，Xcode 27.0（27A266a）。人类尚未逐项验收；以下为 agent 实测与自动回归结果。所有安装和 CLI 检查均在后台完成，未打开面板。
+
+## 结果
+
+| 验证 | 实际结果 |
+|---|---|
+| 新装和升级默认安全 | 缺少 auto_scope、旧 standard、先行 managed-caches 都归一为安全范围；只维护至少 7 天未用的四类中间缓存 |
+| 清理保护 | 关闭自动清理、扫描中关闭、未知状态、pin/lease/锁、旧迁移标记均保留；坏配置写错误回执，不能继续显示旧成功 |
+| 安装边界 | 旧维护在途时不替换 App、不杀维护；配置错误在替换前拒绝；升级保留磁盘和内存暂停选择 |
+| 回归 | `python3 scripts/verify.py`：349 项，334 通过、15 项外部集成条件跳过；新增安全回归 14 项通过，包含安装入口真实文件锁 |
+| 红证据 | 同一新增安全用例在基线 d14eed2 运行失败：缺少安全范围、默认仍会删除不可用模拟器、未统一 7 天约束 |
+| 正式安装包 | 1.6.1 / build 10，启动自检通过，签名校验通过，实际安装运行时代码与提交候选源码哈希一致 |
+| 后台生效 | 调度已加载；auto_enabled、caches_enabled、xcode_compile_cache 为 true，auto_scope=managed-caches，external_root=null；新 shell 与 launchctl 均读取受管 Xcode 设置 |
+| 隐藏面板 | 真实运行进程窗口数为 0；未进行前台点击和快捷键复验 |
+| Xcode 缓存 | 同一工作树稳定槽的 31 个 C 编译单元：首次 clean build 0/31 命中，再次 clean build 31/31 命中；正式 1.6.1 安装后再做 clean build，仍 31/31 命中、构建成功；生成程序退出码 0 |
+| 真实清理 | 同策略先行补丁在真实 HOME 执行：删除两处旧 Intermediates.noindex，目录计量 184320 字节（180 KiB），无错误 |
+| 真实保留 | 随后扫描固定槽 80 项、默认 Xcode 25 项，105 项全部因近期使用、保护或占用等原因保留，剩余安全候选 0 |
+| 全盘空间 | 真实清理期间可用空间净变化 -892928 字节（约 -872 KiB）；其他任务仍有写入，因此不将目录计量宣称为 APFS 净释放量 |
+| 状态保留 | 原空间目标、私有 dev-storage/dev-memory 与 pins 内容哈希不变；未停止开发任务，没有新增设备或账号占用 |
+
+真实容量与首次命中结果来自先行安全补丁，随后在正式 1.6.1 复验安装、运行时代码、后台入口及缓存重编。未为了证明“好用”制造大缓存再删除，也未重复清理同一对象。
+
+## 可复现步骤
+
+1. 按 [README 安装与升级](../../README.md#自己装) 安装。新用户先确认共享缓存会为新进程设置 Xcode 全局编译配置；现有终端/IDE不会被重启。
+2. 按 README 的后台命令体检、关闭外接盘、开启 caches,clean；读回设置、`launchctl getenv XCODE_XCCONFIG_FILE` 和 `resource-guard-service plan --json`。计划是估计，操作前仍需复核。
+3. 在单独的本机测试工作树创建 31 个 C 编译单元的 macOS 命令行 target。通过既有 `dev-storage xcode --worktree &lt;测试仓库&gt; --platform macos --configuration Debug -- xcodebuild ... clean build` 连续构建两次，同一工作树和配置使用同一稳定槽，不额外传 derivedDataPath。
+4. 检查日志 `CompilationCacheMetrics`，分开记录首次与第二次命中数；运行生成程序。本结果不保证不同工作树、不同源码或不同工具链的命中率。
+5. 查看 `~/.local/state/dev-resource-guard/automatic-storage.json` 和安全计划；只将 `deleted[].directory_accounting_bytes` 作为目录计量，另报 observed_free_delta_bytes。没有安全候选时允许结果为 0。
+6. 验证安装包 `--self-test`、`codesign --verify --deep --strict`；只读检查运行进程窗口数。不将这些检查冒称为前台界面验收。
+
+## 证据与限制
+
+- [真实 Mac 脱敏回执](1.6.1-real-mac-summary.json)
+- [正式安装与受测源码哈希](1.6.1-release-verification.json)
+- [安全规格与用例](../epics/auto-cleanup/specs/safe-cache-maintenance.md)
+- [可下载的独立 HTML 报告](1.6.1-safe-maintenance.html)（下载后用浏览器打开）
+
+没有迁移外接盘，没有在真实设备上执行模拟器删除/关机，没有验证可选 Gradle/broker 等外部集成。依据用户“全程后台做”的要求，原生新文案的前台点击验收保留未测（CH-01）；Swift 构建、自检、后端行与计划回归通过。
+
+本报告不含个人目录、项目名、进程参数或保护记录内容。完整本机日志没有上传；公开回执保留计量、结果、测试条件及代码哈希。
+</pre></body></html>

@@ -97,7 +97,7 @@ def _scan(home, cfg, simulators_bytes, now, volumes, info, is_mount, foreground)
     internal_tasks = [t for t in task_list if not t['linked']]
     categories = [
         dict(id='tasks', title='任务目录', bytes=_sum(t['bytes'] for t in internal_tasks), where='内置盘',
-             handling='闲置 {} 天自动挪到外接盘；久未用且已推送的先问你'.format(cfg['auto_idle_days']),
+             handling='只扫描；收尾和删除先问你',
              note='{} 个在内置盘，{} 个已在外接盘'.format(len(internal_tasks), len(task_list) - len(internal_tasks))),
         dict(id='simulators', title='模拟器', bytes=simulators_bytes, where='内置盘', handling='先问你',
              note='模拟器不能放外接盘'),
@@ -134,7 +134,6 @@ def estimate(report, cfg, pending_bytes=0):
     freed = pending_bytes
     if drive:
         freed += sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local')
-        freed += sum(t['bytes'] or 0 for t in report['tasks'] if t['idle'] and not t['linked'])
     return freed
 
 
@@ -157,8 +156,8 @@ def suggestion_state(home, cfg, report):
                     detail='{} 个工具的缓存统一管理{}；打开 Xcode 编译缓存'.format(
                         len({c['tool'] for c in report['caches']}),
                         '，{} 个搬到外接盘'.format(len({c['tool'] for c in local})) if (external or drive) and local else '')),
-        clean=dict(on=cfg['auto_enabled'] and cfg['ask_enabled'], available=bool(report['roots']) or bool(cfg['task_roots']),
-                   detail='闲置 {} 天的任务目录挪到外接盘或删构建产物；会丢东西的先问你'.format(cfg['auto_idle_days'])),
+        clean=dict(on=cfg['auto_enabled'] and cfg['ask_enabled'], available=True,
+                   detail='每 12 小时清理至少 7 天未用的编译中间缓存；任务目录和模拟器保留'),
         external=dict(on=external is not None, available=external is not None or drive is not None,
                       detail=('使用{}'.format(drive_label(external)) + ('' if mounted else '（未连接）')) if external
                       else ('使用「{}」，剩 {:.0f} GB'.format(drive['name'], drive['free'] / GIB) if drive else '没有插外接盘')),
@@ -227,7 +226,7 @@ def apply(home, ids, owned=(), probe=auto_tier.external_access, launchctl=toolca
                     used.add(name)
                     root['external'] = str(Path(external) / 'tasks' / name)
     if 'clean' in ids:
-        changes.update(auto_enabled=True, ask_enabled=True)
+        changes.update(auto_enabled=True, ask_enabled=True, auto_scope='managed-caches')
     if 'clean' in ids or 'external' in changes:
         changes['task_roots'] = roots
     if 'caches' in ids:
@@ -239,7 +238,10 @@ def apply(home, ids, owned=(), probe=auto_tier.external_access, launchctl=toolca
             notes.append(str(error))
     if not changes:
         return cfg, notes
-    return tiers_config.update(home, changes, owned), notes
+    updated = tiers_config.update(home, changes, owned)
+    if 'clean' in ids:
+        (auto_tier.state_root(home) / 'storage-paused').unlink(missing_ok=True)
+    return updated, notes
 
 
 def turn_off(home, which, owned=(), launchctl=toolcaches.default_launchctl):

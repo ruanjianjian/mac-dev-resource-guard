@@ -77,7 +77,7 @@ class TierActionTests(AskFixture):
                                                 external_missing=[], external_denied=[dict(path='/Volumes/T9/w', reason='后台任务没有访问外接盘的权限')],
                                                 actions=[], kept=[]))
         rows = {r['id'].split(':')[0]: r for r in self.adapter.run('auto-preview')['rows']}
-        self.assertEqual(rows['denied']['outcome'], '需要授权'); self.assertIn('改为删构建产物', rows['denied']['reason'])
+        self.assertEqual(rows['denied']['outcome'], '需要授权'); self.assertIn('当前版本不自动删除', rows['denied']['reason'])
 
     def test_wrong_settings_are_shown_not_hidden(self):
         (self.home / '.config/dev-resource-guard/auto-cleanup.json').write_text('{"auto_idle_days": -1}')

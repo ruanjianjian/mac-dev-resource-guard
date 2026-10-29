@@ -1,3 +1,5 @@
+> 历史 1.4 设计与验收记录。1.6.1 的当前安全范围已由 [安全自动维护](specs/safe-cache-maintenance.md) 替代；下文任务搬迁/裁剪、模拟器自动删除规则不再执行。
+
 # Design: 分档自动清理（契约 v1.1）
 
 服务于 [brief](brief.md) 与三份 spec：[tiered-auto-cleanup](specs/tiered-auto-cleanup.md)、[ask-first-confirm](specs/ask-first-confirm.md)、[build-slot-wrapper](specs/build-slot-wrapper.md)。本文冻结跨模块契约（C1～C6），多人并行实现时以本文为唯一真源；改契约先改本文并升版本号，再通知受影响的实现者。

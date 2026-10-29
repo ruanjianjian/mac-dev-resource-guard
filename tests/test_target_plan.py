@@ -60,13 +60,13 @@ class PlanTest(TierFixture):
         result = space_plan.build(self.home, cfg, self.settings, report, pending, 20 * GIB, True,
                                   sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)
         sections = {s['id']: s for s in result['sections']}
-        self.assertEqual(sections['auto']['bytes'], 14 * GIB)            # idle task move + npm cache move
+        self.assertEqual(sections['auto']['bytes'], 2 * GIB)            # only opted-in npm cache move; task directories remain untouched
         self.assertEqual(sections['ask']['bytes'], GIB)                  # ignored items do not count
         self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # the two copies idle for over a week
         self.assertIn('2 份一周没用的 Xcode 构建副本', sections['judge']['items'][0]['title'])
         self.assertEqual(result['gap_bytes'], 30 * GIB)
-        self.assertEqual(result['reach_bytes'], 51 * GIB)
-        self.assertEqual(result['shortfall_bytes'], 0)
+        self.assertEqual(result['reach_bytes'], 39 * GIB)
+        self.assertEqual(result['shortfall_bytes'], 11 * GIB)
 
     def test_copies_used_within_a_week_are_never_offered(self):
         busy = self.busy_task_with_copies(days=(1, 3, 6))

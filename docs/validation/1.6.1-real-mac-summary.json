@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-29",
+  "scope": "real Mac running the preliminary managed-caches safety patch; final 1.6.1 installation verified separately",
+  "xcode": "27.0 (27A266a)",
+  "compilation": {
+    "first": [
+      "0 hits / 31 cacheable tasks (0%)"
+    ],
+    "clean_rebuild": [
+      "31 hits / 31 cacheable tasks (100%)"
+    ],
+    "program_exit_code": 0
+  },
+  "cleanup": {
+    "deleted_directories": 2,
+    "directory_accounting_bytes": 184320,
+    "observed_volume_free_delta_bytes": -892928,
+    "errors": 0
+  },
+  "post_scan": {
+    "managed": {
+      "candidates": 80,
+      "kept": 80,
+      "eligible_bytes": 0,
+      "activity_errors": []
+    },
+    "existing-xcode": {
+      "candidates": 25,
+      "kept": 25,
+      "eligible_bytes": 0,
+      "activity_errors": []
+    }
+  },
+  "visible_windows": 0,
+  "external_root": null
+}

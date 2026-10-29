@@ -247,7 +247,7 @@ struct Dashboard: View {
                  : setupAction == "setup-install"
                  ? "安装内置 dev-storage / dev-memory 命令。已有不同实现会保留并提示冲突，不覆盖状态或保护记录。安装本身不会开启自动清理。"
                  : setupAction.hasPrefix("setup-auto")
-                 ? (setupAction.hasSuffix("enable") ? "打开自动档：空间低于提醒线时，自动把闲置的任务目录整个挪到外接盘（原路径留链接），外接盘不在就删可重新生成的构建产物，再清不可用的模拟器和工具缓存。有未提交改动的目录只挪不删；正在用、被保护的不动。打开一次即算授权，之后不再逐项询问。" : "关闭自动档：不再自动搬迁或删构建产物，已挪走的目录和链接保持原样。")
+                 ? (setupAction.hasSuffix("enable") ? "打开安全自动维护：每 12 小时只清理至少 7 天未用的四类编译中间缓存。执行前复核进程、打开文件、锁、pin 和 lease；任务目录、模拟器、全局工具缓存、Products 和测试证据保留。" : "关闭安全自动维护：停止周期清理编译中间缓存；已有文件与链接保持原样。")
                  : setupAction.hasPrefix("setup-ask")
                  ? (setupAction.hasSuffix("enable") ? "打开询问档：发现久未使用的模拟器、闲置且已推送的任务目录、没人用的运行时时，发通知请你在「待确认」里勾选确认，不会自动执行。" : "关闭询问档：不再扫描和通知；已列出的待确认项保留，可手动处理。")
                  : "\(setupAction.contains("enable") ? "开启" : "暂停")\(setupAction.contains("memory") ? "每分钟观察、满足安全条件才回收的内存维护" : "每 12 小时处理固定槽与已有 Xcode 过期中间缓存的维护")。暂停不杀在途工作，下一候选复核开关；未接入协议的模拟器、MCP 和任务目录保持保留。")
@@ -283,7 +283,7 @@ struct Dashboard: View {
                 Button("关闭") { configure("setup-storage-disable") }
             }
             HStack {
-                Text("自动档（搬闲置目录、删构建产物）"); Spacer()
+                Text("自动档（仅过期编译中间缓存）"); Spacer()
                 Button("开启") { configure("setup-auto-enable") }
                 Button("关闭") { configure("setup-auto-disable") }
             }
