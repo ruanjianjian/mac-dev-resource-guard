@@ -643,6 +643,38 @@ def integrate(home, project):
 BUNDLE_ID = 'io.github.ruanjianjian.mac-dev-resource-guard.widget'
 
 
+LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+KEEP_BACKUPS = 3
+
+
+def backup_path(home):
+    """Where the replaced app goes. `.noindex` keeps Spotlight from listing an old copy as 资源看板, with no icon,
+    and opening it instead of the installed one."""
+    return state_root(home) / 'app-backups' / '{}.noindex'.format(time.time_ns())
+
+
+def tidy_backups(home, keep=KEEP_BACKUPS, run=subprocess.run):
+    """Old copies of the app: out of Spotlight and LaunchServices, and only the newest few kept. Returns what was removed."""
+    folder = state_root(home) / 'app-backups'
+    copies = sorted((p for p in folder.iterdir() if p.name.split('.')[0].isdigit()) if folder.is_dir() else [],
+                    key=lambda p: int(p.name.split('.')[0]), reverse=True)
+    removed = []
+    for index, copy in enumerate(copies):
+        run([LSREGISTER, '-u', str(copy)], capture_output=True)
+        if index >= keep:
+            shutil.rmtree(copy, ignore_errors=True)
+            removed.append(copy)
+        elif not copy.name.endswith('.noindex'):
+            copy.rename(copy.with_name(copy.name + '.noindex'))
+    return removed
+
+
+def register_app(app, run=subprocess.run):
+    """Tell LaunchServices about the new build, so Spotlight and Finder show its icon instead of a cached blank one."""
+    os.utime(app)
+    run([LSREGISTER, '-f', str(app)], capture_output=True)
+
+
 def app_pids_by_bundle(run=subprocess.run):
     """The menu app as macOS knows it, whatever path or arguments it was started with (an older install,
     a moved app). The storage tick runs the same binary without becoming an app, so it is never listed."""

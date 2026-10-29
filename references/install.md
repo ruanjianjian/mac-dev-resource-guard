@@ -143,3 +143,11 @@ security delete-keychain ~/.local/share/dev-resource-guard/signing/signing.keych
    ```
 
 3. Release 说明的**第一行**会原样出现在用户收到的更新通知里，所以要写成一句给人看的话。
+
+## 旧版 App 备份
+
+升级时，旧 App 会挪到 `~/.local/state/dev-resource-guard/app-backups/<时间>.noindex`，安装失败时用它恢复：
+
+- 目录名带 `.noindex`，Spotlight 不会收录。否则搜「资源看板」会多出一个没有图标的旧版本，点开还会运行旧版。
+- 每次安装后只留最近 3 份，其余删除，并从 LaunchServices 注销。
+- 新 App 放好后会 `lsregister -f` 重新登记，Spotlight 和访达随之显示新图标。

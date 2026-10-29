@@ -1,5 +1,6 @@
 """A narrow automatic scope must never enter task/device/tool-wide mutation paths."""
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -258,3 +259,23 @@ class ManagedScopeTests(TierFixture):
             with self.assertRaises(tiers_config.ConfigError):
                 runpy.run_path(str(ROOT/'scripts/install.py'))
         self.assertFalse(run.called)
+
+    def test_old_app_copies_leave_spotlight_and_only_the_newest_three_stay(self):
+        folder = service.state_root(self.home) / 'app-backups'
+        for stamp in ('100', '200.noindex', '300', '400', '500'):
+            (folder / stamp / 'Contents').mkdir(parents=True)
+        calls = []
+        run = lambda args, **kwargs: calls.append(args)
+        removed = service.tidy_backups(self.home, run=run)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['300.noindex', '400.noindex', '500.noindex'])
+        self.assertEqual(sorted(p.name for p in removed), ['100', '200.noindex'])
+        self.assertTrue(all(args[:2] == [service.LSREGISTER, '-u'] for args in calls), 'every old copy is forgotten by LaunchServices')
+        self.assertTrue(service.backup_path(self.home).name.endswith('.noindex'), 'new backups never reach Spotlight')
+
+    def test_the_new_app_is_registered_again_so_its_icon_shows(self):
+        app = self.home / 'Applications/资源看板.app'; app.mkdir(parents=True)
+        os.utime(app, (1, 1))
+        calls = []
+        service.register_app(app, run=lambda args, **kwargs: calls.append(args))
+        self.assertEqual(calls, [[service.LSREGISTER, '-f', str(app)]])
+        self.assertGreater(app.stat().st_mtime, 1)
