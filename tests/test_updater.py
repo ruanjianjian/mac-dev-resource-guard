@@ -85,12 +85,14 @@ class UpdaterTest(unittest.TestCase):
     def test_turned_off_it_never_looks(self):
         self.assertEqual(self.tick(enabled=False, release=Release(fail=AssertionError('looked while off')))['status'], 'off')
 
-    def test_it_waits_while_memory_is_tight(self):
+    def test_it_waits_only_while_memory_is_critical_and_says_so(self):
         memory = self.home / '.local/state/dev-memory'; memory.mkdir(parents=True)
+        (memory / 'latest.json').write_text(json.dumps(dict(sample=dict(pressure=4))))
+        state = self.tick(release=Release(fail=AssertionError('looked while memory was critical')))
+        self.assertEqual(state.get('waiting'), '内存很紧')
+        self.assertEqual(updater.read(self.home).get('waiting'), '内存很紧', 'the reason is kept for later')
+        # 「紧张」 (2) is where a Mac with several simulators sits for hours: that alone does not hold the update.
         (memory / 'latest.json').write_text(json.dumps(dict(sample=dict(pressure=2))))
-        state = self.tick(release=Release(fail=AssertionError('looked under pressure')))
-        self.assertEqual(state.get('waiting'), '内存紧张')
-        (memory / 'latest.json').write_text(json.dumps(dict(sample=dict(pressure=1))))
         self.assertEqual(self.tick(now=NOW + 300)['status'], 'installing')
 
     def test_offline_is_tried_again_after_an_hour(self):

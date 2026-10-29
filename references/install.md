@@ -124,7 +124,7 @@ security delete-keychain ~/.local/share/dev-resource-guard/signing/signing.keych
 - **检查频率**：每天最多查一次 `https://api.github.com/repos/ruanjianjian/mac-dev-resource-guard/releases/latest`。没联网或被限流时，一小时后再查。
 - **什么时候装**：
   - 正式版本号比已装的 App 新，才会安装。
-  - 内存紧张时先不装，因为编译要占内存。
+  - 内存「很紧」时先不装，因为编译要占几百 MB；只是「紧张」时照装（开着几台模拟器的 Mac 经常一整天都处在「紧张」，编译不到半分钟）。等待的原因会记在 `update.json` 里。
 - **怎么装**：新开一个会话，运行和手动安装一模一样的命令，钉在那个 tag 上：`curl … /<tag>/install.sh | RESOURCE_GUARD_REF=refs/tags/<tag> bash`。
   - 安装器会等后台整理的锁，不打断正在跑的任务，也不弹面板。
   - tag 只接受 `vX.Y.Z` 格式，否则不执行。

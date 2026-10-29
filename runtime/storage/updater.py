@@ -81,12 +81,13 @@ def alive(pid):
 
 
 def busy_reason(home):
-    """Not now: memory is tight (building the app needs some), so wait for a calmer moment."""
+    """Not now: memory is critical (building the app needs a few hundred MB). Plain 「紧张」 does not wait:
+    a Mac running several simulators sits there for hours, and the build takes under half a minute."""
     try:
         sample = json.loads((Path(home) / '.local/state/dev-memory/latest.json').read_text()).get('sample') or {}
     except (OSError, ValueError):
         return None
-    return '内存紧张' if sample.get('pressure') in (2, 4) else None
+    return '内存很紧' if sample.get('pressure') == 4 else None
 
 
 def log_tail(home, lines=5):
@@ -122,7 +123,9 @@ def tick(home, enabled, now=None, fetch=urllib.request.urlopen, spawn=subprocess
         return data
     waiting = busy_reason(home)
     if waiting and not force:
-        return dict(data, waiting=waiting)
+        data.update(waiting=waiting, waiting_at=now)   # kept, so 「为什么还没更新」 has an answer
+        save(home, data)
+        return data
     data.update(checked_at=now, waiting=None)
     try:
         release = latest(fetch)
