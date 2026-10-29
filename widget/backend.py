@@ -650,8 +650,78 @@ class Adapter:
             message += '，离目标还差 {}'.format(gb(plan['shortfall_bytes']))
         return dict(status='ok', message=message, rows=rows, eligibleBytes=plan['reach_bytes'], created=plan['at'])
 
+    def memory_page(self):
+        """What is using memory, what was handled automatically, what can be closed, and what must stay."""
+        sys.path.insert(0, str(engine_root() / 'runtime/memory/scripts'))
+        import memory_external
+        root = self.home / '.local/state/dev-memory'
+        latest = read_json(root / 'latest.json') if (root / 'latest.json').is_file() else {}
+        state = read_json(root / 'state.json') if (root / 'state.json').is_file() else {}
+        now = time.time()
+        pressure = (latest.get('sample') or {}).get('pressure')
+        since = state.get('incident_started')
+        rows = [dict(id='status', title={2: '紧张', 4: '很紧'}.get(pressure, '正常'), category='状态', bytes=None, eligible=False,
+                     command=None, detail='', outcome=str(pressure),
+                     reason='已持续 {} 分钟'.format(max(1, round((now - since) / 60))) if pressure in (2, 4) and since else '')]
+        names = dict(simulator='关掉没被开发工具连着的模拟器', gradle='停掉闲置的 Gradle 编译后台', mcp='停掉闲置的 MCP 服务', tail='收尾托管的后台进程')
+        last = read_json(root / 'last-cleanup.json') if (root / 'last-cleanup.json').is_file() else {}
+        for index, action in enumerate(last.get('actions', []) if now - last.get('at', 0) < 2 * 3600 else []):
+            if action.get('result', {}).get('stopped') is True:
+                rows.append(dict(id='done:{}'.format(index), title=names.get(action.get('kind'), '收尾闲置资源'), category='自动处理了',
+                                 bytes=(action.get('rss_kib_estimate') or action['result'].get('rss_kib') or 0) * 1024 or None,
+                                 eligible=False, command=None, detail='', outcome=None, reason=''))
+        idle_since = state.get('simulator_idle_since', {})
+        try:
+            fixture = self.home / '.fixture-simulators.json'
+            simulators = (json.loads(fixture.read_text()) if fixture.is_file() else []) if self.isolated else memory_external.simulator_inspect()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            simulators = []
+        for sim in sorted(simulators, key=lambda r: -r['rss_kib']):
+            if sim['reason'] == 'simulator_not_attached':
+                hours = (now - idle_since.get('simulator:' + sim['id'], now)) / 3600
+                rows.append(dict(id='sim:' + sim['id'], title=sim['name'], category='可以关掉', bytes=sim['rss_kib'] * 1024,
+                                 eligible=True, command=None, detail='', outcome=None,
+                                 reason='{:.0f} 小时没被开发工具连过'.format(hours) if hours >= 1 else '现在没被开发工具连着'))
+            else:
+                rows.append(dict(id='sim:' + sim['id'], title=sim['name'] + ' 模拟器', category='正在用', bytes=sim['rss_kib'] * 1024,
+                                 eligible=False, command=None, detail='', outcome=None, reason='、'.join(sim['attached']) + ' 正连着'))
+        inside = {pid for sim in simulators for pid in sim.get('pids', [])}   # apps running in a simulator count there
+        for proc in latest.get('top_memory', [])[:8]:
+            if proc.get('pid') in inside or any(word in proc.get('name', '') for word in ('Simulator', 'launchd_sim', 'kernel_task', 'WindowServer')):
+                continue
+            mem = str(proc.get('mem', ''))
+            unit = {'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30}.get(mem[-1:], 1)
+            try:
+                size = int(float(mem.rstrip('KMG+-')) * unit)
+            except ValueError:
+                size = None
+            rows.append(dict(id='proc:{}'.format(proc.get('pid')), title=proc.get('role') or proc.get('name', ''), category='正在用',
+                             bytes=size, eligible=False, command=None, detail='', outcome=None,
+                             reason='闲置，会自动收尾' if str(proc.get('policy', '')).startswith('可安全回收') else '正在用的程序，不动'))
+        return dict(status='ok', message='', rows=rows, created=latest.get('at'))
+
+    def memory_close(self, ids):
+        """One click from the memory page: close the ticked simulators, each checked again first."""
+        sys.path.insert(0, str(engine_root() / 'runtime/memory/scripts'))
+        import memory_external
+        rows, freed = [], 0
+        for key in ids:
+            udid = key.split(':', 1)[-1]
+            result = {'stopped': False, 'reason': '隔离测试不操作真实模拟器'} if self.isolated else memory_external.shutdown_idle_simulator(udid)
+            freed += (result.get('rss_kib') or 0) * 1024 if result.get('accepted') else 0
+            rows.append(dict(id=key, title=result.get('name') or udid, category='执行结果', bytes=None, eligible=False, command=None,
+                             detail='', outcome='已关掉' if result.get('stopped') else '没关',
+                             reason={'simulator_in_use': '刚有开发工具连上，没关', 'already_shut_down': '已经关了'}.get(result.get('reason'), result.get('reason', ''))))
+        done = sum(r['outcome'] == '已关掉' for r in rows)
+        return dict(status='ok', rows=rows, message='已关掉 {} 台{}'.format(done, '，腾出约 ' + gb(freed) if freed else '') + (
+            '；{} 台没关，原因见上。'.format(len(rows) - done) if done < len(rows) else '。'))
+
     def run(self, action, token=None, path=None, ids=None):
         family, verb = action.split('-', 1)
+        if family == 'memory' and verb == 'page':
+            return self.memory_page()
+        if family == 'memory' and verb == 'close':
+            return self.memory_close([i for i in (ids or '').split(',') if i])
         if family == 'plan':
             return self.plan(verb, path)
         if family == 'checkup' and verb in ('preview', 'scan', 'firstrun', 'status'):
@@ -712,7 +782,7 @@ class Adapter:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['storage-preview', 'storage-clean', 'common-preview', 'common-clean', 'memory-preview', 'memory-clean',
+    parser.add_argument('action', choices=['memory-page', 'memory-close', 'storage-preview', 'storage-clean', 'common-preview', 'common-clean', 'memory-preview', 'memory-clean',
                                           'setup-preview', 'setup-install', 'setup-upgrade', 'setup-memory-enable', 'setup-memory-disable',
                                           'setup-storage-enable', 'setup-storage-disable', 'setup-activate', 'task-select', 'project-integrate',
                                           'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',

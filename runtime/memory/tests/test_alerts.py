@@ -139,5 +139,70 @@ class SimulatorTests(unittest.TestCase):
         self.assertIn("2 台模拟器占约 9 GB（1 台没被开发工具连着）", message)
 
 
+class AutoCloseTests(unittest.TestCase):
+    """Choice A: idle two hours and memory tight → closed automatically; otherwise one click."""
+    def rows(self, reason="simulator_not_attached"):
+        return [{"id": "BBB", "device_id": "BBB", "kind": "ios-sim", "name": "Idle Phone", "rss_kib": 1 << 21,
+                 "attached": [], "eligible": False, "reason": reason, "_observed_at": 0}]
+
+    def collect(self, state, now, reason="simulator_not_attached"):
+        with mock.patch.object(ext, "device_inspect", return_value=self.rows(reason)), \
+             mock.patch.object(ext, "adapter", side_effect=lambda name: mock.Mock(inspect=lambda now: [])):
+            return ext.collect(state, now)
+
+    def test_two_hours_without_a_dev_tool_makes_it_a_candidate(self):
+        state = {}
+        public, _ = self.collect(state, 1000)
+        self.assertFalse(public[0]["eligible"])
+        self.assertEqual(state["simulator_idle_since"], {"simulator:BBB": 1000})
+        public, _ = self.collect(state, 1000 + 7200)
+        self.assertFalse(public[0]["eligible"], "a second look 30 s later is still required")
+        public, _ = self.collect(state, 1000 + 7260)
+        self.assertTrue(public[0]["eligible"])
+        self.assertEqual(public[0]["unattached_since"], 1000)
+
+    def test_a_dev_tool_connecting_restarts_the_clock(self):
+        state = {}
+        self.collect(state, 1000)
+        self.collect(state, 5000, reason="simulator_in_use")
+        public, _ = self.collect(state, 9000)
+        self.assertEqual(public[0]["unattached_since"], 9000)
+
+    def test_closing_rechecks_and_spares_one_that_just_got_connected(self):
+        def run(args, **kwargs):
+            if args[:3] == ["/usr/bin/xcrun", "simctl", "shutdown"]:
+                raise AssertionError("must not shut down a simulator in use")
+            return SimulatorTests().fake(args)
+        self.assertEqual(ext.shutdown_idle_simulator("AAA", run=run)["reason"], "simulator_in_use")
+        calls = []
+        def run_idle(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "") if "shutdown" in args else SimulatorTests().fake(args)
+        result = ext.shutdown_idle_simulator("BBB", run=run_idle)
+        self.assertTrue(result["stopped"])
+        self.assertIn(["/usr/bin/xcrun", "simctl", "shutdown", "BBB"], calls)
+
+    def test_only_while_memory_is_tight(self):
+        own = {"simulator:BBB": {"id": "BBB"}}
+        resource = {"kind": "simulator", "id": "simulator:BBB", "eligible": True, "reason": "simulator_not_attached"}
+        with mock.patch.object(memory, "inspect_external_resources", return_value=([dict(resource)], own)):
+            stack = [mock.patch.object(memory, "locked", mock.MagicMock()),
+                     mock.patch.object(memory, "read_json", side_effect=lambda p, d=None: {} if p.name == "state.json" else d),
+                     mock.patch.object(memory, "atomic_json"), mock.patch.object(memory, "log_event"),
+                     mock.patch.object(memory, "sample_system", return_value=dict(sample(1), at=1000)),
+                     mock.patch.object(memory, "protection_knowledge", return_value=[]),
+                     mock.patch.object(memory, "process_table", return_value={}),
+                     mock.patch.object(memory, "top_memory", return_value=[]),
+                     mock.patch.object(memory, "inspect_resources", return_value=([], [])),
+                     mock.patch.object(memory, "reconcile_external"),
+                     mock.patch.object(memory.time, "time", return_value=1000)]
+            for p in stack:
+                p.start(); self.addCleanup(p.stop)
+            with mock.patch.object(memory, "external_module") as module:
+                result = memory.run_cycle("tick")
+        module.return_value.reclaim.assert_not_called()
+        self.assertEqual([(r["eligible"], r["reason"]) for r in result["external_resources"]], [(False, "simulator_not_attached")])
+
+
 if __name__ == "__main__":
     unittest.main()

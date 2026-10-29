@@ -49,7 +49,8 @@ final class WorkWatcher {
 /// The memory monitor (dev-memory) asks the app to show its alert, so it arrives as 资源看板 with the
 /// user's notification permission; the receipt tells the monitor it was delivered (else it retries).
 final class AlertWatcher {
-    var deliver: (_ title: String, _ body: String) -> Void = { _, _ in }
+    /// Shows the alert; calls back true once the system accepted it (false: notifications are off).
+    var deliver: (_ title: String, _ body: String, _ done: @escaping (Bool) -> Void) -> Void = { _, _, done in done(false) }
     private var source: DispatchSourceFileSystemObject?
     private var handled: String?
     private var folder: URL { stateHome().appendingPathComponent(".local/state/dev-memory") }
@@ -73,9 +74,12 @@ final class AlertWatcher {
               let body = alert["body"] as? String, let at = alert["at"] as? Double,
               Date().timeIntervalSince1970 - at < 300 else { return }
         handled = id
-        deliver(title, body)
-        let receipt = (try? JSONSerialization.data(withJSONObject: ["id": id, "at": Date().timeIntervalSince1970])) ?? Data()
-        try? receipt.write(to: folder.appendingPathComponent("alert-ack.json"), options: .atomic)
+        let ack = folder.appendingPathComponent("alert-ack.json")
+        deliver(title, body) { shown in
+            // No receipt when the system refused it: the monitor then falls back and tries again.
+            guard shown, let receipt = try? JSONSerialization.data(withJSONObject: ["id": id, "at": Date().timeIntervalSince1970]) else { return }
+            try? receipt.write(to: ack, options: .atomic)
+        }
     }
 }
 

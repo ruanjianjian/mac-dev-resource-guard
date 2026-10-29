@@ -531,6 +531,11 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
         else:
             reconcile_external(state)
             external, external_records = inspect_external_resources(state, now)
+            for resource in external:
+                # Simulators found idle by our own check close only while memory is tight (choice A).
+                if (resource.get('kind') == 'simulator' and resource.get('eligible')
+                        and 'lease_signature' not in external_records.get(resource['id'], {}) and sample['pressure'] not in (2, 4)):
+                    resource.update(eligible=False, reason='simulator_not_attached')
         actions = []
         effective_pressure = sample['pressure']
         last_normal_sweep = state.get('external_last_sweep')
