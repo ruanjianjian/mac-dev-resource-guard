@@ -142,7 +142,7 @@ def owner_state(owner):
 
 
 def command(args, timeout=10):
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(args, capture_output=True, text=True, errors="surrogateescape", timeout=timeout)
     if r.returncode:
         raise RuntimeError(f"{Path(args[0]).name}: exit {r.returncode}")
     return r.stdout

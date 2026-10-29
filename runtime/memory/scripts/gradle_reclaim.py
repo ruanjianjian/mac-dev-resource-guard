@@ -256,7 +256,7 @@ def identity(pid):
 
 
 def _run(argv, timeout=10):
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    p = subprocess.run(argv, capture_output=True, text=True, errors="surrogateescape", timeout=timeout)
     if p.returncode != 0 or len(p.stdout) > MAX_OUTPUT:
         raise RuntimeError("command_unavailable")
     return p.stdout

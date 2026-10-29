@@ -166,7 +166,7 @@ class Activity:
         result = cls()
         own = os.getpid()
         try:
-            p = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='], capture_output=True, text=True, timeout=20)
+            p = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='], capture_output=True, text=True, errors='surrogateescape', timeout=20)
             if p.returncode:
                 raise RuntimeError('ps failed')
             for line in p.stdout.splitlines():
@@ -176,7 +176,7 @@ class Activity:
         except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
             result.errors.append(type(e).__name__ + ': process inventory unavailable')
         try:
-            p = subprocess.run(['/usr/sbin/lsof', '-nP', '-F', 'pn'], capture_output=True, text=True, timeout=40)
+            p = subprocess.run(['/usr/sbin/lsof', '-nP', '-F', 'pn'], capture_output=True, text=True, errors='surrogateescape', timeout=40)
             if p.returncode or re.search(r'incomplete|permission denied|operation not permitted|can.t stat', p.stderr or '', re.I):
                 raise RuntimeError('lsof incomplete')
             pid = None

@@ -44,7 +44,7 @@ def _identity(pid):
 
 def _processes():
     result = subprocess.run(["/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,command="],
-                            capture_output=True, text=True, timeout=8, check=True)
+                            capture_output=True, text=True, errors="surrogateescape", timeout=8, check=True)
     rows = []
     for line in result.stdout.splitlines():
         fields = line.strip().split(None, 3)
