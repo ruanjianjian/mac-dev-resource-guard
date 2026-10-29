@@ -101,7 +101,7 @@ final class CoverStore: ObservableObject {
     /// goes stale; a background cleanup in progress is waited for (up to 2 minutes) instead of refusing.
     func cleanPending(_ ids: [String]) {
         guard working.isEmpty, !ids.isEmpty else { return }
-        working = "正在逐项核对并删除…"; message = ""; skipped = []
+        working = "正在核对并删除 \(ids.count) 项，好了会告诉你…"; message = ""; skipped = []
         let titles = Dictionary(pendingRows.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
         DispatchQueue.global(qos: .utility).async {
             var reply: BackendReply?
@@ -432,6 +432,7 @@ private struct PendingPage: View {
 
     var body: some View {
         let rows = store.pendingRows
+        let busy = !store.working.isEmpty   // while deleting, nothing here can be tapped
         Page(model: model, store: store, title: "等你确认") {
             if rows.isEmpty {
                 ForEach(store.skipped) { row in SkippedLine(row: row) }
@@ -450,7 +451,8 @@ private struct PendingPage: View {
                         }
                     }
                 }
-                HStack(spacing: 8) {
+                .opacity(busy ? 0.45 : 1).allowsHitTesting(!busy)
+                if !busy { HStack(spacing: 8) {
                     // One tap selects everything that can run now; tap again to clear.
                     Button { selected = allSelected ? [] : Set(selectable) } label: {
                         HStack(spacing: 6) {
@@ -463,8 +465,8 @@ private struct PendingPage: View {
                     Spacer()
                     Button("删除所选") { confirming = true }.buttonStyle(.plain)
                         .foregroundColor(selected.isEmpty ? Ink.muted : Ink.navy).font(.system(size: 12, weight: .medium))
-                        .disabled(selected.isEmpty || !store.working.isEmpty)
-                }.font(.system(size: 12)).padding(.top, 10)
+                        .disabled(selected.isEmpty)
+                }.font(.system(size: 12)).padding(.top, 10) }
             }
         }
         .onAppear { selected = Set(initialSelection); store.refresh() }

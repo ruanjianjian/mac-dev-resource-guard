@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_tiers import DAY, TierFixture, age, git
@@ -110,6 +111,25 @@ class AskTierTests(AskFixture):
         activity = Activity.collect()
         self.assertEqual(activity.errors, [])
         self.assertTrue(any(pid == proc.pid for pid, _ in activity.commands))
+
+    def test_confirming_rechecks_only_the_ticked_items_and_keeps_the_rest(self):
+        done = self.worktree_task('done-task', 10); self.worktree_task('other-task', 10)
+        simctl = self.sims(); now = time.time()
+        self.refresh(simctl, now=now - 5 * 3600); before = self.ids(self.refresh(simctl, now=now))
+        checked, seen = [], len(simctl.calls)
+        real = ask_tier.task_blocker
+        def spy(task, *args):
+            checked.append(task.path.name)
+            return real(task, *args)
+        fail = AssertionError('not ticked, not looked at')
+        with patch.object(ask_tier, 'task_blocker', spy), patch.object(ask_tier.spaces, 'installers', side_effect=fail), \
+             patch.object(ask_tier.spaces, 'trash_size', side_effect=fail), patch.object(ask_tier.spaces, 'archives', side_effect=fail):
+            results = ask_tier.execute(self.home, self.cfg(), self.settings, ['task-delete:' + str(done)], simctl, Activity(), now)
+        self.assertEqual([r['outcome'] for r in results], ['已完成'])
+        self.assertEqual(checked, ['done-task'])
+        self.assertEqual(simctl.calls[seen:], [], 'no simulator listing for a task')
+        left = self.ids(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending()))
+        self.assertEqual(left, [i for i in before if i != 'task-delete:' + str(done)], 'the rest of the list is untouched')
 
     def test_only_confirmed_items_run_after_recheck(self):
         simctl = self.sims(); now = time.time()

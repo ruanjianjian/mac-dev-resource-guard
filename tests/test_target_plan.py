@@ -1,6 +1,7 @@
 """Space target, plan, agent handoff, Mole guard, companion skill install, agent-requested prune."""
 import datetime
 import json
+from unittest.mock import patch
 import os
 from pathlib import Path
 import plistlib
@@ -27,6 +28,11 @@ def sizer(sizes):
     return lambda path: sizes.get(Path(path).name, 1 << 20)
 
 
+def shutil_usage(total):
+    import collections
+    return collections.namedtuple('usage', 'total used free')(total, 0, total)
+
+
 class PlanTest(TierFixture):
     def setUp(self):
         super().setUp()
@@ -44,7 +50,12 @@ class PlanTest(TierFixture):
 
     def test_one_number_drives_the_three_lines(self):
         self.assertEqual(space_plan.thresholds(50), dict(warning_free_gib=50.0, target_free_gib=55.0, critical_free_gib=25.0))
-        self.assertEqual(space_plan.suggested_target(460 * GIB), 50)
+        self.assertEqual(space_plan.suggested_target(460 * GIB), 90)
+        # A first install starts with exactly that target: no question needed in the terminal.
+        with patch.object(service.shutil, 'disk_usage', return_value=shutil_usage(460 * GIB)):
+            service.adopt_config(self.home)
+        body = json.loads((self.home / '.config/dev-resource-guard/config.json').read_text())
+        self.assertEqual((body['warning_free_gib'], body['target_free_gib'], body['critical_free_gib']), (90.0, 99.0, 45.0))
         self.assertEqual(space_plan.suggested_target(100 * GIB), 20)
 
     def test_three_sections_and_how_far_they_reach(self):
