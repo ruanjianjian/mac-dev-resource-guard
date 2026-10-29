@@ -13,6 +13,7 @@ struct ResourceRow: Decodable, Identifiable {
     let command: String?
     let kind: String?
     let loses: String?
+    var tag: String? = nil    // memory page status: free / use / link / auto
 }
 
 struct BackendReply: Decodable {

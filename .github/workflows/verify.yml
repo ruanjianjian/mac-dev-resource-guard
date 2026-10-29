@@ -16,3 +16,5 @@ jobs:
         run: python3 widget/build.py --output "$RUNNER_TEMP/ResourceDashboard.app"
       - name: Read-only widget smoke test
         run: '"$RUNNER_TEMP/ResourceDashboard.app/Contents/MacOS/ResourceDashboard" --self-test'
+      - name: App icon is packed
+        run: test -s "$RUNNER_TEMP/ResourceDashboard.app/Contents/Resources/AppIcon.icns"
