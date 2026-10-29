@@ -589,7 +589,7 @@ private struct SwitchesPage: View {
             Button("取消", role: .cancel) {}
             Button("还原") { store.perform("checkup-off", ids: ["caches"], doing: "正在还原…") }
         } message: {
-            Text("看板做的链接会去掉，各工具从空开始重建缓存；外接盘上的缓存副本会删除；Xcode 编译缓存关闭。你自己做的链接不动。")
+            Text("看板做的链接会去掉，各工具从空开始重建缓存；外接盘上的缓存副本会删除；Xcode 编译缓存关闭。任务的构建产物留在外接盘，你自己做的链接不动。")
         }
     }
 }

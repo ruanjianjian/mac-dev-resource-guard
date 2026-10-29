@@ -169,20 +169,27 @@ def when(at, now=None):
 
 
 def last_auto(home, now=None):
-    """The one line under the switches: the last time the background freed space (or last looked)."""
-    log = Path(home) / '.local/state/dev-resource-guard/auto-tier-log.jsonl'
-    entries = []
-    for line in (log.read_text().splitlines()[-200:] if log.is_file() else []):
+    """The one line under the switches: the last time the background freed internal space (or last looked).
+    Moves to the drive come from the log; the safe cleanup's deletions count only off the drive."""
+    root = Path(home) / '.local/state/dev-resource-guard'
+    events = []
+    for line in ((root / 'auto-tier-log.jsonl').read_text().splitlines()[-200:] if (root / 'auto-tier-log.jsonl').is_file() else []):
         try:
-            entries.append(json.loads(line))
+            entry = json.loads(line)
         except ValueError:
             continue
-    for entry in reversed(entries):
-        freed = sum(a.get('bytes') or 0 for a in entry.get('actions', []) if a.get('result') == 'done')
+        events.append((entry.get('at', 0), sum(a.get('bytes') or 0 for a in entry.get('actions', []) if a.get('result') == 'done')))
+    storage = read_json(root / 'automatic-storage.json') if (root / 'automatic-storage.json').is_file() else {}
+    if storage.get('at'):
+        deleted = [d for r in storage.get('results', []) for d in (r.get('result') or {}).get('deleted', [])]
+        events.append((storage['at'], sum(d.get('directory_accounting_bytes') or 0 for d in deleted
+                                          if not str(d.get('path', '')).startswith('/Volumes/'))))
+    events.sort()
+    for at, freed in reversed(events):
         if freed > 0:
-            return '最近一次：{} 自动腾出 {}'.format(when(entry['at'], now), gb(freed))
-    if entries:
-        return '最近一次：{} 看过，暂时不用动'.format(when(entries[-1]['at'], now))
+            return '最近一次：{} 自动腾出 {}'.format(when(at, now), gb(freed))
+    if events:
+        return '最近一次：{} 看过，暂时不用动'.format(when(events[-1][0], now))
     return ''
 
 

@@ -168,6 +168,65 @@ class CacheTest(CacheFixture):
         self.assertFalse((self.home / '.npm').is_symlink())
 
 
+class TaskBuildTest(CacheFixture):
+    """Each task's own DerivedData goes to the drive behind a link (RAW-36)."""
+    def build(self, task, relative='DerivedData', minutes_ago=60):
+        folder = task / relative; (folder / 'Build/Products').mkdir(parents=True)
+        (folder / 'Build/Products/App.app').write_bytes(b'x' * 8192)
+        old = time.time() - minutes_ago * 60
+        for path in (folder / 'Build/Products/App.app', folder / 'Build/Products', folder / 'Build', folder):
+            os.utime(path, (old, old))
+        return folder
+
+    def cfg(self):
+        tiers_config.update(self.home, dict(task_roots=[dict(path=str(self.root))], caches_enabled=True, external_root=str(self.managed)))
+        return tiers_config.load(self.home)
+
+    def test_quiet_build_folder_moves_behind_a_link_one_per_round(self):
+        first = self.build(self.task('20261001-a', 1)); second = self.build(self.task('20261002-b', 1), 'app/DerivedData-flutter')
+        seen = []
+        real = auto_tier.move_dir
+        def spy(home, src, dest, hook=None):
+            seen.append(json.loads((auto_tier.state_root(home) / auto_tier.WORKING).read_text())['title'])
+            return real(home, src, dest, hook)
+        with unittest.mock.patch.object(auto_tier, 'move_dir', spy):
+            done = toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle())
+        self.assertEqual([a['result'] for a in done], ['done'])
+        self.assertEqual(seen, ['20261001-a 的构建产物'])
+        self.assertFalse((auto_tier.state_root(self.home) / auto_tier.WORKING).exists())
+        self.assertTrue(first.is_symlink())
+        self.assertEqual(os.readlink(first), str(self.managed / 'builds/20261001-a/DerivedData'))
+        self.assertEqual((first / 'Build/Products/App.app').read_bytes(), b'x' * 8192, 'builds keep their path')
+        done = toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle())
+        self.assertEqual(os.readlink(second), str(self.managed / 'builds/20261002-b/app--DerivedData-flutter'))
+        self.assertEqual(toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle()), [], 'nothing left')
+
+    def test_a_build_in_progress_or_just_finished_waits(self):
+        busy = self.build(self.task('20261001-a', 1))
+        fresh = self.build(self.task('20261002-b', 1), minutes_ago=5)
+        building = Activity(commands=[(7, 'xcodebuild -derivedDataPath {} build'.format(busy))])
+        self.assertEqual(toolcaches.take_over_builds(self.home, self.managed, self.cfg(), building), [])
+        self.assertFalse(busy.is_symlink() or fresh.is_symlink())
+
+    def test_turning_caches_off_keeps_task_builds_on_the_drive(self):
+        folder = self.build(self.task('20261001-a', 1))
+        toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle())
+        toolcaches.restore(self.home)
+        self.assertTrue(folder.is_symlink() and (folder / 'Build/Products/App.app').exists())
+
+    def test_plan_counts_them_as_automatic_and_ignores_moved_ones(self):
+        import plan as space_plan
+        folder = self.build(self.task('20261001-a', 1))
+        tasks = [dict(path=str(self.root / '20261001-a'), bytes=1, idle=False, linked=False)]
+        settings = type('S', (), dict(warning_free_gib=50))()
+        plan = space_plan.build(self.home, self.cfg(), settings, dict(tasks=tasks, caches=[]), dict(items=[]), 0, True, sizer=lambda p: 9 << 30)
+        auto = [i for s in plan['sections'] if s['id'] == 'auto' for i in s['items']]
+        self.assertEqual([(i['kind'], i['bytes']) for i in auto], [('build-move', 9 << 30)])
+        toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle())
+        plan = space_plan.build(self.home, self.cfg(), settings, dict(tasks=tasks, caches=[]), dict(items=[]), 0, True, sizer=lambda p: 9 << 30)
+        self.assertEqual([i for s in plan['sections'] if s['id'] == 'auto' for i in s['items']], [])
+
+
 class XcodeCacheTest(CacheFixture):
     def test_enable_reaches_new_shells_and_apps_and_disable_undoes_it(self):
         rc = self.home / '.zshenv'; rc.write_text('export PATH=$HOME/bin:$PATH\n')
@@ -292,7 +351,10 @@ class ConsentTest(CheckupTest):
 
     def test_enter_means_yes_and_the_question_is_asked_once(self):
         self.assertEqual(self.answer('\n'), 'yes')
-        self.assertIn('外接盘「T9」', (self.base / 'tty').read_text())
+        question = (self.base / 'tty').read_text()
+        self.assertIn('外接盘「T9」：缓存和构建产物放过去', question)
+        self.assertIn('安全自动清理默认就开着', question)
+        self.assertNotIn('挪闲置任务', question)
         self.assertEqual(self.answer('n\n'), 'decided', 'upgrades never ask again')
 
     def test_no_and_agent_answers(self):
@@ -307,7 +369,7 @@ class ConsentTest(CheckupTest):
         self.assertFalse((service.state_root(self.home) / service.CONSENT).exists(), 'can still be asked next time')
 
     def test_already_on_counts_as_agreed(self):
-        tiers_config.update(self.home, dict(caches_enabled=True, auto_enabled=True, ask_enabled=True))
+        tiers_config.update(self.home, dict(caches_enabled=True))
         self.assertEqual(service.ask_consent(self.home, env={}, interactive=False), 'decided')
 
     def test_agreeing_turns_all_three_on_right_away(self):
@@ -334,6 +396,12 @@ class LastAutoTest(TierFixture):
         auto_tier.append_log(self.home, dict(at=now - 60, actions=[]))
         self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 3 GB'.format(backend.when(now - 600, now)))
         self.assertTrue(backend.when(now - 600, now).startswith(('今天', '昨天')))
+        # The safe cleanup's deletions count only when they free the internal disk.
+        state = self.home / '.local/state/dev-resource-guard'
+        deleted = [dict(path='/Volumes/T9/dev-cache/DerivedData/X/Build/Intermediates.noindex', directory_accounting_bytes=5 << 30),
+                   dict(path=str(self.home / 'slots/a/Build/Intermediates.noindex'), directory_accounting_bytes=1 << 30)]
+        (state / 'automatic-storage.json').write_text(json.dumps(dict(at=now - 30, results=[dict(result=dict(deleted=deleted))])))
+        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 1 GB'.format(backend.when(now - 30, now)))
 
 
 class WiderCleanupTest(TierFixture):

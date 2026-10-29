@@ -499,14 +499,16 @@ def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
         toolcaches.clear_leftovers(home)
         if not cfg['caches_enabled'] or cfg['external_root'] is None:
             return None
-        if not any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
-            return None
-        actions = toolcaches.take_over(home, cfg['external_root'], Activity.collect(settings.lease_root))
+        activity = Activity.collect(settings.lease_root)
+        actions = []
+        if any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
+            actions += toolcaches.take_over(home, cfg['external_root'], activity)
+        actions += toolcaches.take_over_builds(home, cfg['external_root'], cfg, activity)
     except Exception as error:
         actions = [dict(kind='cache-move', path=str(cfg['external_root']), bytes=0, result='failed', reason=str(error) or type(error).__name__)]
     if actions:
         auto_tier.append_log(home, dict(schema=1, at=now, status='caches', actions=actions))
-    return actions
+    return actions or None
 
 
 def clean_caches(home):
@@ -604,10 +606,11 @@ YES, NO = ('yes', 'y', '1', 'true'), ('no', 'n', '0', 'false')
 def consent_question(drive=None):
     """The one question at the first install (RAW-36): what turning everything on changes, in plain words."""
     lines = ['默认打开这几项：',
-             '  · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）',
-             '  · 自动清理：只做不丢东西的（挪闲置任务、删能重新生成的构建产物）；会丢东西的先问你']
+             '  · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）'
+             + ('；任务目录里的 Xcode 构建产物也放到外接盘' if drive else '')]
     if drive:
-        lines.append('  · 外接盘「{}」：缓存和闲置任务放过去'.format(drive))
+        lines.append('  · 外接盘「{}」：缓存和构建产物放过去'.format(drive))
+    lines.append('（安全自动清理默认就开着：只清 7 天没用过的编译中间缓存，任务目录和模拟器不动。）')
     return '\n'.join(lines) + '\n同意吗？[Y/n] '
 
 
@@ -619,7 +622,7 @@ def ask_consent(home, drive=None, env=None, tty='/dev/tty', interactive=None):
     if path.exists():
         return 'decided'
     cfg = tiers_config.load(home)
-    if cfg['caches_enabled'] and cfg['auto_enabled'] and cfg['ask_enabled']:
+    if cfg['caches_enabled']:
         atomic_json(path, dict(consent=True, at=time.time(), how='already on'))
         return 'decided'
     value = env.get('RESOURCE_GUARD_ENABLE', '').strip().lower()

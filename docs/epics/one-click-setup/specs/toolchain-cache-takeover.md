@@ -26,9 +26,11 @@
 | AC-05 | [核] | 打开 Xcode 编译缓存 | 之后在新开的终端或 Xcode 里构建 | 自动带上编译缓存设置，同一任务清空重编时用上缓存；用户已有自己的全局 Xcode 设置文件时不覆盖，提示冲突 | CLI后端 | ✅ | 实测（e2e 第 2 步）：隔离主目录打开后，新开 zsh 带上 XCODE_XCCONFIG_FILE，xcodebuild 显示 COMPILATION_CACHE_ENABLE_CACHING = YES，第二次清空重编 30 次编译全部命中缓存；auto: test_enable_reaches_new_shells_and_apps_and_disable_undoes_it、test_someone_elses_global_settings_are_not_overwritten、test_periodic_job_puts_the_setting_back_after_logout |
 | AC-06 | [核] | 已经接管 | 在看板点「还原」 | 去掉看板做的链接，各工具回到默认位置（缓存从空开始重建），删掉外接盘上的缓存副本，关掉 Xcode 编译缓存；之后新开的终端和 Xcode 不再带编译缓存设置 | CLI后端、mac原生 | ✅ | 实测：e2e 第 1 步还原后 ~/.npm 为普通空目录、T9 副本删除；第 2 步关闭后新终端不再带设置；auto: test_turning_caches_off_restores_and_switches_xcode_off |
 | AC-07 | [边] | 没插外接盘 | 打开缓存共享 | 缓存留在原地，只统一显示和清理；Xcode 编译缓存照常打开 | CLI后端 | ✅ | auto: test_caches_without_a_drive_stay_put_but_xcode_cache_turns_on |
+| AC-08 | [核] | 打开缓存共享，插着外接盘；某个任务目录里有自己的 Xcode 构建产物（名字带 DerivedData，例如构建脚本用 -derivedDataPath 指到任务目录里） | 下一轮后台检查 | 这份构建产物没在构建、30 分钟没动时，挪到外接盘「dev-resource-guard/builds/<任务>/」，原路径留链接，之后的构建照常写到原路径（实际在外接盘）；每轮最多挪一份；正在构建或刚构建完的等下一轮；不删任何东西；关掉缓存共享时这些构建产物留在外接盘、链接不动；计划把它们算进「会自动做的」，已挪走的不再算内置盘占用 | CLI后端 | ✅ | auto: test_one_click.TaskBuildTest（安静的先挪、一轮一份、链接后内容可读、构建中 / 5 分钟内构建过的不动、还原后留在外接盘、计划计入且挪后不再计）；起因：本机 10-29 四个任务各自的 DerivedData 共约 33 GB 留在内置盘 |
 
 ## 变更记录
 
 | ID | 日期 | 变更 | 类型 |
 |---|---|---|---|
 | CH-01 | 2026-10-28 | 新建（RAW-01、RAW-04、RAW-08） | [需求变更] |
+| CH-02 | 2026-10-29 | 任务目录里各自的 Xcode 构建产物也挪到外接盘（AC-08）；RAW-37、RAW-38：用户让按最正确的方式做 | [需求变更] |

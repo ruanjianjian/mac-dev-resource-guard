@@ -54,7 +54,8 @@ def duplicate_builds(task_path, depth=4):
             continue
         for name in list(dirs):
             if is_xcode_build(name):
-                found.append(Path(folder) / name)
+                if not (Path(folder) / name).is_symlink():
+                    found.append(Path(folder) / name)
                 dirs.remove(name)
             elif name in ('.git', 'node_modules', 'Pods'):
                 dirs.remove(name)
@@ -94,11 +95,19 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
         for cache in report.get('caches', []):
             if cache.get('status') == 'local' and cache.get('bytes'):
                 auto.append(item('把 {} 的缓存搬到外接盘'.format(cache['name']), cache['bytes'], '共享构建缓存', cache['path'], 'cache-move'))
+        # Each task's own Xcode build folder goes to the drive too, behind a link (RAW-36).
+        for t in tasks:
+            for copy in duplicate_builds(t['path']):
+                size = sizer(copy) or 0
+                if size:
+                    auto.append(item('把 {} 的 Xcode 构建产物挪到外接盘'.format(Path(t['path']).name), size,
+                                     '共享构建缓存：不在构建时挪，原路径留链接', str(copy), 'build-move'))
     for entry in pending.get('items', []):
         if entry.get('state') == 'pending' and not entry.get('unreachable'):
             ask.append(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']))
     busy = sorted((t for t in tasks if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])
-    for t in busy[:5]:
+    # With the drive in use every build copy is already in 「会自动做的」; deleting old ones frees no internal space.
+    for t in ([] if cfg['caches_enabled'] and external_ready else busy[:5]):
         copies = duplicate_builds(t['path'])
         stale = stale_copies(copies, now) if len(copies) > 1 else []
         if stale:
