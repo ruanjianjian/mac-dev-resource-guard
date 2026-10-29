@@ -446,6 +446,8 @@ def notification_message(rows, actions, pending, resources=(), cooldown=False):
     if sims:
         idle = sum(1 for r in sims if r.get('reason') == 'simulator_not_attached')
         size = sum(r['rss_kib'] for r in sims) / 1024 ** 2
+        if not idle and not stopped:
+            outcome = '模拟器都有开发工具连着，暂时没有能安全关的。'
         names = '{} 台模拟器占约 {:.0f} GB（{} 台没被开发工具连着）、{}'.format(len(sims), size, idle, names)
     return f'主要占用：{names}。{outcome}点开资源看板看哪些能关。'
 

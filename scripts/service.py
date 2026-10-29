@@ -84,6 +84,30 @@ def operation_lock(home, name):
         yield
 
 
+@contextlib.contextmanager
+def waiting_lock(home, name, wait=None, announce=print):
+    """Like operation_lock, but waits for a background round to finish instead of failing at once,
+    and says what it waits for. RESOURCE_GUARD_INSTALL_WAIT (seconds, default 15 minutes) bounds it."""
+    wait = float(os.environ.get('RESOURCE_GUARD_INSTALL_WAIT', 900)) if wait is None else wait
+    path = state_root(home) / (name + '.lock')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as stream:
+        deadline, told = time.time() + wait, False
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() >= deadline:
+                    raise Busy('后台整理一直没结束，这次没有安装，原来的版本照常在用；稍后再运行一次安装命令即可')
+                if not told:
+                    doing = read_json(state_root(home) / auto_tier.WORKING).get('title') if (state_root(home) / auto_tier.WORKING).is_file() else None
+                    announce('后台正在整理{}，等它做完再装（一般一两分钟）…'.format('：' + doing if doing else ''))
+                    told = True
+                time.sleep(2)
+        yield
+
+
 def adopt_config(home):
     """Reuse an unambiguous, validated existing slot root, pins and locks."""
     path = home / '.config/dev-resource-guard/config.json'
@@ -680,7 +704,10 @@ def ask_consent(home, drive=None, env=None, tty='/dev/tty', interactive=None):
         try:
             with open(tty) as reply, open(tty, 'a') as screen:
                 screen.write(consent_question(drive)); screen.flush()
-                answer = reply.readline().strip().lower() not in NO
+                line = reply.readline()
+                if not line:
+                    return 'unasked'   # Ctrl-D or closed input is no answer, never a yes
+                answer = line.strip().lower() not in NO
         except OSError:
             return 'unasked'
     atomic_json(path, dict(consent=answer, at=time.time()))

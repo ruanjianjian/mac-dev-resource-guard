@@ -687,7 +687,8 @@ class Adapter:
                                  eligible=False, command=None, detail='', outcome=None, reason='、'.join(sim['attached']) + ' 正连着'))
         inside = {pid for sim in simulators for pid in sim.get('pids', [])}   # apps running in a simulator count there
         for proc in latest.get('top_memory', [])[:8]:
-            if proc.get('pid') in inside or any(word in proc.get('name', '') for word in ('Simulator', 'launchd_sim', 'kernel_task', 'WindowServer')):
+            if proc.get('pid') in inside or any(word in proc.get('name', '') for word in
+                                                 ('Simulator', 'SimMetalHost', 'SimRender', 'launchd_sim', 'kernel_task', 'WindowServer')):
                 continue
             mem = str(proc.get('mem', ''))
             unit = {'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30}.get(mem[-1:], 1)
@@ -698,6 +699,11 @@ class Adapter:
             rows.append(dict(id='proc:{}'.format(proc.get('pid')), title=proc.get('role') or proc.get('name', ''), category='正在用',
                              bytes=size, eligible=False, command=None, detail='', outcome=None,
                              reason='闲置，会自动收尾' if str(proc.get('policy', '')).startswith('可安全回收') else '正在用的程序，不动'))
+        if pressure in (2, 4) and not any(r['category'] in ('可以关掉', '自动处理了') for r in rows):
+            busy = sum(1 for r in rows if r['id'].startswith('sim:'))
+            rows.insert(1, dict(id='why', title='现在没有能安全关的', category='说明', bytes=None, eligible=False, command=None,
+                                detail='', outcome=None, reason=('{} 台模拟器都有开发工具连着（多半是 agent 在测试）；'.format(busy) if busy else '')
+                                + '没人连满两小时的模拟器会在内存紧张时自动关，正在跑的程序不会动。'))
         return dict(status='ok', message='', rows=rows, created=latest.get('at'))
 
     def memory_close(self, ids):

@@ -364,6 +364,11 @@ class ConsentTest(CheckupTest):
         with unittest.mock.patch.dict(os.environ, HOME=str(other)):
             self.assertEqual(service.ask_consent(other, env={'RESOURCE_GUARD_ENABLE': 'yes'}), 'yes')
 
+    def test_end_of_input_is_no_answer(self):
+        # Ctrl-D (end of input) at the question: nothing is agreed to, nothing recorded.
+        self.assertEqual(service.ask_consent(self.home, 'T9', env={}, tty='/dev/null', interactive=True), 'unasked')
+        self.assertFalse((service.state_root(self.home) / service.CONSENT).exists())
+
     def test_an_agent_without_an_answer_is_never_blocked(self):
         self.assertEqual(service.ask_consent(self.home, env={}, tty='/nonexistent/tty', interactive=True), 'unasked')
         self.assertEqual(service.ask_consent(self.home, env={}, interactive=False), 'unasked')
@@ -424,6 +429,12 @@ class MemoryPageTest(TierFixture):
         self.assertEqual(got, [('状态', '紧张', '已持续 6 分钟'), ('自动处理了', '停掉闲置的 Gradle 编译后台', ''),
                                ('正在用', 'Busy Phone 模拟器', 'xcodebuild 正连着'), ('可以关掉', 'Idle Phone', '3 小时没被开发工具连过'),
                                ('正在用', 'xcodebuild', '正在用的程序，不动')], 'the app inside a simulator is not counted twice')
+        # Everything in use: the page says plainly why nothing can be closed.
+        (root / 'last-cleanup.json').unlink()
+        (self.home / '.fixture-simulators.json').write_text(json.dumps([
+            dict(id='AAA', name='Busy Phone', rss_kib=5 << 20, attached=['baguette'], reason='simulator_in_use', pids=[])]))
+        why = [r for r in backend.Adapter(self.home).run('memory-page')['rows'] if r['category'] == '说明']
+        self.assertEqual(why[0]['reason'], '1 台模拟器都有开发工具连着（多半是 agent 在测试）；没人连满两小时的模拟器会在内存紧张时自动关，正在跑的程序不会动。')
         closed = backend.Adapter(self.home).run('memory-close', ids='sim:BBB')
         self.assertEqual(closed['rows'][0]['outcome'], '没关', 'test homes never touch real simulators')
 

@@ -192,7 +192,8 @@ class ManagedScopeTests(TierFixture):
         def run(args, **kwargs):
             calls.append(args)
             return __import__('subprocess').CompletedProcess(args,0)
-        with service.operation_lock(self.home,'periodic-storage'), patch.object(service.Path,'home',return_value=self.home), \
+        with service.operation_lock(self.home,'periodic-storage'), patch.dict('os.environ', RESOURCE_GUARD_INSTALL_WAIT='0'), \
+             patch.object(service.Path,'home',return_value=self.home), \
              patch.object(service.subprocess,'run',side_effect=run), patch.object(service,'activate') as activate:
             with self.assertRaises(service.Busy):
                 runpy.run_path(str(ROOT/'scripts/install.py'))
@@ -214,6 +215,27 @@ class ManagedScopeTests(TierFixture):
         self.assertEqual(service.menu_app_pids(exe), [menu.pid])
         self.assertEqual(service.stop_menu_app(exe), [])
         self.assertIsNotNone(menu.poll()); self.assertIsNone(tick.poll(), 'the storage tick keeps running')
+
+    def test_installer_waits_for_a_background_round_and_says_what_it_is(self):
+        import subprocess, time
+        state = service.state_root(self.home); state.mkdir(parents=True, exist_ok=True)
+        (state / auto_tier.WORKING).write_text(json.dumps({'title': '20261026-taobao 的构建产物'}))
+        holder = subprocess.Popen([sys.executable, '-c', 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f, fcntl.LOCK_EX); '
+                                   'print("held", flush=True); time.sleep(1.5)', str(state / 'periodic-storage.lock')], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        holder.stdout.readline()
+        said, started = [], time.time()
+        with service.waiting_lock(self.home, 'periodic-storage', wait=30, announce=said.append):
+            waited = time.time() - started
+        self.assertGreater(waited, 1.0)
+        self.assertEqual(said, ['后台正在整理：20261026-taobao 的构建产物，等它做完再装（一般一两分钟）…'])
+        holder2 = subprocess.Popen([sys.executable, '-c', 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f, fcntl.LOCK_EX); '
+                                    'print("held", flush=True); time.sleep(5)', str(state / 'periodic-storage.lock')], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder2.kill)
+        holder2.stdout.readline()
+        with self.assertRaisesRegex(service.Busy, '原来的版本照常在用'):
+            with service.waiting_lock(self.home, 'periodic-storage', wait=0.5, announce=lambda m: None):
+                pass
 
     def test_installer_rejects_invalid_settings_before_any_subprocess(self):
         import runpy
