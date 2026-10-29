@@ -6,9 +6,11 @@ Three sections, in the order the work happens:
   ask     what waits for a yes in 「等你确认」 (or from the agent in chat)
   judge   what needs a judgement call the rules cannot make (agent-handoff)
 """
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import plistlib
 import time
 
 from storage import GIB, atomic_json
@@ -19,6 +21,8 @@ PLAN = 'plan.json'
 BASELINE = 'growth-baseline.json'
 AGENT_STATE = 'agent-notify.json'
 GROWTH_BYTES = 10 * GIB
+# A build copy used within this many days is never offered for deletion (user rule, 2026-10-28).
+BUILD_COPY_KEEP_DAYS = 7
 def is_xcode_build(name):
     """DerivedData under any name people and scripts give it: DerivedData-flutter, .codex-w2b-DerivedData…"""
     return 'deriveddata' in name.lower()
@@ -57,6 +61,29 @@ def duplicate_builds(task_path, depth=4):
     return found
 
 
+def last_used(copy):
+    """When Xcode last used this build copy: its own record, the newest build log, or the folder itself."""
+    times = []
+    try:
+        accessed = plistlib.loads((Path(copy) / 'info.plist').read_bytes()).get('LastAccessedDate')
+        if isinstance(accessed, datetime):
+            times.append(accessed.timestamp())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        pass
+    for folder in (Path(copy) / 'Logs/Build', Path(copy)):
+        try:
+            times.append(max([folder.stat().st_mtime] + [entry.stat().st_mtime for entry in folder.iterdir()]))
+        except (OSError, ValueError):
+            continue
+    return max(times) if times else 0
+
+
+def stale_copies(copies, now):
+    """Copies that may be offered: the newest one always stays, and none used within a week."""
+    ordered = sorted(copies, key=last_used, reverse=True)
+    return [c for c in ordered[1:] if now - last_used(c) >= BUILD_COPY_KEEP_DAYS * 86400]
+
+
 def build(home, cfg, settings, report, pending, free_bytes, external_ready, sizer=T.size, now=None):
     """The plan from what the last checkup measured; cheap enough to run every tick."""
     now = time.time() if now is None else now
@@ -84,11 +111,12 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     busy = sorted((t for t in tasks if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])
     for t in busy[:5]:
         copies = duplicate_builds(t['path'])
-        if len(copies) > 1:
-            sizes = sorted(((sizer(c) or 0, c) for c in copies), reverse=True)
-            spare = sum(s for s, _ in sizes[1:])
-            judge.append(item('{} 里有 {} 份 Xcode 构建产物'.format(Path(t['path']).name, len(copies)), spare,
-                              '最近还在用；确认哪几份不再需要后可以删', t['path'], 'duplicate-builds'))
+        stale = stale_copies(copies, now) if len(copies) > 1 else []
+        if stale:
+            oldest = time.strftime('%m-%d', time.localtime(min(last_used(c) for c in stale)))
+            judge.append(item('{} 里有 {} 份一周没用的 Xcode 构建副本'.format(Path(t['path']).name, len(stale)),
+                              sum(sizer(c) or 0 for c in stale),
+                              '最早一份上次用在 {}；一周内用过的和最新的一份不列'.format(oldest), t['path'], 'duplicate-builds'))
     for category in report.get('categories', []):
         if category['id'].startswith('container-') and category.get('bytes'):
             judge.append(item(category['title'] + ' 的镜像和容器', 0, category.get('note', ''), None, 'container'))

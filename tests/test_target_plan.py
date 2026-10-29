@@ -1,7 +1,9 @@
 """Space target, plan, agent handoff, Mole guard, companion skill install, agent-requested prune."""
+import datetime
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import time
@@ -30,10 +32,11 @@ class PlanTest(TierFixture):
         super().setUp()
         self.settings.warning_free_gib = 50
 
-    def busy_task_with_copies(self):
+    def busy_task_with_copies(self, days=(1, 10, 20)):
         task = self.root / '20261026-layout'
-        for folder in ('.mobile-v/native/DerivedData', 'DerivedData-flutter', '.codex-w2b-DerivedData'):
-            (task / folder / 'Build').mkdir(parents=True)
+        for folder, idle in zip(('.mobile-v/native/DerivedData', 'DerivedData-flutter', '.codex-w2b-DerivedData'), days):
+            (task / folder / 'Build').mkdir(parents=True, exist_ok=True)
+            age(task / folder, idle)
         return task
 
     def report(self, tasks, caches=()):
@@ -59,11 +62,30 @@ class PlanTest(TierFixture):
         sections = {s['id']: s for s in result['sections']}
         self.assertEqual(sections['auto']['bytes'], 14 * GIB)            # idle task move + npm cache move
         self.assertEqual(sections['ask']['bytes'], GIB)                  # ignored items do not count
-        self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # two spare copies of three
-        self.assertIn('3 份 Xcode 构建产物', sections['judge']['items'][0]['title'])
+        self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # the two copies idle for over a week
+        self.assertIn('2 份一周没用的 Xcode 构建副本', sections['judge']['items'][0]['title'])
         self.assertEqual(result['gap_bytes'], 30 * GIB)
         self.assertEqual(result['reach_bytes'], 51 * GIB)
         self.assertEqual(result['shortfall_bytes'], 0)
+
+    def test_copies_used_within_a_week_are_never_offered(self):
+        busy = self.busy_task_with_copies(days=(1, 3, 6))
+        report = self.report([dict(path=str(busy), linked=False, bytes=40 * GIB, idle=False)])
+        result = space_plan.build(self.home, self.cfg(), self.settings, report, dict(items=[]), 20 * GIB, True,
+                                  sizer=lambda p: 8 * GIB)
+        self.assertEqual(next(s for s in result['sections'] if s['id'] == 'judge')['items'], [])
+        self.busy_task_with_copies(days=(30, 40, 50))
+        result = space_plan.build(self.home, self.cfg(), self.settings, report, dict(items=[]), 20 * GIB, True,
+                                  sizer=lambda p: 8 * GIB)
+        judge = next(s for s in result['sections'] if s['id'] == 'judge')
+        self.assertEqual(judge['bytes'], 16 * GIB, 'even when all are old, the newest copy stays')
+
+    def test_xcode_record_of_last_use_wins_over_folder_times(self):
+        copy = self.root / 'task/DerivedData'; copy.mkdir(parents=True)
+        recent = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+        (copy / 'info.plist').write_bytes(plistlib.dumps({'LastAccessedDate': recent}))
+        age(copy, 30)
+        self.assertLess(time.time() - space_plan.last_used(copy), 3 * DAY)
 
     def test_shortfall_is_said_with_suggestions_not_wider_rules(self):
         report = self.report([dict(path=str(self.root / 'big'), linked=False, bytes=54 * GIB, idle=False)])
