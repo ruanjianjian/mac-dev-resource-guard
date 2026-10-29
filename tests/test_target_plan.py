@@ -172,6 +172,7 @@ class MoleGuardTest(TierFixture):
         self.assertIn('/Volumes/T9/dev-cache/npm/*', patterns)
         self.assertIn(str(self.root) + '/*', patterns)
         self.assertNotIn(str(self.home / 'Library/Caches/pip'), patterns, 'local caches are not ours to protect')
+        self.assertIn(str(self.home / '.local/share/dev-resource-guard') + '/*', patterns, 'the signing keychain survives Mole')
         mole.guard(self.home, cfg, self.cache_rows(), which=self.fake_mole())
         self.assertEqual(mole.whitelist_path(self.home).read_text().count(mole.BEGIN), 1)
         mole.guard(self.home, cfg, [], remove=True)
