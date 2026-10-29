@@ -213,7 +213,9 @@ class ManagedScopeTests(TierFixture):
         for p in (menu, tick, odd): self.addCleanup(p.kill)
         time.sleep(0.3)
         self.assertEqual(service.menu_app_pids(exe), [menu.pid])
-        self.assertEqual(service.stop_menu_app(exe), [])
+        # The bundle-id lookup would find the real 资源看板 on the Mac running these tests and quit it.
+        with patch.object(service, 'app_pids_by_bundle', return_value=[]):
+            self.assertEqual(service.stop_menu_app(exe), [])
         self.assertIsNotNone(menu.poll()); self.assertIsNone(tick.poll(), 'the storage tick keeps running')
 
     def test_installer_waits_for_a_background_round_and_says_what_it_is(self):
