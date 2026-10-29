@@ -14,7 +14,8 @@
 把这句话原样发给你的 Claude Code 或 Codex：
 
 ```text
-帮我安装 https://github.com/ruanjianjian/mac-dev-resource-guard （Mac 开发者的磁盘空间管家「资源看板」），按仓库里的 SKILL.md 来。
+帮我安装 https://github.com/ruanjianjian/mac-dev-resource-guard
+（Mac 开发者的磁盘空间管家「资源看板」），按仓库里的 SKILL.md 来。
 ```
 
 agent 会按 [SKILL.md](SKILL.md) 装；给 agent 的总说明在 [AGENTS.md](AGENTS.md)。新装时它只问你一句：默认打开共享构建缓存、内置盘至少留多少（建议约磁盘的 20%），可以吗；你说可以，装完就已经开好。升级时什么都不问。然后它按这个目标出一份计划：哪些后台会自动做、哪些要你点头、哪些需要判断，并在对话里逐项跟你确认。之后平时由后台脚本维护；出了意料之外的情况（比如某个目录一天涨了 10 GB 以上），看板会发通知，点一下就把要说的话复制好、打开你的 agent。
