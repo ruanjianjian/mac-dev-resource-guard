@@ -9,7 +9,7 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 
 ## 1. 用户发来仓库链接、要安装时
 
-1. **先看是新装还是升级**：`test -x ~/.local/bin/resource-guard-service` 成立就是升级。**升级什么都不用问**，直接运行下面的安装命令（不带变量），装完告诉用户版本和当前设置（`rgs target` 看目标）。
+1. **先看是新装还是升级**：`test -x ~/.local/bin/resource-guard-service` 成立就是升级。**升级什么都不用问**，直接运行下面的安装命令（不带变量），装完告诉用户版本和当前设置（`rgs target` 看目标）。1.7.7 起资源看板每天会自己检查正式版本并在空闲时装好；用户说「更新资源看板」时运行 `rgs update`（有新版就当场装，没有就说已是最新）。
 2. **新装只问一句**（你的命令行没有终端，安装脚本问不到用户）。先算建议目标（磁盘约 20%，取整到 10 GB）：
    ```bash
    python3 -c "import shutil; t = shutil.disk_usage('/').total / 2**30; print(max(20, round(t * 0.2 / 10) * 10))"

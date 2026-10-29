@@ -144,7 +144,7 @@ def checkup_modules():
     return checkup, toolcaches
 
 
-SUGGESTION_TITLES = {'caches': '共享构建缓存', 'clean': '自动清理', 'external': '使用外接盘'}
+SUGGESTION_TITLES = {'caches': '共享构建缓存', 'clean': '自动清理', 'external': '使用外接盘', 'update': '自动更新'}
 
 
 def gb(value):
@@ -204,7 +204,7 @@ def rows_checkup(home, cfg, report, freed, gone):
                          detail=drive['volume'], bytes=None, eligible=False, command=None, outcome='未连接'))
     states = checkup.suggestion_state(home, cfg, report)
     effect = dict(caches=sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local') if (cfg['external_root'] or report.get('recommended')) else None,
-                  clean=None, external=None)
+                  clean=None, external=None, update=None)
     drive = next((d for d in report['drives'] if cfg['external_root'] and str(cfg['external_root']).startswith(d['path'] + '/')),
                  report.get('recommended'))
     tools = len({c['tool'] for c in report['caches']})
@@ -212,7 +212,8 @@ def rows_checkup(home, cfg, report, freed, gone):
         caches='{} 个工具共用一份 · Xcode 编译缓存'.format(tools),
         clean='只清 7 天没用的编译中间缓存',
         external=('未连接，插上就恢复' if gone else '缓存、构建产物和闲置任务放这里') if cfg['external_root']
-        else ('「{}」剩 {}，可以放缓存和构建产物'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘'))
+        else ('「{}」剩 {}，可以放缓存和构建产物'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘'),
+        update='有正式新版时，空闲时自动装好')
     for key in checkup.SUGGESTIONS:
         state = states[key]
         rows.append(dict(id=key, kind='suggestion', title=SUGGESTION_TITLES[key], category='建议', reason=state['detail'], detail=short_lines[key],

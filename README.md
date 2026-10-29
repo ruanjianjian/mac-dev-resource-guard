@@ -3,7 +3,7 @@
   <img src="docs/images/banner.png" alt="资源看板 · Mac Dev Resource Guard：共享构建缓存 · 用好外接盘 · 替你看住磁盘">
 </picture>
 
-# Mac Dev Resource Guard · 资源看板 1.7.6
+# Mac Dev Resource Guard · 资源看板 1.7.7
 
 **一条命令安装，问你一次就开好共享构建缓存和外接盘；后台只清过期的编译中间缓存，任务目录和模拟器先确认再处理。** 面板平时藏在菜单栏：小机器人「小留」旁直接显示内置盘还剩多少；点击它或按 `⌃⌥⌘S` 打开。小留的眼睛就是封面上那只留着缺口的圆环——它替你把空间留出来。
 
@@ -177,13 +177,17 @@ cd "/你的项目目录"
 
 ## 更新
 
-再跑一次安装命令即可：
+**1.7.7 起会自己更新。** 后台每天查一次有没有新的正式版本：只看发布过的版本，不看 main 上的最新提交。有新版本时，等后台空闲、内存不紧张了，再用和手动安装一模一样的命令装好。装的时候不弹面板，空间目标、各个开关和 macOS 权限都保留；装好后发一条通知，例如「资源看板已更新到 1.7.8」，并用一句话说明改了什么。
+
+- 不想自动更新：在「帮你管着」里关掉「自动更新」。
+- 想马上更新：运行 `~/.local/bin/resource-guard-service update`，或者告诉你的 agent「更新资源看板」。
+- 1.7.6 及更早的版本还没有自动更新，需要手动更新一次，再跑一遍安装命令即可：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | bash
 ```
 
-安装器只更新本工具 App 和维护引擎；构建和维护进程保留原运行时直至结束。本地按当前架构编译并 ad-hoc 签名，无 Developer ID 公证，不修改 Gatekeeper；重新安装后 macOS 可能再问一次外接盘访问权限。
+安装器只更新本工具的 App 和维护引擎；正在跑的构建和维护会用原来的版本跑完。App 在你的 Mac 上编译，用本机固定签名（见上文「升级不再重复要权限」），没有 Developer ID 公证，也不改 Gatekeeper。
 
 ## 和 Mole 一起用
 

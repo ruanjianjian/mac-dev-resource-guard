@@ -678,6 +678,7 @@ private struct SwitchesPage: View {
         switch id {
         case "caches": return "共享构建缓存"
         case "clean": return "自动清理"
+        case "update": return "自动更新"
         default: return store.drive.map { "外接盘 \($0)" } ?? "外接盘"
         }
     }
@@ -695,7 +696,7 @@ private struct SwitchesPage: View {
                         }.disabled(!store.working.isEmpty)
                     }
                 }
-                ForEach(["caches", "clean", "external"], id: \.self) { id in
+                ForEach(["caches", "clean", "external", "update"], id: \.self) { id in
                     let row = store.suggestion(id)
                     let on = row?.outcome == "已开启"
                     SettingRow(title: title(id), detail: row?.detail ?? "") {
