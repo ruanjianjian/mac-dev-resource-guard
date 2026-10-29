@@ -41,7 +41,7 @@ extension Snapshot {
     }
 }
 
-enum CoverPage { case cover, pending, space, switches, plan }
+enum CoverPage { case cover, pending, space, switches, plan, memory }
 
 /// Loads the checkup and the pending list on its own, so the cover never waits for the old panel's work.
 final class CoverStore: ObservableObject {
@@ -49,6 +49,7 @@ final class CoverStore: ObservableObject {
     @Published var checkup: BackendReply?
     @Published var pending: BackendReply?
     @Published var plan: BackendReply?
+    @Published var memory: BackendReply?
     @Published var working = ""
     @Published var message = ""
     /// The confirmed items that were not deleted, each with its reason; shown until the next action.
@@ -67,10 +68,12 @@ final class CoverStore: ObservableObject {
             let checkup = try? DashboardActions.call(scan ? "checkup-scan" : "checkup-preview")
             let pending = try? DashboardActions.call("pending-preview")
             let plan = try? DashboardActions.call("plan-preview")
+            let memory = try? DashboardActions.call("memory-page")
             DispatchQueue.main.async {
                 if let checkup, checkup.status == "ok" { self.checkup = checkup }
                 if let pending, pending.status == "ok" { self.pending = pending }
                 if let plan, plan.status == "ok" { self.plan = plan }
+                if let memory, memory.status == "ok" { self.memory = memory }
                 self.loading = false
                 if scan { self.working = "" }
                 if self.again { self.again = false; self.refresh() }
@@ -152,6 +155,13 @@ final class CoverStore: ObservableObject {
         return String(title[title.index(after: a)..<b])
     }
     var pendingRows: [ResourceRow] { pending?.rows?.filter { $0.category == "待确认" } ?? [] }
+    func memoryRows(_ category: String) -> [ResourceRow] { memory?.rows?.filter { $0.category == category } ?? [] }
+    /// 「模拟器 5 台占 18 GB」 for the cover's memory line; the biggest user otherwise.
+    var memorySummary: String {
+        let sims = (memory?.rows ?? []).filter { $0.id.hasPrefix("sim:") }
+        if !sims.isEmpty { return "模拟器 \(sims.count) 台占 \(size(sims.reduce(0) { $0 + ($1.bytes ?? 0) }))" }
+        return memoryRows("正在用").first.map { "主要是 " + $0.title } ?? "点开看是谁在用"
+    }
     var target: ResourceRow? { plan?.rows?.first { $0.category == "目标" } }
     var targetGB: Double? { target.flatMap { Double($0.title.filter { $0.isNumber }) } }
     /// Measured against the number on the cover, so the two never disagree.
@@ -189,6 +199,7 @@ struct CoverPanel: View {
             case .space: SpacePage(model: model, store: store)
             case .switches: SwitchesPage(model: model, store: store)
             case .plan: PlanPage(model: model, store: store)
+            case .memory: MemoryPage(model: model, store: store)
             }
         }
         .frame(width: 300, height: 340)
@@ -203,9 +214,17 @@ private struct Cover: View {
         let s = model.snapshot
         let tight = s.freeLevel > 0
         let soft = tight ? Ink.warmSoft : Ink.navySoft
+        let shift: CGFloat = s.memoryLevel > 0 ? 24 : 0
         ZStack(alignment: .topLeading) {
             (tight ? Ink.warm : Ink.navy)
             VStack(alignment: .leading, spacing: 2) {
+                if s.memoryLevel > 0 {
+                    Button { store.page = .memory } label: {
+                        Text((s.memoryLevel == 2 ? "内存很紧 · " : "内存紧张 · ") + store.memorySummary + " ›")
+                            .font(.system(size: 11, weight: .medium)).foregroundColor(Color(hex: 0x7A2E16))
+                            .padding(.horizontal, 10).padding(.vertical, 3).background(Capsule().fill(Ink.cream))
+                    }.buttonStyle(.plain).padding(.bottom, 6)
+                }
                 Text("还剩").font(.system(size: 12)).foregroundColor(soft)
                 HStack(spacing: 0) {
                     if let free = s.free {
@@ -230,10 +249,10 @@ private struct Cover: View {
                     if model.work != nil && !Motion.reduced { SweepArc(lineWidth: 30) }
                 }.frame(width: 104, height: 104).padding(15).contentShape(Rectangle())
             }.buttonStyle(.plain).help("空间去哪了")
-                .frame(maxWidth: .infinity).padding(.top, 92)
+                .frame(maxWidth: .infinity).padding(.top, 92 + shift)
             if let work = model.work {
                 WorkLine(work: work, free: s.free, drive: store.drive, colour: Ink.cream)
-                    .frame(maxWidth: .infinity).padding(.top, 236)
+                    .frame(maxWidth: .infinity).padding(.top, 236 + shift)
             }
             VStack { Spacer(); HStack(alignment: .bottom) {
                 Button { store.page = .switches } label: {
@@ -290,6 +309,85 @@ private struct WorkLine: View {
                 }
             }
         }.font(.system(size: 11)).foregroundColor(colour).padding(.horizontal, 18)
+    }
+}
+
+/// Memory: what was handled, what can be closed (one click), and what stays because it is in use.
+private struct MemoryPage: View {
+    @ObservedObject var model: Monitor
+    @ObservedObject var store: CoverStore
+    @State private var selected: Set<String> = []
+
+    var body: some View {
+        let status = store.memoryRows("状态").first
+        let closable = store.memoryRows("可以关掉")
+        Page(model: model, store: store,
+             title: "内存 · " + (status.map { $0.title + ($0.reason.isEmpty ? "" : "，" + $0.reason) } ?? "正在读取…")) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    MemorySection(title: "自动处理了", rows: store.memoryRows("自动处理了"))
+                    if !closable.isEmpty {
+                        SectionTitle(text: "可以关掉（没被开发工具连着）")
+                        ForEach(closable) { row in
+                            Button { toggle(row.id) } label: { MemoryLine(row: row, on: selected.contains(row.id)) }.buttonStyle(.plain)
+                        }
+                        Text("两小时没连过的会在内存紧张时自动关，数据都在。")
+                            .font(.system(size: 10.5)).foregroundColor(Ink.muted).padding(.top, 6)
+                    }
+                    MemorySection(title: "正在用，不能动", rows: store.memoryRows("正在用"))
+                }
+            }
+            if !closable.isEmpty {
+                HStack {
+                    Text(selected.isEmpty ? "" : "已选 \(selected.count) 台").foregroundColor(Ink.muted)
+                    Spacer()
+                    Button("关掉所选") {
+                        store.perform("memory-close", ids: Array(selected), doing: "正在关…")
+                        selected = []
+                    }.buttonStyle(.plain).font(.system(size: 12, weight: .medium))
+                        .foregroundColor(selected.isEmpty ? Ink.muted : Ink.navy).disabled(selected.isEmpty || !store.working.isEmpty)
+                }.font(.system(size: 12)).padding(.top, 10)
+            }
+        }
+        .onAppear { store.refresh() }
+    }
+    private func toggle(_ id: String) { if selected.contains(id) { selected.remove(id) } else { selected.insert(id) } }
+}
+
+private struct SectionTitle: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.system(size: 11)).foregroundColor(Ink.muted).padding(.top, 10).padding(.bottom, 2)
+    }
+}
+
+private struct MemorySection: View {
+    let title: String
+    let rows: [ResourceRow]
+    var body: some View {
+        if !rows.isEmpty {
+            SectionTitle(text: title)
+            ForEach(rows) { row in MemoryLine(row: row, on: nil) }
+        }
+    }
+}
+
+/// One memory row: name, why, size; with a box only when it can be closed.
+private struct MemoryLine: View {
+    let row: ResourceRow
+    let on: Bool?
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            if let on { Checkbox(on: on).padding(.top, 2) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.title).font(.system(size: 12)).foregroundColor(Ink.text).lineLimit(1)
+                if !row.reason.isEmpty { Text(row.reason).font(.system(size: 11)).foregroundColor(Ink.muted).lineLimit(1) }
+            }
+            Spacer(minLength: 6)
+            if let bytes = row.bytes, bytes > 0 { Text(size(bytes)).font(.system(size: 11)).foregroundColor(Ink.muted) }
+        }
+        .padding(.vertical, 5).contentShape(Rectangle())
+        .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
     }
 }
 

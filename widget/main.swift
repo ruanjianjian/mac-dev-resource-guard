@@ -16,6 +16,10 @@ struct Snapshot {
     var critical: Double? = nil
     var slots = 0
     var guardStatus = "未连接内存守护"
+    /// When the memory monitor saw this pressure episode begin (nil when memory is fine).
+    var memorySince: Double? = nil
+    /// 0 fine, 1 tight (pressure 2), 2 very tight (pressure 4): shown in the menu bar and on the cover.
+    var memoryLevel: Int { memorySince == nil ? 0 : pressure == 4 ? 2 : pressure == 2 ? 1 : 0 }
     var pending = 0
     var notice: (count: Int, critical: Bool)? = nil
     var agentReason: String? = nil
@@ -94,6 +98,7 @@ func sample() -> Snapshot {
     if FileManager.default.fileExists(atPath: memory.appendingPathComponent("paused").path) { s.guardStatus = "自动回收已暂停" }
     else if let last = memoryState["last_ts"] as? Double, abs(Date().timeIntervalSince1970 - last) < 180 { s.guardStatus = "内存守护正在观测" }
     else if !memoryState.isEmpty { s.guardStatus = "内存守护暂无近期观测" }
+    s.memorySince = memoryState["incident_started"] as? Double
     let tiers = stateHome().appendingPathComponent(".local/state/dev-resource-guard")
     s.pending = pendingCount(readJSON(tiers.appendingPathComponent("pending.json")))
     let request = tiers.appendingPathComponent("notify-request.json")
@@ -153,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     let model = Monitor()
     let store = CoverStore()
     let watcher = WorkWatcher()
+    let alerts = AlertWatcher()
     private var watching: [AnyCancellable] = []
     /// The menu-bar number rolls towards the new value; the dot after it pulses while something runs.
     private var shownFree: Double?
@@ -215,6 +221,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         NSApp.mainMenu = mainMenu
         watcher.changed = { [weak self] work in self?.model.work = work }
         watcher.start()
+        alerts.deliver = { [weak self] title, body, done in self?.post(title: title, body: body, tab: "memory", done: done) }
+        alerts.start()
         // Either the background or the panel working lights the dot.
         watching = [model.$work.map { _ in () }.merge(with: store.$working.map { _ in () }).receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.setBusy() }]
@@ -255,6 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\(waiting)\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
         badge.isHidden = s.pending == 0
         watcher.read()
+        alerts.read()
         rollFree(to: s.free)
         badge.frame.origin.x = 14
     }
@@ -285,17 +294,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         let colour: NSColor = [NSColor.labelColor, .systemOrange, .systemRed][model.snapshot.freeLevel]
         let title = NSMutableAttributedString(string: shownFree.map { String(format: " %.0fG", $0) } ?? "",
                                               attributes: [.foregroundColor: colour, .font: font])
+        // Memory under pressure stays visible next to the number until it eases.
+        let memory = model.snapshot.memoryLevel
+        if memory > 0 {
+            title.append(NSAttributedString(string: memory == 2 ? " 内存很紧" : " 内存紧张",
+                                            attributes: [.font: font, .foregroundColor: memory == 2 ? NSColor.systemRed : NSColor.systemOrange]))
+        }
         if busy {
             title.append(NSAttributedString(string: " •", attributes: [.font: font,
                 .foregroundColor: NSColor.labelColor.withAlphaComponent(pulseOn ? 1 : 0.25)]))
         }
         status.button?.attributedTitle = title
     }
-    func post(title: String, body: String, tab: String) {
+    func post(title: String, body: String, tab: String, done: ((Bool) -> Void)? = nil) {
         let content = UNMutableNotificationContent()
         content.title = title; content.body = body
         content.userInfo = ["tab": tab]
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "\(tab)-\(Date().timeIntervalSince1970)", content: content, trigger: nil))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "\(tab)-\(Date().timeIntervalSince1970)", content: content, trigger: nil)) { error in
+            DispatchQueue.main.async { done?(error == nil) }
+        }
     }
     func notify(_ count: Int, critical: Bool) {
         let content = UNMutableNotificationContent()
@@ -308,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         let tab = response.notification.request.content.userInfo["tab"] as? String ?? "pending"
         DispatchQueue.main.async {
             if tab == "agent" { self.store.handOff() }
-            self.showPanel(page: tab == "pending" ? .pending : tab == "agent" ? .plan : .cover)
+            self.showPanel(page: tab == "pending" ? .pending : tab == "agent" ? .plan : tab == "memory" ? .memory : .cover)
         }
         done()
     }
@@ -373,7 +390,12 @@ func renderCover(_ tab: String, to out: String) throws {
     store.checkup = try DashboardActions.call("checkup-preview")
     store.pending = try DashboardActions.call("pending-preview")
     store.plan = try DashboardActions.call("plan-preview")
-    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-plan": .plan][tab] ?? .cover
+    store.memory = try DashboardActions.call("memory-page")
+    if let pressure = env["RENDER_PRESSURE"].flatMap(UInt32.init) {
+        model.snapshot.pressure = pressure; model.snapshot.memorySince = Date().timeIntervalSince1970 - 360
+    }
+    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-plan": .plan,
+                  "cover-memory": .memory][tab] ?? .cover
     if let message = store.checkup?.message, !message.isEmpty { print("体检 · " + message) }
     for row in store.checkup?.rows ?? [] where ["建议", "提醒", "外接盘"].contains(row.category) { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
     for row in store.pendingRows { print("待确认 · \(row.title) · \(row.reason)") }
@@ -410,6 +432,9 @@ if CommandLine.arguments.contains("--run-tick") {
     require(ShortcutChoice.firstAvailable { _ in false } == nil)
     require(ShortcutChoice.choices.allSatisfy { $0.label != "⌘S" })
     require(Motion.selfTest())
+    var memory = Snapshot(); memory.pressure = 2; require(memory.memoryLevel == 0)   // no episode recorded yet
+    memory.memorySince = 1; require(memory.memoryLevel == 1); memory.pressure = 4; require(memory.memoryLevel == 2)
+    memory.pressure = 1; require(memory.memoryLevel == 0)
     require(pendingCount(["items": [["state": "pending"], ["state": "ignored"], ["state": "pending", "unreachable": true], ["state": "failed"]]]) == 1)
     require(pendingCount([:]) == 0)
     var space = Snapshot(); space.free = 80; space.warning = 69; space.critical = 46; require(space.freeLevel == 0)

@@ -405,6 +405,29 @@ class LastAutoTest(TierFixture):
         self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 1 GB'.format(backend.when(now - 30, now)))
 
 
+class MemoryPageTest(TierFixture):
+    def test_the_page_lists_handled_closable_and_in_use(self):
+        sys.path.insert(0, str(ROOT / 'widget')); import backend
+        root = self.home / '.local/state/dev-memory'; root.mkdir(parents=True)
+        now = time.time()
+        (root / 'latest.json').write_text(json.dumps(dict(at=now, sample=dict(pressure=2), top_memory=[
+            dict(pid=7, name='xcodebuild', mem='6144M', policy='保留：现有任务/未托管资源'),
+            dict(pid=8, name='Runner', mem='600M', policy='保留：现有任务/未托管资源')])))
+        (root / 'state.json').write_text(json.dumps(dict(incident_started=now - 360, simulator_idle_since={'simulator:BBB': now - 3 * 3600})))
+        (root / 'last-cleanup.json').write_text(json.dumps(dict(at=now - 60, actions=[dict(kind='gradle', rss_kib_estimate=1 << 20, result=dict(stopped=True))])))
+        (self.home / '.fixture-simulators.json').write_text(json.dumps([
+            dict(id='AAA', name='Busy Phone', rss_kib=5 << 20, attached=['xcodebuild'], reason='simulator_in_use', pids=[8]),
+            dict(id='BBB', name='Idle Phone', rss_kib=2 << 20, attached=[], reason='simulator_not_attached', pids=[])]))
+        (self.home / '.resource-dashboard-fixture').touch()
+        rows = backend.Adapter(self.home).run('memory-page')['rows']
+        got = [(r['category'], r['title'], r['reason']) for r in rows]
+        self.assertEqual(got, [('状态', '紧张', '已持续 6 分钟'), ('自动处理了', '停掉闲置的 Gradle 编译后台', ''),
+                               ('正在用', 'Busy Phone 模拟器', 'xcodebuild 正连着'), ('可以关掉', 'Idle Phone', '3 小时没被开发工具连过'),
+                               ('正在用', 'xcodebuild', '正在用的程序，不动')], 'the app inside a simulator is not counted twice')
+        closed = backend.Adapter(self.home).run('memory-close', ids='sim:BBB')
+        self.assertEqual(closed['rows'][0]['outcome'], '没关', 'test homes never touch real simulators')
+
+
 class WiderCleanupTest(TierFixture):
     def file(self, relative, size, days):
         path = self.home / relative; path.parent.mkdir(parents=True, exist_ok=True)
