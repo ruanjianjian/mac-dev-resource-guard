@@ -805,8 +805,11 @@ def enable_recommended(home, launchctl=toolcaches.default_launchctl, probe=auto_
 
 def update_now(home, fetch=None, run=subprocess.run):
     """`resource-guard-service update`: look now and, if a newer release exists, install it here in the foreground."""
-    release = updater.latest(fetch) if fetch else updater.latest()
     current = updater.installed(home)
+    try:
+        release = updater.latest(fetch) if fetch else updater.latest()
+    except (OSError, ValueError, KeyError) as error:   # offline, rate-limited, no release yet
+        return {'status': 'check-failed', 'version': current, 'message': '查不到新版本（没联网，或 GitHub 暂时连不上），仍是 {}；稍后再试。{}'.format(current, error)}
     if updater.version_tuple(release['version']) <= updater.version_tuple(current):
         return {'status': 'current', 'version': current, 'message': '已是最新：{}'.format(current)}
     print('正在更新到 {}：{}'.format(release['version'], release['summary'] or release['title']), flush=True)

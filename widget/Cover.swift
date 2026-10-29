@@ -315,9 +315,12 @@ private struct ManageCard: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(hover ? 0.34 : 0.18), lineWidth: 0.8))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onHover { inside in
+            guard inside != hover else { return }
             hover = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
+        // Pressing it opens 「帮你管着」 and removes the card under the pointer, with no hover-out to pop the hand.
+        .onDisappear { if hover { hover = false; NSCursor.pop() } }
         .animation(Motion.reduced ? nil : .easeOut(duration: 0.15), value: hover)
     }
 }

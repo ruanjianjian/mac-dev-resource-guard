@@ -88,15 +88,14 @@ def sign(app, home):
         sha1, keychain = identity(home)
         # Before macOS 27, codesign finds an identity only in a keychain on the search list (--keychain alone gives
         # "no identity found"), so ours is listed just while signing and the user's list is put back right after.
-        listed = _search_list()
-        added = str(keychain) not in listed
+        # A run killed in between may have left ours listed; the list put back never has it.
+        ours = os.path.realpath(keychain)
+        listed = [entry for entry in _search_list() if os.path.realpath(entry) != ours]
         try:
-            if added:
-                _run('security', 'list-keychains', '-d', 'user', '-s', str(keychain), *listed)
+            _run('security', 'list-keychains', '-d', 'user', '-s', str(keychain), *listed)
             _run('codesign', '--force', '--sign', sha1, '--keychain', str(keychain), str(app))
         finally:
-            if added:
-                _run('security', 'list-keychains', '-d', 'user', '-s', *listed)
+            _run('security', 'list-keychains', '-d', 'user', '-s', *listed)
         _run('codesign', '--verify', '--strict', str(app))
         return 'local'
     except (OSError, IndexError, RuntimeError, subprocess.SubprocessError) as error:
