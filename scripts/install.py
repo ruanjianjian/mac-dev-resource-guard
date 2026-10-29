@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from service import activate, ask_consent, enable_recommended, install_skill, operation_lock, tiers_config
+from service import activate, ask_consent, enable_recommended, install_skill, operation_lock, stop_menu_app, tiers_config
 import discover
 
 root = Path(__file__).resolve().parents[1]
@@ -31,7 +31,9 @@ with operation_lock(home, 'periodic-storage'):
     # Only stop our menu process; detached builds and maintenance are left running.
     if app.exists():
         executable = str(app/'Contents/MacOS/ResourceDashboard')
-        subprocess.run(['pkill', '-TERM', '-f', '^' + __import__('re').escape(executable) + '$'])
+        left = stop_menu_app(executable)
+        if left:
+            raise SystemExit('旧的资源看板（PID {}）没有退出，已保留原 App；请退出它后重试'.format(left))
         backup = home / '.local/state/dev-resource-guard/app-backups' / str(time.time_ns())
         backup.parent.mkdir(parents=True, exist_ok=True)
         os.rename(app, backup)
