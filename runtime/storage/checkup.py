@@ -97,7 +97,7 @@ def _scan(home, cfg, simulators_bytes, now, volumes, info, is_mount, foreground)
     internal_tasks = [t for t in task_list if not t['linked']]
     categories = [
         dict(id='tasks', title='任务目录', bytes=_sum(t['bytes'] for t in internal_tasks), where='内置盘',
-             handling='只扫描；收尾和删除先问你',
+             handling='开了外接盘时，空间不够才把闲置 {} 天的整个挪过去；收尾和删除先问你'.format(cfg['auto_idle_days']),
              note='{} 个在内置盘，{} 个已在外接盘'.format(len(internal_tasks), len(task_list) - len(internal_tasks))),
         dict(id='simulators', title='模拟器', bytes=simulators_bytes, where='内置盘', handling='先问你',
              note='模拟器不能放外接盘'),
@@ -134,6 +134,7 @@ def estimate(report, cfg, pending_bytes=0):
     freed = pending_bytes
     if drive:
         freed += sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local')
+        freed += sum(t['bytes'] or 0 for t in report['tasks'] if t['idle'] and not t['linked'])
     return freed
 
 

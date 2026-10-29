@@ -60,13 +60,13 @@ class PlanTest(TierFixture):
         result = space_plan.build(self.home, cfg, self.settings, report, pending, 20 * GIB, True,
                                   sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)
         sections = {s['id']: s for s in result['sections']}
-        # The opted-in npm move plus the busy task's three build copies to the drive; whole task folders stay put.
-        self.assertEqual(sections['auto']['bytes'], 2 * GIB + 3 * 8 * GIB)
+        # The npm move, the busy task's three build copies, and the 12 GB idle task moved whole (nothing deleted).
+        self.assertEqual(sections['auto']['bytes'], 2 * GIB + 3 * 8 * GIB + 12 * GIB)
         self.assertEqual(sections['ask']['bytes'], GIB)                  # ignored items do not count
         self.assertEqual(sections['judge']['bytes'], 0)                  # moved copies no longer cost the internal disk
         self.assertEqual(result['gap_bytes'], 30 * GIB)
-        self.assertEqual(result['reach_bytes'], 47 * GIB)
-        self.assertEqual(result['shortfall_bytes'], 3 * GIB)
+        self.assertEqual(result['reach_bytes'], 59 * GIB)
+        self.assertEqual(result['shortfall_bytes'], 0)
         # Without the drive the old copies are still offered for a decision.
         result = space_plan.build(self.home, cfg, self.settings, report, pending, 20 * GIB, False,
                                   sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)

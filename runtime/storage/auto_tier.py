@@ -1,4 +1,8 @@
-"""Safe maintenance receipts and explicitly opted-in cache relocation helpers."""
+"""The safe tier: nothing here deletes anything.
+
+An interrupted move is finished or undone first. With the external drive switched on and the internal
+disk below the warning line, idle task folders move to the drive behind a link, oldest first, until the
+target line. The 7-day cache cleanup lives in service.clean_caches; nothing is pruned without a drive."""
 import json
 import os
 from pathlib import Path
@@ -8,7 +12,8 @@ import subprocess
 import sys
 import time
 
-from storage import GIB, atomic_json
+from storage import GIB, Activity, StorageManager, atomic_json
+import tasks as T
 
 RECEIPT, LOG, MOVE_STATE = 'auto-tier.json', 'auto-tier-log.jsonl', 'auto-tier-move.json'
 LOG_KEEP = 2000
@@ -122,8 +127,11 @@ def recover(home):
     marker = state_root(home) / MOVE_STATE
     if not marker.is_file():
         return None
-    s = json.loads(marker.read_text())
-    src, dest, tmp = Path(s['src']), Path(s['dest']), Path(s['tmp'])
+    try:
+        s = json.loads(marker.read_text())
+        src, dest, tmp = Path(s['src']), Path(s['dest']), Path(s['tmp'])
+    except (ValueError, KeyError, TypeError):
+        return '上次搬迁记录看不懂，保留现场：' + str(marker)
     old = src.with_name('.guard-old-' + src.name)
     if src.is_symlink():
         outcome = '上次搬迁已完成，清理旧副本'
@@ -181,20 +189,92 @@ def append_log(home, receipt):
 
 
 def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_fn=None, now=None, tool_run=subprocess.run):
-    """Record the safe tier; service.clean_caches owns all automatic deletion.
-
-    Do not resume legacy moves here: a task left in a partial move requires
-    explicit inspection, even when its old configuration enabled automation.
-    """
     home = Path(home)
     now = time.time() if now is None else now
+    collect = activity_factory or (lambda: Activity.collect(settings.lease_root))
     free = free_fn or (lambda: shutil.disk_usage(str(settings.volume)).free)
-    value = round(free() / GIB, 2)
     receipt = dict(schema=1, at=now, status='managed-caches' if cfg['auto_enabled'] else 'disabled',
-                   free_before=value, free_after=value, actions=[], kept=[], config_error=None,
-                   external_missing=[], reason='每 12 小时仅清理至少 7 天未用的编译中间缓存；保留任务、模拟器和全局工具缓存')
-    if (state_root(home) / MOVE_STATE).exists():
-        receipt['kept'].append(dict(path=str(state_root(home) / MOVE_STATE),
-                                    reason='旧版未完成的搬迁记录已保留，需人工核对，不自动恢复或删除'))
+                   free_before=round(free() / GIB, 2), free_after=None, target_free_gib=settings.target_free_gib,
+                   warning_free_gib=settings.warning_free_gib, config_error=None, recovered=None,
+                   external_missing=[], external_denied=[], actions=[], kept=[],
+                   reason='只清 7 天没用的编译中间缓存；开了外接盘且空间不够时，把闲置任务整个挪过去（不删）；任务和模拟器不自动删')
+    if cfg['auto_enabled']:
+        receipt['recovered'] = recover(home)
+        marker = state_root(home) / MOVE_STATE
+        if marker.exists():
+            receipt['kept'].append(dict(path=str(marker), reason='上次搬迁状态无法判断，保留现场，需人工核对；核对前不再搬迁'))
+        elif free() < settings.warning_free_gib * GIB:
+            try:
+                move_idle_tasks(home, cfg, settings, receipt, collect, free, now)
+            finally:
+                working(home)
+    receipt['free_after'] = round(free() / GIB, 2)
     write_receipt(home, receipt)
     return receipt
+
+
+def unsaved(task, cfg):
+    """Work that exists only in this folder: uncommitted or unpushed changes in any of its repositories.
+    Such a task stays on the internal disk, so a lost or broken drive never takes unsaved work with it."""
+    for repo in T.repositories(task.real, T.skip_names(cfg)):
+        change = T.git_changes(repo)
+        if change:
+            return '{}：{}，只在这台电脑上，不挪'.format(repo.name, change)
+    return None
+
+
+def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
+    """Idle, fully pushed task folders whose task root has a drive go there, oldest first, until the target line."""
+    pins, pin_errors = StorageManager(settings)._pins(now)
+    activity = collect()
+    candidates = []
+    for task in T.discover(cfg):
+        if task.linked or task.external is None:
+            continue    # already on the drive, or this task root has no drive switched on
+        reasons, latest = T.idle_check(task, activity, pins, cfg['auto_idle_days'], cfg, now)
+        reasons += pin_errors
+        if not reasons and unsaved(task, cfg):
+            reasons.append(unsaved(task, cfg))
+        if reasons:
+            receipt['kept'].append(dict(path=str(task.path), reason='；'.join(reasons)))
+        else:
+            candidates.append((latest, task))
+    current = free()
+    for latest, task in sorted(candidates, key=lambda c: c[0]):
+        if current >= settings.target_free_gib * GIB:
+            break
+        reasons, _ = T.idle_check(task, collect(), pins, cfg['auto_idle_days'], cfg, now)
+        if not reasons and unsaved(task, cfg):
+            reasons.append(unsaved(task, cfg))
+        if reasons:
+            receipt['kept'].append(dict(path=str(task.path), reason='执行前复核：' + '；'.join(reasons)))
+            continue
+        external = task.external
+        if not volume_ready(external):
+            if str(external) not in receipt['external_missing']:
+                receipt['external_missing'].append(str(external))
+            continue
+        denied = external_access(external)
+        if denied:
+            if not any(d['path'] == str(external) for d in receipt['external_denied']):
+                receipt['external_denied'].append(dict(path=str(external), reason=denied))
+            continue
+        bytes_ = T.size(task.real) or 0
+        probe = Path(external)
+        while not probe.exists():
+            probe = probe.parent
+        if shutil.disk_usage(str(probe)).free < bytes_ * 1.1 + GIB:
+            receipt['kept'].append(dict(path=str(task.path), reason='外接盘空间不够'))
+            continue
+        idle_days = '闲置 {:.1f} 天'.format((now - latest) / T.DAY)
+        try:
+            working(home, 'move', task.path.name, bytes_, receipt['free_before'])
+            dest = move(home, task)
+            receipt['actions'].append(dict(kind='move', path=str(task.path), dest=str(dest), bytes=bytes_, result='done', reason=idle_days))
+        except Aborted as error:
+            receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='aborted', reason=str(error)))
+        except (OSError, subprocess.SubprocessError) as error:
+            receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='failed', reason=str(error)))
+        current = free()
+    if any(a['result'] == 'failed' for a in receipt['actions']):
+        receipt['status'] = 'partial'

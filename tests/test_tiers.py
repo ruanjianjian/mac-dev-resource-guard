@@ -203,7 +203,7 @@ class AutoTierTests(TierFixture):
         self.task('old', 6)
         self.run_tier(self.cfg())
         state = auto_tier.state_root(self.home)
-        self.assertEqual(json.loads((state / 'auto-tier.json').read_text())['actions'], [])
+        self.assertEqual([(a['kind'], a['result']) for a in json.loads((state / 'auto-tier.json').read_text())['actions']], [('move', 'done')])
         self.assertEqual(len((state / 'auto-tier-log.jsonl').read_text().splitlines()), 1)
 
 
