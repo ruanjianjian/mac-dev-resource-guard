@@ -279,6 +279,14 @@ def fixture_launchctl(home):
     return launchctl
 
 
+def agent_app(preferred):
+    """The agent App to open: the one the agent recorded at install time, else the first one found."""
+    apps = [('claude', p) for p in ('/Applications/Claude.app', str(Path.home() / 'Applications/Claude.app'))] + \
+           [('codex', p) for p in ('/Applications/ChatGPT.app', '/Applications/Codex.app', str(Path.home() / 'Applications/Codex.app'))]
+    found = [a for a in apps if Path(a[1]).is_dir()]
+    return next((a for a in found if a[0] == preferred), found[0] if found else None)
+
+
 def app_version():
     """The installed app's version; 'dev' when run from the source tree."""
     info = Path(__file__).resolve().parent.parent / 'Info.plist'
@@ -561,8 +569,49 @@ class Adapter:
         return dict(status='ok', message=message, rows=rows, eligibleBytes=freed,
                     created=report.get('at'))
 
+    def plan(self, verb, value):
+        """space-target-plan and agent-handoff: the user's target, the three-part plan, handing work to the agent."""
+        _, auto_tier, tiers_config = tier_modules()
+        sys.path.insert(0, str(engine_root() / 'scripts'))
+        import service, plan as space_plan
+        from portable_config import configure
+        settings = configure(self.home)
+        owned = [settings.cache_roots[0], settings.state_root, self.state.parent]
+        cfg = tiers_config.load(self.home, owned=owned)
+        if verb == 'handoff':
+            app = agent_app(cfg['agent_app'])
+            name = {'claude': 'Claude', 'codex': 'ChatGPT（Codex）'}.get(app[0], '你的 agent') if app else '你的 agent'
+            return dict(status='ok' if app else 'missing', message=space_plan.AGENT_PROMPT,
+                        rows=[dict(id='app', title=name, detail=app[1] if app else '', category='agent', bytes=None,
+                                   eligible=bool(app), reason='', command=None, outcome=None)])
+        if verb == 'target':
+            service.set_target(self.home, value)
+            settings = configure(self.home)
+        plan = service.current_plan(self.home, cfg, settings)
+        if plan is None:
+            return dict(status='ok', message='', rows=[])
+        rows = [dict(id='target', title='目标 {:.0f} GB'.format(plan['target_gib']), category='目标', bytes=plan['gap_bytes'],
+                     eligible=False, command=None, detail='', outcome='还差' if plan['gap_bytes'] else '已达到',
+                     reason='全做完能到 {}'.format(gb(plan['reach_bytes'])))]
+        for section in plan['sections']:
+            rows.append(dict(id=section['id'], title=section['title'], category='计划', bytes=section['bytes'], eligible=False,
+                             command=None, detail='', outcome=None, reason='、'.join(i['title'] for i in section['items'][:2])))
+            for index, entry in enumerate(section['items']):
+                rows.append(dict(id='{}:{}'.format(section['id'], index), title=entry['title'], category=section['id'],
+                                 bytes=entry['bytes'] or None, eligible=False, command=None, detail=entry.get('path') or '',
+                                 outcome=None, reason=entry['reason']))
+        for index, entry in enumerate(plan['suggestions']):
+            rows.append(dict(id='suggest:{}'.format(index), title=entry['title'], category='建议', bytes=entry['bytes'] or None,
+                             eligible=False, command=None, detail='', outcome=None, reason=entry['reason']))
+        message = '全做完能到 {}'.format(gb(plan['reach_bytes']))
+        if plan['shortfall_bytes']:
+            message += '，离目标还差 {}'.format(gb(plan['shortfall_bytes']))
+        return dict(status='ok', message=message, rows=rows, eligibleBytes=plan['reach_bytes'], created=plan['at'])
+
     def run(self, action, token=None, path=None, ids=None):
         family, verb = action.split('-', 1)
+        if family == 'plan':
+            return self.plan(verb, path)
         if family == 'checkup' and verb in ('preview', 'scan', 'firstrun', 'status'):
             # Read-only: a long background checkup must not make the panel's buttons answer "busy".
             return self.checkup(verb, [], path)
@@ -627,7 +676,7 @@ def main():
                                           'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',
                                           'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview',
                                           'checkup-preview', 'checkup-scan', 'checkup-apply', 'checkup-off', 'checkup-firstrun',
-                                          'checkup-status'])
+                                          'checkup-status', 'plan-preview', 'plan-target', 'plan-handoff'])
     parser.add_argument('--token')
     parser.add_argument('--path')
     parser.add_argument('--ids', help='Comma-separated pending ids the user ticked')

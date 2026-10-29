@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from service import activate
+from service import activate, install_skill
 
 root = Path(__file__).resolve().parents[1]
 home = Path.home()
@@ -37,5 +37,8 @@ except BaseException:
     raise
 # The storage job runs through the installed app, so activate only once it is in place.
 result = activate(home)
+# The companion skill travels with the app so the user's agent always matches the installed version.
+for note in install_skill(home, root):
+    print(note)
 subprocess.run(['open', str(app)], check=True)
 print('安装完成：安全自动维护已启用，面板不会自己弹出。稍后会收到「体检完成」通知，点开即可一键开启共享构建缓存、自动清理和外接盘。')

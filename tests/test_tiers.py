@@ -28,7 +28,10 @@ def age(path, days):
     when = time.time() - days * DAY
     for folder, dirs, files in os.walk(path):
         for name in dirs + files:
-            os.utime(os.path.join(folder, name), (when, when), follow_symlinks=False)
+            try:
+                os.utime(os.path.join(folder, name), (when, when), follow_symlinks=False)
+            except FileNotFoundError:
+                pass   # git may drop a lock or temp file from a background job while we walk
     os.utime(path, (when, when))
 
 

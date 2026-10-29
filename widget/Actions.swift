@@ -52,7 +52,7 @@ final class DashboardActions: ObservableObject {
         var args = [script.path, action]
         if let token { args += ["--token", token] }
         if let path { args += ["--path", path] }
-        if let ids { args += ["--ids", ids.joined(separator: ",")] }
+        if let ids, !ids.isEmpty { args += ["--ids", ids.joined(separator: ",")] }
         // An explicit, marked disposable home is only for UI integration tests.
         if let home = try testHomeArgument(CommandLine.arguments) {
             guard FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {

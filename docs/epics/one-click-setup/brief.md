@@ -30,6 +30,8 @@
 | [external-drive](specs/external-drive.md) | 插着外接盘时，缓存全放上去，闲置任务目录也挪过去；外接盘被拔掉后，用到它的构建直接报「缓存所在的盘未连接」，不在内置盘另建缓存，同时马上提醒用户 | 已实现 |
 | [space-watch](specs/space-watch.md) | 菜单栏直接显示剩余空间，按颜色提醒；监控和清理扩大到 Xcode 全家、各工具缓存、废纸篓和下载文件夹里的大安装包，Docker 只显示大小并提醒 | 已实现 |
 | [menubar-cover](specs/menubar-cover.md) | 点菜单栏图标弹出一张书封面式的小面板：还剩多少、在帮你管什么、有几项要你确认；点进去是空间去哪了、帮你管着、等你确认三张素净的页面 | 已实现 |
+| [space-target-plan](specs/space-target-plan.md) | 用户设一个空间目标，工具按目标出三段式计划：自动会做的、等你点头的、需要判断的，全做完能到多少 | 已实现 |
+| [agent-handoff](specs/agent-handoff.md) | skill 随安装一起到位；agent 装完问目标、出计划、处理需要取舍的部分；意外时看板叫起 agent；通用清理借力 Mole（[横评](tool-eval.md)） | 已实现 |
 | duplicate-merge | 后台把闲置任务构建产物里内容相同的文件合并，只占一份空间 | 第二期，未开 spec |
 
 全景图：[overview.html](overview.html)（给人看，浏览器打开） · 源：[overview.workflow.json](overview.workflow.json)（给 AI 读、可 diff）
@@ -80,3 +82,4 @@
 | CH-01 | 2026-10-28 | 新建 epic，第一期包括：一条命令安装、体检页一次确认、自动发现任务目录和外接盘、接管工具缓存并打开 Xcode 编译缓存、外接盘放缓存和闲置任务、菜单栏显示剩余空间、扩大监控范围。重复文件合并放第二期（RAW-01～12） | [需求变更] |
 | CH-02 | 2026-10-28 | 决策卡 E02 选了「拔盘后自动切回内置盘」，与 1.4 项目入口 AC-05「盘没连接就报错、不在内置盘另建」矛盾。用户拍板统一按 AC-05：拔盘后只报错，并提醒用户（RAW-09、RAW-11） | [需求变更] |
 | CH-03 | 2026-10-28 | 界面改版：看板首页改为菜单栏封面，新增 feature menubar-cover（RAW-15～19） | [需求变更] |
+| CH-04 | 2026-10-28 | 新需求：空间目标与计划、交给本地 agent（含借力 Mole）（RAW-22～30） | [需求变更] |
