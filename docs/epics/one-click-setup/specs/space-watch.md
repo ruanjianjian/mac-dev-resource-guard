@@ -18,7 +18,7 @@
 
 | ID | 级 | Given | When | Then | 落点 | 状态 | 证据 |
 |---|---|---|---|---|---|---|---|
-| AC-01 | [核] | App 在菜单栏 | 平时 | 图标旁显示内置盘剩余空间（如「21G」）；低于提醒线变橙色，低于危险线变红色；每 15 秒更新 | mac原生 | ⚠️ | auto: App 自检 free-space colour levels（80/50/21 GB 对应 正常/橙/红）；本机已装 1.5，菜单栏实物未截图（需要接管屏幕） |
+| AC-01 | [核] | App 在菜单栏 | 平时 | 图标旁显示内置盘剩余空间（如「21G」）；低于提醒线变橙色，低于危险线变红色；每 15 秒更新 | mac原生 | ✅ | auto: App 自检 free-space colour levels（80/50/21 GB 对应 正常/橙/红）；本机已装 1.5，菜单栏实物未截图（需要接管屏幕）；ui: 真实菜单栏截图 screen-1029/1-menubar-full.jpg、2-menubar-zoom.jpg（2026-10-29 23:25，剩余 42 GB、低于 50 GB 提醒线，数字为橙色；下一张变成 41G） |
 | AC-02 | [核] | 下载文件夹里有 7 天没动、超过 200 MB 的安装包（dmg、pkg、xip、iso），且没有挂载、没在用；用户打开过看板，允许过读取下载文件夹 | 后台检查 | 进「待确认」，写明大小和「会失去：安装包文件，要用时得重新下载」；勾选后才删 | CLI后端、mac原生 | ✅ | auto: test_old_big_installers_are_proposed_new_small_or_mounted_are_not、test_downloads_is_untouched_in_the_background_until_read_from_the_panel、test_confirmed_installer_is_deleted_and_trash_goes_through_finder |
 | AC-03 | [核] | 废纸篓超过 1 GB 且能读到大小 | 后台检查 | 进「待确认」，项目叫「清空废纸篓」；读不到大小时只在体检页说明原因，不进待确认 | CLI后端 | ✅ | auto: test_trash_only_when_readable_and_big；实测：本机废纸篓读不到，体检页写明原因、未进待确认 |
 | AC-04 | [核] | Xcode 的设备支持文件 30 天没用、归档是 90 天前的 | 后台检查 | 进「待确认」；归档写明会失去这个版本的安装包和查崩溃用的符号文件 | CLI后端 | ✅ | auto: test_device_support_and_archives_by_age |
