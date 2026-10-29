@@ -61,6 +61,15 @@ class LocalSigningTest(unittest.TestCase):
         listed = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True).stdout
         self.assertNotIn(str(base), listed, "the user's keychain list stays as it was")
 
+    def test_a_keychain_left_listed_by_an_interrupted_run_is_taken_off(self):
+        local_signing.sign(self.build('a', '/bin/ls'), self.home)
+        before = local_signing._search_list()
+        self.addCleanup(lambda: subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', *before], capture_output=True))
+        keychain = local_signing.folder(self.home) / 'signing.keychain-db'
+        subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', str(keychain), *before], check=True)
+        self.assertEqual(local_signing.sign(self.build('b', '/bin/cat'), self.home), 'local')
+        self.assertEqual(local_signing._search_list(), before)
+
     def test_a_half_made_identity_is_made_again(self):
         app = self.build('a', '/bin/ls')
         local_signing.sign(app, self.home)

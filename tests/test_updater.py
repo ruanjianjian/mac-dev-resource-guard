@@ -42,7 +42,8 @@ class Spawn:
         return type('Process', (), {'pid': 999999})()
 
 
-class UpdaterTest(unittest.TestCase):
+class InstalledHome(unittest.TestCase):
+    """A throwaway home with 资源看板 1.7.7 installed."""
     def setUp(self):
         self.home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.home, True)
@@ -53,6 +54,8 @@ class UpdaterTest(unittest.TestCase):
         info.parent.mkdir(parents=True, exist_ok=True)
         info.write_bytes(plistlib.dumps({'CFBundleShortVersionString': version}))
 
+
+class UpdaterTest(InstalledHome):
     def tick(self, now=NOW, enabled=True, release=None, spawn=None):
         return updater.tick(self.home, enabled, now=now, fetch=release or Release(), spawn=spawn or Spawn())
 
@@ -158,6 +161,35 @@ class UpdateSwitchTest(unittest.TestCase):
         with patch.object(updater, 'tick', side_effect=OSError('offline')):
             self.assertEqual(service.auto_update(self.home, NOW), 'error: offline')
 
+
+
+class UpdateNowTest(InstalledHome):
+    """`resource-guard-service update`, what an agent runs when the user says 「更新资源看板」."""
+
+    def test_already_latest_installs_nothing(self):
+        ran = []
+        result = service.update_now(self.home, fetch=Release(tag='v1.7.7'), run=ran.append)
+        self.assertEqual((result['status'], result['message'], ran), ('current', '已是最新：1.7.7', []))
+
+    def test_a_newer_release_is_installed_here_and_checked(self):
+        ran = []
+        def run(args):
+            ran.append(args)
+            self.installed('1.7.8')
+        result = service.update_now(self.home, fetch=Release(), run=run)
+        self.assertEqual(ran, [updater.command('v1.7.8')])
+        self.assertEqual((result['status'], result['message']), ('installed', '已更新到 1.7.8'))
+        self.assertEqual(service.update_now(self.home, fetch=Release(), run=lambda args: None)['status'], 'current')
+
+    def test_an_install_that_stops_short_says_so(self):
+        result = service.update_now(self.home, fetch=Release(), run=lambda args: None)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('仍是 1.7.7', result['message'])
+
+    def test_offline_is_a_plain_answer_not_a_crash(self):
+        result = service.update_now(self.home, fetch=Release(fail=OSError('nodename nor servname provided')), run=self.fail)
+        self.assertEqual((result['status'], result['version']), ('check-failed', '1.7.7'))
+        self.assertIn('没联网', result['message'])
 
 if __name__ == '__main__':
     unittest.main()
