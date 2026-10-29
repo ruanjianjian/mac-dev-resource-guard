@@ -18,6 +18,9 @@ class Aborted(Exception):
     """The move gave up safely; the original directory is untouched."""
 
 
+WORKING = 'working.json'
+
+
 def state_root(home):
     return Path(home) / '.local/state/dev-resource-guard'
 
@@ -147,6 +150,17 @@ def default_simctl(arguments):
     if out.returncode:
         raise RuntimeError((out.stderr or out.stdout).strip() or 'simctl failed')
     return out.stdout
+
+
+def working(home, kind=None, title='', bytes_=0, free_before=None):
+    """What the background is doing right now (move / prune / clean), read by the menu-bar app to animate;
+    called with no kind when it stops."""
+    path = state_root(home) / WORKING
+    if kind is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(path, dict(at=time.time(), kind=kind, title=title, bytes=bytes_, free_before_gib=free_before))
 
 
 def write_receipt(home, receipt):

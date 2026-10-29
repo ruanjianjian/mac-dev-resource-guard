@@ -46,16 +46,6 @@ enum PanelPlacement: Equatable {
         return .anchor(CGPoint(x: x, y: target.visible.maxY))
     }
 
-    /// The full window opens on the pointer's display: it keeps its spot when already there, otherwise it is
-    /// centred there (also when it was saved on a display that is no longer connected). nil means leave it.
-    static func window(_ frame: CGRect, screens: [PanelScreen], pointer: CGPoint) -> CGRect? {
-        guard let target = screen(at: pointer, in: screens) else { return nil }
-        if target.visible.contains(CGPoint(x: frame.midX, y: frame.midY)) { return nil }
-        let size = CGSize(width: min(frame.width, target.visible.width), height: min(frame.height, target.visible.height))
-        return CGRect(x: (target.visible.midX - size.width / 2).rounded(), y: (target.visible.midY - size.height / 2).rounded(),
-                      width: size.width, height: size.height)
-    }
-
     private static func distance(_ point: CGPoint, _ rect: CGRect) -> CGFloat {
         let dx = max(rect.minX - point.x, 0, point.x - rect.maxX), dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
         return dx * dx + dy * dy
@@ -87,15 +77,7 @@ enum PanelPlacement: Equatable {
             (choose(screens: [laptop], pointer: CGPoint(x: 700, y: 500), icon: CGRect(x: 690, y: 950, width: 30, height: 32), width: 300),
              .anchor(CGPoint(x: 1354, y: 944))),
         ]
-        let windows: [(CGRect?, CGRect?)] = [
-            (window(CGRect(x: 200, y: 200, width: 620, height: 700), screens: [main, right], pointer: CGPoint(x: 900, y: 500)), nil),
-            (window(CGRect(x: 200, y: 200, width: 620, height: 700), screens: [main, right], pointer: CGPoint(x: 3000, y: 700)),
-             CGRect(x: 2890, y: 358, width: 620, height: 700)),
-            // Saved on a display that has since been unplugged.
-            (window(CGRect(x: 5000, y: 5000, width: 620, height: 700), screens: [main], pointer: CGPoint(x: 900, y: 500)),
-             CGRect(x: 650, y: 220, width: 620, height: 700)),
-        ]
-        return cases.allSatisfy { $0.0 == $0.1 } && windows.allSatisfy { $0.0 == $0.1 }
+        return cases.allSatisfy { $0.0 == $0.1 }
             && screen(at: CGPoint(x: 1920, y: 10), in: [main, right])?.frame == right.frame
     }
 }

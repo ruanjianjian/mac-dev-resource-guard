@@ -53,6 +53,8 @@ final class CoverStore: ObservableObject {
     @Published var message = ""
     /// The confirmed items that were not deleted, each with its reason; shown until the next action.
     @Published var skipped: [ResourceRow] = []
+    /// Ids just deleted, in order: the list ticks them and folds them away one by one, then reloads.
+    @Published var cleared: [String] = []
     private var loading = false
     private var again = false
 
@@ -131,8 +133,12 @@ final class CoverStore: ObservableObject {
                 else if let reply, reply.status != "ok" { self.message = reply.message }
                 else if done.isEmpty { self.message = "这次没有删掉任何一项，原因见上。" }
                 else { self.message = "已删除 \(done.count) 项" + (freed > 0 ? "，腾出约 \(size(freed))" : "") + (self.skipped.isEmpty ? "。" : "；\(self.skipped.count) 项没删，原因见上。") }
-                self.refresh()
-                (NSApp.delegate as? AppDelegate)?.model.refresh()
+                self.cleared = done.map(\.id)
+                let fold = Motion.reduced ? 0 : Double(done.count) * 0.15 + 0.6
+                DispatchQueue.main.asyncAfter(deadline: .now() + fold) {
+                    self.refresh()
+                    (NSApp.delegate as? AppDelegate)?.model.refresh()
+                }
             }
         }
     }
@@ -201,7 +207,12 @@ private struct Cover: View {
             (tight ? Ink.warm : Ink.navy)
             VStack(alignment: .leading, spacing: 2) {
                 Text("还剩").font(.system(size: 12)).foregroundColor(soft)
-                Text("\(number0(s.free)) GB").font(.system(size: 22, weight: .medium)).foregroundColor(.white)
+                HStack(spacing: 0) {
+                    if let free = s.free {
+                        RollingNumber(value: free).animation(Motion.reduced ? nil : .easeOut(duration: 0.6), value: free)
+                    } else { Text("—") }
+                    Text(" GB")
+                }.font(.system(size: 22, weight: .medium)).foregroundColor(.white)
                 if let target = store.target {
                     // The user's target and how far off it is (space-target-plan AC-03); tap for the plan.
                     let gap = store.gapGB(s.free)
@@ -215,9 +226,15 @@ private struct Cover: View {
                 ZStack {
                     Circle().stroke(tight ? Ink.warmTrack : Ink.navyTrack, lineWidth: 30)
                     Circle().trim(from: 0, to: s.usedFraction).stroke(Ink.cream, lineWidth: 30).rotationEffect(.degrees(-90))
+                        .animation(Motion.reduced ? nil : .easeOut(duration: 0.8), value: s.usedFraction)
+                    if model.work != nil && !Motion.reduced { SweepArc(lineWidth: 30) }
                 }.frame(width: 104, height: 104).padding(15).contentShape(Rectangle())
             }.buttonStyle(.plain).help("空间去哪了")
                 .frame(maxWidth: .infinity).padding(.top, 92)
+            if let work = model.work {
+                WorkLine(work: work, free: s.free, drive: store.drive, colour: Ink.cream)
+                    .frame(maxWidth: .infinity).padding(.top, 236)
+            }
             VStack { Spacer(); HStack(alignment: .bottom) {
                 Button { store.page = .switches } label: {
                     VStack(alignment: .leading, spacing: 1) { ForEach(Array(leftLines(tight).enumerated()), id: \.offset) { _, line in
@@ -247,6 +264,32 @@ private struct Cover: View {
     private func rightLine(_ s: Snapshot) -> String {
         if store.unplugged != nil { return "插上就恢复" }
         return s.pending > 0 ? "\(s.pending) 待确认 ›" : "没有待办"
+    }
+}
+
+/// Under the ring while the background works: dots flowing to the drive, or the space freed so far.
+private struct WorkLine: View {
+    let work: Work
+    let free: Double?
+    let drive: String?
+    let colour: Color
+    var body: some View {
+        VStack(spacing: 3) {
+            if work.kind == "move" {
+                HStack(spacing: 6) {
+                    Text("内置盘")
+                    FlowDots(color: colour).frame(width: 46, height: 8)
+                    Text(drive ?? "外接盘")
+                }
+                Text(work.title + (work.bytes > 0 ? " · " + size(work.bytes) : "")).lineLimit(1)
+            } else {
+                HStack(spacing: 0) {
+                    Text("正在整理 · 已腾出 ")
+                    RollingNumber(value: work.freed(free), format: "%.1f").animation(Motion.reduced ? nil : .easeOut(duration: 0.6), value: work.freed(free))
+                    Text(" GB")
+                }
+            }
+        }.font(.system(size: 11)).foregroundColor(colour).padding(.horizontal, 18)
     }
 }
 
@@ -283,6 +326,8 @@ private struct PendingPage: View {
     @ObservedObject var store: CoverStore
     @State private var selected: Set<String> = []
     @State private var confirming = false
+    @State private var ticked: Set<String> = []
+    @State private var gone: Set<String> = []
 
     var body: some View {
         let rows = store.pendingRows
@@ -296,9 +341,10 @@ private struct PendingPage: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(store.skipped) { row in SkippedLine(row: row) }
-                        ForEach(rows) { row in
-                            Button { toggle(row) } label: { PendingLine(row: row, on: selected.contains(row.id)) }
+                        ForEach(rows.filter { !gone.contains($0.id) }) { row in
+                            Button { toggle(row) } label: { PendingLine(row: row, on: selected.contains(row.id), done: ticked.contains(row.id)) }
                                 .buttonStyle(.plain).disabled(!row.eligible)
+                                .transition(.asymmetric(insertion: .identity, removal: .opacity.combined(with: .move(edge: .leading))))
                                 .contextMenu { Button("不再提醒") { store.perform("pending-ignore", ids: [row.id], doing: "正在忽略…") } }
                         }
                     }
@@ -321,6 +367,7 @@ private struct PendingPage: View {
             }
         }
         .onAppear { selected = Set(initialSelection); store.refresh() }
+        .onChange(of: store.cleared) { ids in fold(ids) }
         .alert("删除所选 \(selected.count) 项？", isPresented: $confirming) {
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
@@ -339,6 +386,18 @@ private struct PendingPage: View {
     private var chosen: [ResourceRow] { store.pendingRows.filter { selected.contains($0.id) } }
     private var selectable: [String] { store.pendingRows.filter(\.eligible).map(\.id) }
     private var allSelected: Bool { !selectable.isEmpty && Set(selectable).isSubset(of: selected) }
+    private func fold(_ ids: [String]) {
+        // Top to bottom, the order the rows are on screen.
+        for (index, id) in store.pendingRows.map(\.id).filter(ids.contains).enumerated() {
+            let start = Motion.reduced ? 0 : Double(index) * 0.15
+            DispatchQueue.main.asyncAfter(deadline: .now() + start) {
+                withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.15)) { _ = ticked.insert(id) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + start + (Motion.reduced ? 0 : 0.35)) {
+                withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.25)) { _ = gone.insert(id) }
+            }
+        }
+    }
     private func toggle(_ row: ResourceRow) {
         if selected.contains(row.id) { selected.remove(row.id) } else { selected.insert(row.id) }
     }
@@ -372,9 +431,13 @@ private struct SkippedLine: View {
 private struct PendingLine: View {
     let row: ResourceRow
     let on: Bool
+    var done = false
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Checkbox(on: on).padding(.top, 2)
+            Group {
+                if done { Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundColor(Ink.navy).frame(width: 13, height: 13) }
+                else { Checkbox(on: on) }
+            }.padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title.split(separator: "：", maxSplits: 1).last.map(String.init) ?? row.title)
                     .font(.system(size: 12)).foregroundColor(Ink.text).lineLimit(1)
@@ -479,61 +542,103 @@ private struct SwitchesPage: View {
     @ObservedObject var model: Monitor
     @ObservedObject var store: CoverStore
     @State private var confirmingRestore = false
-    private let names = ["caches": "共享构建缓存", "clean": "自动清理", "external": "外接盘"]
     private func setTarget(_ gb: Double) {
         store.perform("plan-target", ids: [], token: nil, doing: "正在改目标…", path: String(Int(gb)))
+    }
+    private func flip(_ id: String, on: Bool) {
+        if !on { store.perform("checkup-apply", ids: [id], doing: "正在开启…") }
+        else if id == "caches" { confirmingRestore = true }
+        else { store.perform("checkup-off", ids: [id], doing: "正在关闭…") }
+    }
+    private func title(_ id: String) -> String {
+        switch id {
+        case "caches": return "共享构建缓存"
+        case "clean": return "自动清理"
+        default: return store.drive.map { "外接盘 \($0)" } ?? "外接盘"
+        }
     }
 
     var body: some View {
         Page(model: model, store: store, title: "帮你管着") {
             VStack(spacing: 0) {
                 // The one number the user sets (space-target-plan AC-01).
-                if let target = store.target, let gb = Double(target.title.filter { $0.isNumber }) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("空间目标").font(.system(size: 12)).foregroundColor(Ink.text)
-                            Text("内置盘至少留这么多").font(.system(size: 11)).foregroundColor(Ink.muted)
-                        }
-                        Spacer()
-                        Stepper("\(Int(gb)) GB", onIncrement: { setTarget(gb + 10) }, onDecrement: { setTarget(max(10, gb - 10)) })
-                            .font(.system(size: 12)).foregroundColor(Ink.navy).disabled(!store.working.isEmpty)
+                if let gb = store.targetGB {
+                    SettingRow(title: "空间目标", detail: "内置盘至少留这么多") {
+                        HStack(spacing: 6) {
+                            StepButton(symbol: "minus", label: "目标减 10 GB") { setTarget(max(10, gb - 10)) }
+                            Text("\(Int(gb)) GB").font(.system(size: 12)).foregroundColor(Ink.navy).monospacedDigit()
+                            StepButton(symbol: "plus", label: "目标加 10 GB") { setTarget(gb + 10) }
+                        }.disabled(!store.working.isEmpty)
                     }
-                    .padding(.vertical, 9)
-                    .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
                 }
                 ForEach(["caches", "clean", "external"], id: \.self) { id in
                     let row = store.suggestion(id)
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(id == "external" ? (store.drive.map { "外接盘 \($0)" } ?? "外接盘") : names[id]!)
-                                .font(.system(size: 12)).foregroundColor(Ink.text)
-                            Text(row.map { $0.detail.isEmpty ? $0.reason : $0.detail } ?? "").font(.system(size: 11)).foregroundColor(Ink.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 10)
-                        Toggle("", isOn: Binding(get: { row?.outcome == "已开启" }, set: { on in
-                            if on { store.perform("checkup-apply", ids: [id], doing: "正在开启…") }
-                            else if id == "caches" { confirmingRestore = true }
-                            else { store.perform("checkup-off", ids: [id], doing: "正在关闭…") }
-                        })).toggleStyle(.switch).controlSize(.mini).labelsHidden().tint(Ink.navy)
-                            .disabled(row == nil || (row?.eligible == false && row?.outcome != "已开启") || !store.working.isEmpty)
+                    let on = row?.outcome == "已开启"
+                    SettingRow(title: title(id), detail: row?.detail ?? "") {
+                        Switch(on: on, label: title(id)) { flip(id, on: on) }
+                            .disabled(row == nil || (row?.eligible == false && !on) || !store.working.isEmpty)
                     }
-                    .padding(.vertical, 9)
-                    .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
                 }
             }
             Spacer()
-            let off = ["caches", "clean", "external"].filter { store.suggestion($0)?.eligible == true && store.suggestion($0)?.outcome != "已开启" }
-            if !off.isEmpty {
-                Button("全部开启") { store.perform("checkup-apply", ids: off, doing: "正在开启…") }.buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium)).foregroundColor(Ink.navy).disabled(!store.working.isEmpty)
+            if let last = store.rows("最近").first {
+                Text(last.title).font(.system(size: 11)).foregroundColor(Ink.muted)
             }
         }
         .alert("还原构建缓存设置？", isPresented: $confirmingRestore) {
             Button("取消", role: .cancel) {}
             Button("还原") { store.perform("checkup-off", ids: ["caches"], doing: "正在还原…") }
         } message: {
-            Text("看板做的链接会去掉，各工具从空开始重建缓存；外接盘上的缓存副本会删除；Xcode 编译缓存关闭。你自己做的链接不动。")
+            Text("看板做的链接会去掉，各工具从空开始重建缓存；外接盘上的缓存副本会删除；Xcode 编译缓存关闭。任务的构建产物留在外接盘，你自己做的链接不动。")
         }
+    }
+}
+
+/// One setting: name and a short line on the left, its control on the shared right edge.
+private struct SettingRow<Control: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder var control: Control
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12)).foregroundColor(Ink.text)
+                Text(detail).font(.system(size: 11)).foregroundColor(Ink.muted).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            control
+        }
+        .padding(.vertical, 9)
+        .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
+    }
+}
+
+/// The cover's own switch: navy when on, the knob slides.
+private struct Switch: View {
+    let on: Bool
+    let label: String
+    let action: () -> Void
+    @Environment(\.isEnabled) private var enabled
+    var body: some View {
+        Button(action: action) {
+            Capsule().fill(on ? Ink.navy : Color(hex: 0xD3D1C7))
+                .overlay(Circle().fill(Ink.paper).padding(2).offset(x: on ? 6 : -6))
+                .frame(width: 30, height: 18)
+                .animation(Motion.reduced ? nil : .easeOut(duration: 0.15), value: on)
+        }
+        .buttonStyle(.plain).opacity(enabled ? 1 : 0.45)
+        .accessibilityLabel(label).accessibilityValue(on ? "已开启" : "未开启")
+    }
+}
+
+private struct StepButton: View {
+    let symbol: String
+    let label: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 9, weight: .medium)).foregroundColor(Ink.muted)
+                .frame(width: 16, height: 16).contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel(label)
     }
 }

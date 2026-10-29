@@ -60,13 +60,19 @@ class PlanTest(TierFixture):
         result = space_plan.build(self.home, cfg, self.settings, report, pending, 20 * GIB, True,
                                   sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)
         sections = {s['id']: s for s in result['sections']}
-        self.assertEqual(sections['auto']['bytes'], 2 * GIB)            # only opted-in npm cache move; task directories remain untouched
+        # The opted-in npm move plus the busy task's three build copies to the drive; whole task folders stay put.
+        self.assertEqual(sections['auto']['bytes'], 2 * GIB + 3 * 8 * GIB)
         self.assertEqual(sections['ask']['bytes'], GIB)                  # ignored items do not count
+        self.assertEqual(sections['judge']['bytes'], 0)                  # moved copies no longer cost the internal disk
+        self.assertEqual(result['gap_bytes'], 30 * GIB)
+        self.assertEqual(result['reach_bytes'], 47 * GIB)
+        self.assertEqual(result['shortfall_bytes'], 3 * GIB)
+        # Without the drive the old copies are still offered for a decision.
+        result = space_plan.build(self.home, cfg, self.settings, report, pending, 20 * GIB, False,
+                                  sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)
+        sections = {s['id']: s for s in result['sections']}
         self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # the two copies idle for over a week
         self.assertIn('2 份一周没用的 Xcode 构建副本', sections['judge']['items'][0]['title'])
-        self.assertEqual(result['gap_bytes'], 30 * GIB)
-        self.assertEqual(result['reach_bytes'], 39 * GIB)
-        self.assertEqual(result['shortfall_bytes'], 11 * GIB)
 
     def test_copies_used_within_a_week_are_never_offered(self):
         busy = self.busy_task_with_copies(days=(1, 3, 6))
