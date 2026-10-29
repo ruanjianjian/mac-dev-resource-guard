@@ -325,6 +325,9 @@ private struct MemoryPage: View {
              title: "内存 · " + (status.map { $0.title + ($0.reason.isEmpty ? "" : "，" + $0.reason) } ?? "正在读取…")) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if let why = store.memoryRows("说明").first {
+                        Text(why.reason).font(.system(size: 11)).foregroundColor(Ink.warm).fixedSize(horizontal: false, vertical: true)
+                    }
                     MemorySection(title: "自动处理了", rows: store.memoryRows("自动处理了"))
                     if !closable.isEmpty {
                         SectionTitle(text: "可以关掉（没被开发工具连着）")

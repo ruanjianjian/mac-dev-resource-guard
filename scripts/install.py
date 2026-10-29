@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from service import activate, ask_consent, enable_recommended, install_skill, operation_lock, stop_menu_app, tiers_config
+from service import activate, ask_consent, enable_recommended, install_skill, stop_menu_app, tiers_config, waiting_lock
 import discover
 
 root = Path(__file__).resolve().parents[1]
@@ -27,7 +27,7 @@ subprocess.run([sys.executable, str(root/'widget/build.py'), '--output', str(sta
 subprocess.run([str(staging/'Contents/MacOS/ResourceDashboard'), '--self-test'], check=True)
 # Never replace the app or activate a new engine over an in-flight maintenance round.
 # A busy lock returns an error for retry; it does not stop the old worker.
-with operation_lock(home, 'periodic-storage'):
+with waiting_lock(home, 'periodic-storage'):
     # Only stop our menu process; detached builds and maintenance are left running.
     if app.exists():
         executable = str(app/'Contents/MacOS/ResourceDashboard')
@@ -65,3 +65,6 @@ print({
     'decided': '安装完成：{}，面板不会自己弹出。共享构建缓存和外接盘保持原有选择。'.format(safe),
     'unasked': '安装完成：{}。还没问你要不要打开共享构建缓存和外接盘；同意的话运行：~/.local/bin/resource-guard-service enable'.format(safe),
 }[answer])
+if tiers_config.load(home)['external_root']:
+    # Every build gets a new local signature, so macOS asks again; without "Allow" moves to the drive pause.
+    print('提示：macOS 可能会再问一次「资源看板」能否访问外接盘（每次安装或升级都会问），请点「允许」，否则往外接盘挪东西会暂停。')

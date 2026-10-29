@@ -137,6 +137,8 @@ class SimulatorTests(unittest.TestCase):
                 {"kind": "simulator", "rss_kib": 5 << 20, "reason": "simulator_in_use"}]
         message = memory.notification_message([{"name": "Xcode"}], [], {}, sims)
         self.assertIn("2 台模拟器占约 9 GB（1 台没被开发工具连着）", message)
+        busy = [dict(s, reason="simulator_in_use") for s in sims]
+        self.assertIn("模拟器都有开发工具连着，暂时没有能安全关的", memory.notification_message([], [], {}, busy))
 
 
 class AutoCloseTests(unittest.TestCase):
