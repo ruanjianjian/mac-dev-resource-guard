@@ -51,10 +51,16 @@ class Process:
 def pressure_transition(state, sample, now):
     s = dict(state)
     last = s.get("last_ts")
-    reset = last is not None and (now < last or now - last > 180)
-    reset |= s.get("boot_id") not in (None, sample.get("boot_id"))
+    reboot = s.get("boot_id") not in (None, sample.get("boot_id"))
+    # A slow or missed sample (the monitor timed out) restarts the cleanup streak but not the
+    # incident, so a timeout never delays the warning; a reboot, a backward clock or a long
+    # sleep (15 minutes) starts over.
+    reset = last is not None and (now < last or now - last > 180) or reboot
     if reset:
-        for key in ("warn_count", "normal_count", "critical_since", "incident_started", "notification_sent", "notification_level", "observations", "external_observations"):
+        for key in ("warn_count", "normal_count", "critical_since", "observations", "external_observations"):
+            s.pop(key, None)
+    if last is not None and (now < last or now - last > INCIDENT_GAP) or reboot:
+        for key in ("incident_started", "notification_sent", "notification_level", "notification_at"):
             s.pop(key, None)
     p = sample.get("pressure")
     s.update(last_ts=now, boot_id=sample.get("boot_id"))
@@ -83,6 +89,24 @@ def pressure_transition(state, sample, now):
         if confirmed and (s.get("last_cleanup") is None or now - s["last_cleanup"] >= 600):
             event = "candidate"
     return s, event
+
+
+ALERT_AFTER = 120        # warning-level pressure this long before the first alert; critical alerts at once
+REMIND_AFTER = 1800     # still under pressure this long after the last alert: say so again
+INCIDENT_GAP = 900      # a gap between samples longer than this ends the incident
+
+
+def alert_due(state, pressure, now):
+    """Whether to alert now: first alert, escalation to critical, or a reminder; never after a delivery
+    failure was recorded as sent."""
+    incident = state.get("incident_started")
+    if pressure not in (2, 4) or incident is None:
+        return False
+    if not state.get("notification_sent"):
+        return pressure == 4 or now - incident >= ALERT_AFTER
+    if pressure == 4 and state.get("notification_level") != 4:
+        return True
+    return now - (state.get("notification_at") or incident) >= REMIND_AFTER
 
 
 def classify_process(proc, registered, protected_pids, knowledge_ok):
@@ -382,11 +406,23 @@ def explain_rows(rows, table, leases):
     return result
 
 
-def notify(message):
-    # Local desktop notification, not an external message. Best effort only.
-    source = 'on run argv\ndisplay notification (item 1 of argv) with title "开发内存守护"\nend run'
+def notify(message, title="内存紧张", wait=3.0):
+    """Local desktop notification, not an external message. The menu-bar app posts it (as 资源看板,
+    with the user's notification permission) and acknowledges; AppleScript is the fallback.
+    True only when one of them confirmed delivery."""
+    alert = {"id": "{:.6f}".format(time.time()), "title": title, "body": message, "at": time.time()}
     try:
-        r = subprocess.run(["/usr/bin/osascript", "-e", source, message], capture_output=True, timeout=8)
+        atomic_json(STATE / "alert.json", alert)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if read_json(STATE / "alert-ack.json", {}).get("id") == alert["id"]:
+                return True
+            time.sleep(0.2)
+    except (OSError, ValueError):
+        pass
+    source = 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run'
+    try:
+        r = subprocess.run(["/usr/bin/osascript", "-e", source, title, message], capture_output=True, timeout=8)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -406,8 +442,12 @@ def notification_message(rows, actions, pending, resources=(), cooldown=False):
     else:
         outcome = '当前没有可安全回收的闲置资源。'
     names = '、'.join(r['name'] for r in rows[:3]) or '开发进程'
-    return (f'内存压力持续升高；{outcome}主要占用：{names}。'
-            '仍在运行及归属不明的任务保留；dev-memory status 可查看处理结果。')
+    sims = [r for r in resources if r.get('kind') == 'simulator' and r.get('rss_kib') is not None]
+    if sims:
+        idle = sum(1 for r in sims if r.get('reason') == 'simulator_not_attached')
+        size = sum(r['rss_kib'] for r in sims) / 1024 ** 2
+        names = '{} 台模拟器占约 {:.0f} GB（{} 台没被开发工具连着）、{}'.format(len(sims), size, idle, names)
+    return f'主要占用：{names}。{outcome}点开资源看板看哪些能关。'
 
 
 def external_module():
@@ -572,13 +612,13 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
             matched = next((r for r in external if r.get('pid') == row.get('pid')), None)
             if matched:
                 row['policy'] = '可安全回收' if matched['eligible'] else '保留：' + reason_label(matched.get('reason'))
-        incident = state.get("incident_started")
-        due = incident is not None and now - incident >= 300
-        escalation = effective_pressure == 4 and state.get("notification_level") != 4
-        if mode == "tick" and not paused and effective_pressure in (2, 4) and due and (not state.get("notification_sent") or escalation):
+        if mode == "tick" and not paused and alert_due(state, effective_pressure, now):
+            minutes = max(1, round((now - state["incident_started"]) / 60))
+            title = ('内存很紧' if effective_pressure == 4 else '内存紧张') + '，已持续 {} 分钟'.format(minutes)
             ok = notify(notification_message(rows, actions, state.get('external_pending', {}),
-                                             external + resources, cooldown=not cooldown))
-            state.update(notification_sent=True, notification_level=effective_pressure)
+                                             external + resources, cooldown=not cooldown), title)
+            if ok:   # a failed delivery is tried again next round, never recorded as sent
+                state.update(notification_sent=True, notification_level=effective_pressure, notification_at=now)
             log_event({"type": "notification", "delivered": ok, "pressure": effective_pressure})
         if mode == "tick":
             state["sample"] = sample
@@ -711,6 +751,8 @@ def reason_label(value):
         'active_consumer_or_task': '仍有会话、任务或工具调用',
         'pending_readonly_no_retry': '退出结果正在只读核实，不重复请求',
         'inspection_unavailable_preserved': '本类资源信息不完整，保留',
+        'simulator_in_use': '有开发工具正连着',
+        'simulator_not_attached': '没被开发工具连着，可以关掉',
     }.get(value, value or '状态不明，保留')
 
 

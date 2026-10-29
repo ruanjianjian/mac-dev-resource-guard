@@ -11,8 +11,49 @@ def adapter(name):
     return importlib.import_module((__package__ + "." if __package__ else "") + name)
 
 
+DEVLEASE = Path.home() / '.local/bin/devlease'
+
+
+def simulator_inspect(run=subprocess.run, now=None):
+    """Booted iOS simulators when devlease is not installed: who is connected and how much memory each
+    takes (the whole process tree under its launchd_sim). Read-only: nothing here is shut down."""
+    now = time.time() if now is None else now
+    listed = run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', 'booted', '-j'], capture_output=True, text=True, timeout=20)
+    if listed.returncode:
+        raise RuntimeError('simctl unavailable')
+    devices = [d for group in json.loads(listed.stdout).get('devices', {}).values() for d in group]
+    table = run(['/bin/ps', '-axww', '-o', 'pid=,ppid=,rss=,command='], capture_output=True, text=True,
+                errors='surrogateescape', env=dict(os.environ, LC_ALL='en_US.UTF-8'), timeout=20).stdout
+    procs = []
+    for line in table.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
+            procs.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+    children = {}
+    for pid, ppid, _, _ in procs:
+        children.setdefault(ppid, []).append(pid)
+    rss = {pid: kib for pid, _, kib, _ in procs}
+    rows = []
+    for device in devices:
+        udid = device.get('udid', '')
+        tree, todo = set(), [pid for pid, _, _, cmd in procs if 'launchd_sim' in cmd and udid in cmd]
+        while todo:
+            pid = todo.pop()
+            if pid not in tree:
+                tree.add(pid)
+                todo += children.get(pid, [])
+        tools = sorted({Path(cmd.split()[0]).name for pid, _, _, cmd in procs
+                        if udid and udid in cmd and pid not in tree and 'CoreSimulator' not in cmd})
+        rows.append(dict(id=udid, device_id=udid, kind='ios-sim', name=device.get('name', udid),
+                         rss_kib=sum(rss.get(pid, 0) for pid in tree), attached=tools, eligible=False,
+                         reason='simulator_in_use' if tools else 'simulator_not_attached', _observed_at=now))
+    return rows
+
+
 def device_inspect():
-    result = subprocess.run([str(Path.home() / '.local/bin/devlease'), 'memory-inspect', '--json'],
+    if not DEVLEASE.exists():
+        return simulator_inspect()
+    result = subprocess.run([str(DEVLEASE), 'memory-inspect', '--json'],
                             capture_output=True, text=True, timeout=20)
     if result.returncode or len(result.stdout) > 1024 * 1024:
         raise RuntimeError('device inspection unavailable')
@@ -50,7 +91,8 @@ def collect(state, now):
                 raise ValueError('invalid resource inventory')
             for raw in rows:
                 key = kind + ':' + str(raw['id'])
-                row = private_metadata({k: raw.get(k) for k in ('id', 'pid', 'start', 'reason', 'fingerprint', 'evidence')})
+                row = private_metadata({k: raw.get(k) for k in ('id', 'pid', 'start', 'reason', 'fingerprint', 'evidence', 'name', 'rss_kib', 'attached')
+                                        if k in raw or k in ('id', 'pid', 'start', 'reason', 'fingerprint', 'evidence')})
                 row.update(kind=kind, id=key, eligible=False)
                 records[key] = raw
                 fp = raw.get('fingerprint')

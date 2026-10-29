@@ -46,6 +46,39 @@ final class WorkWatcher {
     }
 }
 
+/// The memory monitor (dev-memory) asks the app to show its alert, so it arrives as 资源看板 with the
+/// user's notification permission; the receipt tells the monitor it was delivered (else it retries).
+final class AlertWatcher {
+    var deliver: (_ title: String, _ body: String) -> Void = { _, _ in }
+    private var source: DispatchSourceFileSystemObject?
+    private var handled: String?
+    private var folder: URL { stateHome().appendingPathComponent(".local/state/dev-memory") }
+
+    func start() {
+        let fd = open(folder.path, O_EVTONLY)
+        if fd >= 0 {
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename], queue: .main)
+            source.setEventHandler { [weak self] in self?.read() }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            self.source = source
+        }
+        read()
+    }
+
+    /// Also called on every sample, in case the folder could not be watched.
+    func read() {
+        let alert = readJSON(folder.appendingPathComponent("alert.json"))
+        guard let id = alert["id"] as? String, id != handled, let title = alert["title"] as? String,
+              let body = alert["body"] as? String, let at = alert["at"] as? Double,
+              Date().timeIntervalSince1970 - at < 300 else { return }
+        handled = id
+        deliver(title, body)
+        let receipt = (try? JSONSerialization.data(withJSONObject: ["id": id, "at": Date().timeIntervalSince1970])) ?? Data()
+        try? receipt.write(to: folder.appendingPathComponent("alert-ack.json"), options: .atomic)
+    }
+}
+
 enum Motion {
     /// The system's 「减少动态效果」: everything then changes in place, without moving.
     static var reduced: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }

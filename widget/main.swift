@@ -153,6 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     let model = Monitor()
     let store = CoverStore()
     let watcher = WorkWatcher()
+    let alerts = AlertWatcher()
     private var watching: [AnyCancellable] = []
     /// The menu-bar number rolls towards the new value; the dot after it pulses while something runs.
     private var shownFree: Double?
@@ -215,6 +216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         NSApp.mainMenu = mainMenu
         watcher.changed = { [weak self] work in self?.model.work = work }
         watcher.start()
+        alerts.deliver = { [weak self] title, body in self?.post(title: title, body: body, tab: "memory") }
+        alerts.start()
         // Either the background or the panel working lights the dot.
         watching = [model.$work.map { _ in () }.merge(with: store.$working.map { _ in () }).receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.setBusy() }]
@@ -255,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         status.button?.toolTip = "资源看板 · \(s.pressureLabel) · 磁盘可用 \(number(s.free)) GiB\(waiting)\n点击显示 · \(model.shortcut) 唤起 · 右键打开菜单"
         badge.isHidden = s.pending == 0
         watcher.read()
+        alerts.read()
         rollFree(to: s.free)
         badge.frame.origin.x = 14
     }
