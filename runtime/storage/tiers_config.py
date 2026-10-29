@@ -12,7 +12,8 @@ from storage import atomic_json
 
 DEFAULTS = {
     'schema': 1,
-    'auto_enabled': False,
+    'auto_enabled': True,
+    'auto_scope': 'managed-caches',
     'ask_enabled': True,
     'check_interval_minutes': 30,
     'task_roots': [],
@@ -76,6 +77,10 @@ def load(home, owned=()):
     _positive(cfg['auto_idle_days'], 'auto_idle_days')
     for key, value in cfg['ask'].items():
         _positive(value, 'ask.' + key)
+    if cfg['auto_scope'] not in ('standard', 'managed-caches'):
+        raise ConfigError('auto_scope 必须是 standard 或 managed-caches')
+    # Accept the old setting without re-enabling the removed destructive tier.
+    cfg['auto_scope'] = 'managed-caches'
     names = cfg['prune_names']
     if not isinstance(names, list) or any(not isinstance(n, str) or not n or '/' in n or n in ('.', '..', '.git') for n in names):
         raise ConfigError('prune_names 必须是目录名列表')
@@ -145,4 +150,12 @@ def set_flag(home, key, value):
     raw[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(path, raw)
+    if key == 'auto_enabled' and value:
+        (Path(home) / '.local/state/dev-resource-guard/storage-paused').unlink(missing_ok=True)
     return raw
+
+
+def migrate_scope(home):
+    """Preserve all existing choices while recording the safe scope on upgrade."""
+    load(home)
+    return update(home, {'auto_scope': 'managed-caches'})

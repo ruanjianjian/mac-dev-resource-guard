@@ -1,30 +1,17 @@
-"""Auto tier (design C2/C3): only actions that lose nothing.
-
-Below the warning line, idle task directories move to the external drive (a link
-keeps the old path), or lose their rebuildable outputs when the drive is absent;
-then unavailable simulators and tools' own caches are cleaned. Stops at the target.
-"""
+"""Safe maintenance receipts and explicitly opted-in cache relocation helpers."""
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import stat
 import subprocess
 import sys
 import time
 
-from storage import GIB, Activity, StorageManager, atomic_json
-import tasks as T
+from storage import GIB, atomic_json
 
 RECEIPT, LOG, MOVE_STATE = 'auto-tier.json', 'auto-tier-log.jsonl', 'auto-tier-move.json'
 LOG_KEEP = 2000
-# Tool caches are cleaned only with the tool's own command, and never while that tool runs.
-TOOLS = (
-    ('go', ['go', 'env', 'GOCACHE'], ['go', 'clean', '-cache'], r'(^|/)go (build|test|run|vet|install)\b|gopls'),
-    ('npm', ['npm', 'config', 'get', 'cache'], ['npm', 'cache', 'verify'], r'(^|/)npm (ci|install|i|exec)\b'),
-    ('pnpm', ['pnpm', 'store', 'path'], ['pnpm', 'store', 'prune'], r'(^|/)pnpm (i|install|add)\b'),
-)
 
 
 class Aborted(Exception):
@@ -92,6 +79,9 @@ def move(home, task, hook=None):
 
 def move_dir(home, src, dest, hook=None):
     """Copy, verify nothing changed, then swap in a link. Crash states are in MOVE_STATE."""
+    marker = state_root(home) / MOVE_STATE
+    if marker.exists():
+        raise Aborted('已有未完成的搬迁记录，保留现场，请先核对')
     src, dest = Path(src), Path(dest)
     dest_dir = dest.parent
     tmp = dest_dir / ('.guard-moving-' + dest.name)
@@ -100,7 +90,6 @@ def move_dir(home, src, dest, hook=None):
     dest_dir.mkdir(parents=True, exist_ok=True)
     if tmp.exists():
         force_rmtree(tmp)
-    marker = state_root(home) / MOVE_STATE
     before = snapshot(src)
     atomic_json(marker, dict(src=str(src), dest=str(dest), tmp=str(tmp), phase='copying', at=time.time()))
     try:
@@ -153,46 +142,11 @@ def recover(home):
     return outcome
 
 
-def unavailable_simulators(simctl):
-    listing = json.loads(simctl(['list', 'devices', '--json']))
-    found = []
-    for runtime, devices in listing.get('devices', {}).items():
-        for device in devices:
-            if device.get('isAvailable') is False:
-                found.append(device)
-    return found
-
-
 def default_simctl(arguments):
     out = subprocess.run(['xcrun', 'simctl', *arguments], capture_output=True, text=True, timeout=600)
     if out.returncode:
         raise RuntimeError((out.stderr or out.stdout).strip() or 'simctl failed')
     return out.stdout
-
-
-def tool_caches(home, activity, run=subprocess.run):
-    """Run each tool's own cleanup when its cache sits on the home volume and the tool is idle."""
-    actions = []
-    home_dev = os.stat(home).st_dev
-    for name, locate, clean, busy in TOOLS:
-        if not shutil.which(name):
-            continue
-        try:
-            where = run(locate, capture_output=True, text=True, timeout=60).stdout.strip()
-            if not where or not os.path.isdir(where) or os.stat(where).st_dev != home_dev:
-                continue
-            if any(re.search(busy, command) for _, command in activity.commands):
-                actions.append(dict(kind='tool-cache', path=where, bytes=0, result='skipped', reason=name + ' 正在运行'))
-                continue
-            before = T.size(where) or 0
-            result = run(clean, capture_output=True, text=True, timeout=1800)
-            after = T.size(where) or 0
-            actions.append(dict(kind='tool-cache', path=where, bytes=max(0, before - after),
-                                result='done' if result.returncode == 0 else 'failed',
-                                reason=' '.join(clean) if result.returncode == 0 else (result.stderr or '').strip()[-200:]))
-        except (OSError, subprocess.TimeoutExpired) as error:
-            actions.append(dict(kind='tool-cache', path=name, bytes=0, result='failed', reason=str(error)))
-    return actions
 
 
 def write_receipt(home, receipt):
@@ -213,89 +167,20 @@ def append_log(home, receipt):
 
 
 def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_fn=None, now=None, tool_run=subprocess.run):
+    """Record the safe tier; service.clean_caches owns all automatic deletion.
+
+    Do not resume legacy moves here: a task left in a partial move requires
+    explicit inspection, even when its old configuration enabled automation.
+    """
     home = Path(home)
     now = time.time() if now is None else now
-    collect = activity_factory or (lambda: Activity.collect(settings.lease_root))
     free = free_fn or (lambda: shutil.disk_usage(str(settings.volume)).free)
-    target, warning = settings.target_free_gib * GIB, settings.warning_free_gib * GIB
-    receipt = dict(schema=1, at=now, status='complete', free_before=round(free() / GIB, 2), free_after=None,
-                   target_free_gib=settings.target_free_gib, warning_free_gib=settings.warning_free_gib,
-                   config_error=None, recovered=recover(home), external_missing=[], external_denied=[], actions=[], kept=[])
-    current = free()
-    if not cfg['auto_enabled']:
-        receipt['status'] = 'disabled'
-    elif current >= warning:
-        receipt['status'] = 'healthy'
-    else:
-        pins, pin_errors = StorageManager(settings)._pins(now)
-        activity = collect()
-        candidates = []
-        for task in T.discover(cfg):
-            if task.linked:
-                continue    # already on the external drive
-            reasons, latest = T.idle_check(task, activity, pins, cfg['auto_idle_days'], cfg, now)
-            reasons += pin_errors
-            if reasons:
-                receipt['kept'].append(dict(path=str(task.path), reason='；'.join(reasons)))
-            else:
-                candidates.append((latest, task))
-        for latest, task in sorted(candidates, key=lambda c: c[0]):
-            if current >= target:
-                break
-            reasons, _ = T.idle_check(task, collect(), pins, cfg['auto_idle_days'], cfg, now)
-            if reasons:
-                receipt['kept'].append(dict(path=str(task.path), reason='执行前复核：' + '；'.join(reasons)))
-                continue
-            idle_days = '闲置 {:.1f} 天'.format((now - latest) / T.DAY)
-            external = task.external
-            denied = external_access(external) if external is not None and volume_ready(external) else None
-            if denied and not any(d['path'] == str(external) for d in receipt['external_denied']):
-                receipt['external_denied'].append(dict(path=str(external), reason=denied))
-            if external is not None and volume_ready(external) and not denied:
-                bytes_ = T.size(task.real) or 0
-                probe = Path(external)
-                while not probe.exists():
-                    probe = probe.parent
-                if shutil.disk_usage(str(probe)).free < bytes_ * 1.1 + GIB:
-                    receipt['kept'].append(dict(path=str(task.path), reason='外接盘空间不够'))
-                    continue
-                try:
-                    dest = move(home, task)
-                    receipt['actions'].append(dict(kind='move', path=str(task.path), dest=str(dest), bytes=bytes_,
-                                                   result='done', reason=idle_days))
-                except Aborted as error:
-                    receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='aborted', reason=str(error)))
-                except (OSError, subprocess.SubprocessError) as error:
-                    receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='failed', reason=str(error)))
-            else:
-                if external is not None and not denied and str(external) not in receipt['external_missing']:
-                    receipt['external_missing'].append(str(external))
-                for output in T.rebuildable(task, cfg):
-                    bytes_ = T.size(output) or 0
-                    try:
-                        T.remove_tree(output)
-                        receipt['actions'].append(dict(kind='prune', path=str(output), bytes=bytes_, result='done', reason=idle_days))
-                    except OSError as error:
-                        receipt['actions'].append(dict(kind='prune', path=str(output), bytes=0, result='failed', reason=str(error)))
-            current = free()
-        if current < target:
-            try:
-                for device in unavailable_simulators(simctl):
-                    label = '{}（{}）'.format(device.get('name', ''), device.get('udid', ''))
-                    bytes_ = device.get('dataPathSize') or T.size(device.get('dataPath', '')) or 0
-                    try:
-                        simctl(['delete', device['udid']])
-                        receipt['actions'].append(dict(kind='simulator-delete', path=label, bytes=bytes_, result='done', reason='系统标为不可用'))
-                    except RuntimeError as error:
-                        receipt['actions'].append(dict(kind='simulator-delete', path=label, bytes=0, result='failed', reason=str(error)))
-            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
-                receipt['kept'].append(dict(path='模拟器', reason='模拟器列表读取失败：' + str(error)))
-            current = free()
-        if current < target:
-            receipt['actions'] += tool_caches(home, activity, tool_run)
-            current = free()
-        if any(a['result'] == 'failed' for a in receipt['actions']):
-            receipt['status'] = 'partial'
-    receipt['free_after'] = round(free() / GIB, 2)
+    value = round(free() / GIB, 2)
+    receipt = dict(schema=1, at=now, status='managed-caches' if cfg['auto_enabled'] else 'disabled',
+                   free_before=value, free_after=value, actions=[], kept=[], config_error=None,
+                   external_missing=[], reason='每 12 小时仅清理至少 7 天未用的编译中间缓存；保留任务、模拟器和全局工具缓存')
+    if (state_root(home) / MOVE_STATE).exists():
+        receipt['kept'].append(dict(path=str(state_root(home) / MOVE_STATE),
+                                    reason='旧版未完成的搬迁记录已保留，需人工核对，不自动恢复或删除'))
     write_receipt(home, receipt)
     return receipt

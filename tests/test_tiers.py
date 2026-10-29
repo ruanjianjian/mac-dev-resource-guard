@@ -82,9 +82,10 @@ class TierFixture(unittest.TestCase):
 
 
 class ConfigTests(TierFixture):
-    def test_defaults_keep_auto_off_and_ask_on(self):
+    def test_defaults_enable_safe_auto_and_ask(self):
         cfg = tiers_config.load(self.home)
-        self.assertFalse(cfg['auto_enabled']); self.assertTrue(cfg['ask_enabled'])
+        self.assertTrue(cfg['auto_enabled']); self.assertTrue(cfg['ask_enabled'])
+        self.assertEqual(cfg['auto_scope'], 'managed-caches')
         self.assertEqual(cfg['auto_idle_days'], 3); self.assertEqual(cfg['ask']['task_idle_days'], 7)
 
     def test_wrong_values_name_the_field(self):
@@ -146,75 +147,42 @@ class UnreadableTests(TierFixture):
 
 
 class AutoTierTests(TierFixture):
-    def test_moves_oldest_idle_first_and_stops_at_target(self):
-        old, mid = self.task('old', 6), self.task('mid', 4)
-        self.task('fresh', 1)
-        head = git(old / 'app', 'rev-parse', 'HEAD')
-        receipt = self.run_tier(self.cfg())
-        self.assertEqual([a['kind'] for a in receipt['actions']], ['move'])
-        self.assertTrue(old.is_symlink()); self.assertFalse(mid.is_symlink())
-        self.assertEqual(old.resolve(), self.external / 'old')
-        self.assertEqual(git(old / 'app', 'rev-parse', 'HEAD'), head)
-        self.assertEqual(git(old / 'app', 'status', '--porcelain'), '')
-        self.assertTrue(any('fresh' in k['path'] for k in receipt['kept']))
-        self.assertEqual(self.run_tier(self.cfg())['actions'], [])   # already back above target
+    def test_legacy_enabled_config_preserves_idle_dirty_pinned_and_active_tasks(self):
+        paths = [self.task('idle', 20), self.task('dirty', 20, dirty=True), self.task('unpushed',20,unpushed=True), self.task('busy', 20)]
+        StorageManager(self.settings).pin(paths[0], 'acceptance', 'other-owner')
+        activity = Activity(open_paths=[(7, str(paths[-1]))])
+        result = self.run_tier(self.cfg(auto_scope='standard'), activity=activity, free=lambda:GIB)
+        self.assertEqual(result['actions'], [])
+        for task in paths:
+            self.assertFalse(task.is_symlink())
+            self.assertTrue((task/'app/build/out.o').is_file())
+            self.assertTrue((task/'app/node_modules/pkg/i.js').is_file())
 
-    def test_without_external_drive_prunes_ignored_outputs_only(self):
+    def test_missing_or_denied_external_drive_never_causes_pruning(self):
+        task = self.task('idle', 20)
+        cfg = self.cfg(task_roots=[{'path': str(self.root), 'external': '/Volumes/MissingGuardDrive/tasks'}])
+        with patch.object(auto_tier, 'external_access', side_effect=AssertionError('no task migration')):
+            result = self.run_tier(cfg, free=lambda:GIB)
+        self.assertEqual(result['actions'], [])
+        self.assertTrue((task/'app/build/out.o').is_file())
+
+    def test_change_during_explicit_cache_copy_aborts(self):
         task = self.task('old', 6)
-        cfg = self.cfg(task_roots=[{'path': str(self.root), 'external': '/Volumes/NoSuchGuardDrive/worktrees'}])
-        receipt = self.run_tier(cfg, free=lambda: GIB)
-        self.assertEqual(sorted(Path(a['path']).name for a in receipt['actions'] if a['kind'] == 'prune'), ['build', 'node_modules'])
-        self.assertFalse((task / 'app/build').exists()); self.assertTrue((task / 'app/Pods/tracked.txt').exists())
-        self.assertTrue((task / 'app/main.swift').exists()); self.assertEqual(receipt['external_missing'], ['/Volumes/NoSuchGuardDrive/worktrees'])
+        with self.assertRaises(auto_tier.Aborted):
+            auto_tier.move_dir(self.home, task, self.external/'old', hook=lambda:(task/'app/late.txt').write_text('late'))
+        self.assertFalse(task.is_symlink())
+        self.assertTrue((task/'app/main.swift').exists())
+        self.assertEqual(list(self.external.iterdir()), [])
 
-    def test_denied_external_drive_falls_back_to_pruning_and_says_why(self):
-        task = self.task('old', 6)
-        with patch.object(auto_tier, 'external_access', return_value='后台任务没有访问外接盘的权限'):
-            receipt = self.run_tier(self.cfg(), free=lambda: GIB)
-        self.assertFalse(task.is_symlink()); self.assertFalse((task / 'app/build').exists())
-        self.assertEqual(receipt['external_denied'], [{'path': str(self.external), 'reason': '后台任务没有访问外接盘的权限'}])
-        self.assertEqual(receipt['external_missing'], [])
-
-    def test_in_use_recent_or_pinned_untouched_but_dirty_idle_moves(self):
-        busy, pinned = self.task('busy', 6), self.task('pinned', 6)
-        dirty = self.task('dirty', 6, dirty=True)
-        StorageManager(self.settings).pin(pinned, 'acceptance', 'owner')
-        activity = Activity(open_paths=[(7, str(busy))])
-        receipt = self.run_tier(self.cfg(), activity=activity, free=self.free_by_links(each=0))
-        self.assertTrue(dirty.is_symlink()); self.assertFalse(busy.is_symlink()); self.assertFalse(pinned.is_symlink())
-        reasons = {Path(k['path']).name: k['reason'] for k in receipt['kept']}
-        self.assertIn('PID 7', reasons['busy']); self.assertIn('保护', reasons['pinned'])
-        self.assertTrue((busy / 'app/build').exists())
-
-    def test_change_during_copy_aborts_and_leaves_no_copy(self):
-        task = self.task('old', 6)
-        real = auto_tier.move
-        def changing(home, item, hook=None):
-            return real(home, item, hook=lambda: (task / 'app/late.txt').write_text('late'))
-        with patch.object(auto_tier, 'move', changing):
-            receipt = self.run_tier(self.cfg())
-        self.assertEqual(receipt['actions'][0]['result'], 'aborted')
-        self.assertFalse(task.is_symlink()); self.assertTrue((task / 'app/main.swift').exists())
-        self.assertEqual([p.name for p in self.external.iterdir()], [])
-        self.assertFalse((auto_tier.state_root(self.home) / auto_tier.MOVE_STATE).exists())
-
-    def test_unavailable_simulators_and_tool_caches(self):
-        calls = []
-        def simctl(args):
-            calls.append(args)
-            if args[:2] == ['list', 'devices']:
-                return json.dumps({'devices': {'old-runtime': [{'udid': 'U1', 'name': 'Gone', 'isAvailable': False, 'dataPathSize': 100}],
-                                               'ios-26': [{'udid': 'U2', 'name': 'Fine', 'isAvailable': True}]}})
-            return ''
-        receipt = self.run_tier(self.cfg(), free=lambda: GIB, simctl=simctl)
-        self.assertIn(['delete', 'U1'], calls); self.assertNotIn(['delete', 'U2'], calls)
-        self.assertEqual([a['kind'] for a in receipt['actions']], ['simulator-delete'])
-
-    def test_disabled_or_roomy_does_nothing(self):
-        task = self.task('old', 6)
-        self.assertEqual(self.run_tier(self.cfg(auto_enabled=False), free=lambda: GIB)['status'], 'disabled')
-        self.assertEqual(self.run_tier(self.cfg(), free=lambda: 50 * GIB)['status'], 'healthy')
-        self.assertFalse(task.is_symlink()); self.assertTrue((task / 'app/build').exists())
+    def test_disabled_or_roomy_does_not_resume_legacy_move(self):
+        state = auto_tier.state_root(self.home);state.mkdir(parents=True)
+        marker=state/auto_tier.MOVE_STATE;marker.write_text('{"phase":"swapping"}')
+        self.assertEqual(self.run_tier(self.cfg(auto_enabled=False),free=lambda:GIB)['status'],'disabled')
+        result=self.run_tier(self.cfg(),free=lambda:50*GIB)
+        self.assertEqual(result['status'],'managed-caches')
+        self.assertEqual(result['actions'],[])
+        self.assertTrue(marker.exists())
+        self.assertIn('人工',result['kept'][0]['reason'])
 
     def test_recovers_each_interrupted_phase(self):
         task = self.task('old', 6); self.external.mkdir(parents=True)
@@ -235,7 +203,7 @@ class AutoTierTests(TierFixture):
         self.task('old', 6)
         self.run_tier(self.cfg())
         state = auto_tier.state_root(self.home)
-        self.assertEqual(json.loads((state / 'auto-tier.json').read_text())['actions'][0]['kind'], 'move')
+        self.assertEqual(json.loads((state / 'auto-tier.json').read_text())['actions'], [])
         self.assertEqual(len((state / 'auto-tier-log.jsonl').read_text().splitlines()), 1)
 
 

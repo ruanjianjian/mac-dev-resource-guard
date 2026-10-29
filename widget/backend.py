@@ -169,13 +169,13 @@ def rows_checkup(home, cfg, report, freed, gone):
                          detail=drive['volume'], bytes=None, eligible=False, command=None, outcome='未连接'))
     states = checkup.suggestion_state(home, cfg, report)
     effect = dict(caches=sum(c['bytes'] or 0 for c in report['caches'] if c['status'] == 'local') if (cfg['external_root'] or report.get('recommended')) else None,
-                  clean=sum(t['bytes'] or 0 for t in report['tasks'] if t['idle'] and not t['linked']) or None, external=None)
+                  clean=None, external=None)
     drive = next((d for d in report['drives'] if cfg['external_root'] and str(cfg['external_root']).startswith(d['path'] + '/')),
                  report.get('recommended'))
     tools = len({c['tool'] for c in report['caches']})
     short_lines = dict(
         caches='{} 个工具 · Xcode 编译缓存'.format(tools),
-        clean='闲置 {} 天{}'.format(cfg['auto_idle_days'], '挪到 ' + drive['name'] if drive else '删构建产物'),
+        clean='仅过期编译中间缓存 · 保留任务和模拟器',
         external=('未连接' if gone else '剩 ' + gb(drive['free'])) if cfg['external_root'] and drive
         else ('未连接' if cfg['external_root'] else ('用「{}」，剩 {}'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘')))
     for key in checkup.SUGGESTIONS:
@@ -187,7 +187,7 @@ def rows_checkup(home, cfg, report, freed, gone):
         external = next((str(r['external']) for r in cfg['task_roots'] if str(r['path']) == root['path'] and r['external']), None)
         rows.append(dict(id='root:' + root['path'], title=short(home, root['path']), category='任务目录', bytes=None, eligible=False,
                          command=None, outcome='{} 个任务'.format(root['tasks']),
-                         reason=('闲置的挪到' + checkup.drive_label(external)) if external else ('已在设置里' if root['configured'] else '体检时找到的'),
+                         reason='只扫描，收尾和删除先确认',
                          detail=''))
     for drive in report['drives']:
         used = cfg['external_root'] is not None and str(cfg['external_root']).startswith(drive['path'] + '/')
@@ -231,15 +231,17 @@ def rows_auto(home):
     done = [a for a in receipt.get('actions', []) if a['result'] == 'done']
     reason = TIER_STATUS[status].format(**{k: receipt.get(k) for k in ('free_before', 'warning_free_gib', 'config_error', 'error')}) \
         if status in TIER_STATUS else '{} 项完成，可用空间 {} → {} GiB。'.format(len(done), receipt.get('free_before'), receipt.get('free_after'))
+    if status == 'managed-caches':
+        reason = receipt.get('reason', '仅维护过期编译中间缓存')
     rows = [dict(id='auto-status', title='自动档 · ' + when, category='自动处理记录', reason=reason, detail='',
                  bytes=sum(a.get('bytes') or 0 for a in done) or None, eligible=False, command=None,
                  outcome={'complete': '已完成', 'partial': '部分失败', 'disabled': '未打开', 'healthy': '空间充足',
-                          'busy': '让路', 'config_error': '设置有误', 'error': '失败'}.get(status, status))]
+                          'managed-caches': '安全维护', 'busy': '让路', 'config_error': '设置有误', 'error': '失败'}.get(status, status))]
     for denied in receipt.get('external_denied', []):
-        rows.append(dict(id='denied:' + denied['path'], title='外接盘没有访问权限', category='自动处理记录', reason=denied['reason'] + '；本轮改为删构建产物',
+        rows.append(dict(id='denied:' + denied['path'], title='外接盘没有访问权限', category='自动处理记录', reason=denied['reason'] + '；此为旧版记录，当前版本不自动删除任务产物',
                          detail=denied['path'], bytes=None, eligible=False, command=None, outcome='需要授权'))
     for path in receipt.get('external_missing', []):
-        rows.append(dict(id='external:' + path, title='外接开发盘未连接', category='自动处理记录', reason='本轮改为删构建产物：' + path,
+        rows.append(dict(id='external:' + path, title='外接开发盘未连接', category='自动处理记录', reason='旧版记录；当前版本保留任务产物：' + path,
                          detail=path, bytes=None, eligible=False, command=None, outcome='提示'))
     rows += rows_log(root)
     for index, kept in enumerate(receipt.get('kept', [])):

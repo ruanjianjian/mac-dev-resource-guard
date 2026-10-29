@@ -219,7 +219,7 @@ class CheckupTest(CacheFixture):
         self.assertEqual([r['path'] for r in report['roots']], [str(self.root)])
         self.assertEqual(sum(t['idle'] for t in report['tasks']), 1)
         cfg = tiers_config.load(self.home)
-        self.assertGreater(checkup.estimate(report, cfg), 1 << 20)
+        self.assertEqual(checkup.estimate(report, cfg), 1 << 20, 'task bytes are not automatic savings')
         cfg, notes = checkup.apply(self.home, ['caches', 'clean', 'external'], launchctl=self.launchctl, probe=lambda p: None)
         self.assertEqual(notes, [])
         self.assertTrue(cfg['auto_enabled'] and cfg['ask_enabled'] and cfg['caches_enabled'] and cfg['xcode_compile_cache'])

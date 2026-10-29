@@ -59,8 +59,7 @@ def tier_rows(home):
     roots = '；'.join(str(r['path']) + (' → 外接盘 ' + str(r['external']) if r['external'] else '') for r in cfg['task_roots'])
     auto = row('auto-tier', '自动档（不丢东西的清理）',
                ('已打开：' if cfg['auto_enabled'] else '未打开：打开后，') +
-               '空间低于提醒线时把闲置满 {} 天的任务目录挪到外接盘（原路径留链接），外接盘不在就删可重新生成的构建产物，再清不可用的模拟器和工具缓存。'.format(cfg['auto_idle_days']) +
-               ('任务根目录：' + roots if roots else '还没配置任务根目录，请在设置文件里填写 task_roots。'), str(settings_file), command=edit)
+               '每 12 小时只清理至少 7 天未用的编译中间缓存；保留任务目录、模拟器、全局工具缓存和受保护内容。', str(settings_file), command=edit)
     auto['outcome'] = '已打开' if cfg['auto_enabled'] else '未打开'
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
     count = sum(1 for i in pending['items'] if i['state'] == 'pending' and not i.get('unreachable'))

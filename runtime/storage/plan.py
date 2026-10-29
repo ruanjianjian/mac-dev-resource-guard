@@ -90,17 +90,6 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     target = int(settings.warning_free_gib * GIB)
     auto, ask, judge = [], [], []
     tasks = [t for t in report.get('tasks', []) if not t.get('linked')]
-    for t in tasks:
-        if not t.get('idle'):
-            continue
-        name = Path(t['path']).name
-        if external_ready:
-            auto.append(item('把 {} 挪到外接盘'.format(name), t.get('bytes'), '闲置满 {} 天'.format(cfg['auto_idle_days']), t['path'], 'move'))
-        else:
-            outputs = T.rebuildable(T.Task(Path(t['path']).parent, Path(t['path']), Path(t['path']).resolve()), cfg)
-            bytes_ = sum(sizer(o) or 0 for o in outputs)
-            if bytes_:
-                auto.append(item('删 {} 里能重新生成的构建产物'.format(name), bytes_, '闲置，没有外接盘', t['path'], 'prune'))
     if cfg['caches_enabled'] and external_ready:
         for cache in report.get('caches', []):
             if cache.get('status') == 'local' and cache.get('bytes'):
@@ -136,7 +125,7 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
             plan['suggestions'].append(item('收尾不再用的任务 ' + Path(t['path']).name, t['bytes'],
                                             '最近还动过，工具不会自己处理；不再需要的话可以交给 agent 收尾', t['path'], 'task'))
         if not external_ready:
-            plan['suggestions'].append(item('插一块外接盘', 0, '闲置任务和缓存可以挪过去，内置盘只放正在做的', None, 'drive'))
+            plan['suggestions'].append(item('插一块外接盘', 0, '选择后可迁移闲置工具缓存；任务目录仍需单独确认', None, 'drive'))
     return plan
 
 

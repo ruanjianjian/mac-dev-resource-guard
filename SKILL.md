@@ -5,7 +5,7 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 
 # 资源看板（mac-dev-resource-guard）
 
-资源看板是菜单栏里的一张封面：还剩多少、在帮你管什么、有什么要你拍板。后台脚本负责规则内的事（共享缓存、挪闲置任务、删能重新生成的产物）；**为了凑够用户的空间目标、需要取舍和判断的部分，由你（用户的 agent）来做**，每一项都先跟用户确认。命令都在 `~/.local/bin/resource-guard-service`，下文简写为 `rgs`，可以先定义：`rgs() { ~/.local/bin/resource-guard-service "$@"; }`。
+资源看板是菜单栏里的一张封面：还剩多少、在帮你管什么、有什么要你拍板。后台脚本负责规则内的事（共享缓存、清理至少 7 天未用的编译中间目录）；**为了凑够用户的空间目标、需要取舍和判断的部分，由你（用户的 agent）来做**，每一项都先跟用户确认。命令都在 `~/.local/bin/resource-guard-service`，下文简写为 `rgs`，可以先定义：`rgs() { ~/.local/bin/resource-guard-service "$@"; }`。
 
 ## 1. 用户发来仓库链接、要安装时
 
@@ -21,7 +21,9 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
    python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-apply --ids caches,clean,external
    ```
    打开共享构建缓存会全局打开 Xcode 编译缓存（改 `~/.zshenv` 一段带标记的设置），先讲清楚再做。macOS 问「资源看板」能否访问外接盘时，请用户点允许。
-5. 按第 2 节出计划、处理。
+5. 不用外接盘且要求全程后台时，先 `checkup-firstrun`，再 `checkup-off --ids external`，最后 `checkup-apply --ids caches,clean`。不打开面板、不重启现有终端或 IDE。
+6. 1.6.1 的新安装和升级都限制为 `auto_scope=managed-caches`；旧 `standard` 设置不会恢复自动删除任务或模拟器。关闭自动清理的选择会保留，启用前确认已有授权。不要手动改回旧版规则。
+7. 按第 2 节出计划、处理。
 
 ## 2. 出计划、处理
 

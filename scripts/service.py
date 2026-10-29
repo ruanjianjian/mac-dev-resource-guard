@@ -256,15 +256,17 @@ def activate(home):
     if sys.platform != 'darwin' or home.resolve() != Path.home().resolve():
         raise ValueError('自动维护仅能为当前 macOS 用户开启')
     with operation_lock(home, 'installation'):
+        upgrading = (state_root(home)/'installation.json').is_file()
         adopt_config(home)
+        tiers_config.migrate_scope(home)
         runtime = install_runtime(home)
         receipt = dict(schema=1, runtime=str(runtime), started=time.time(), status='configuring', jobs=[])
         atomic_json(state_root(home)/'installation.json', receipt)
         try:
-            # Resume uses the same state lock as tick and preserves all ownership data.
-            subprocess.run([sys.executable, str(runtime/'runtime/memory/scripts/dev_memory.py'), 'resume'],
-                           check=True, capture_output=True)
-            (state_root(home)/'storage-paused').unlink(missing_ok=True)
+            # An upgrade preserves pauses, including the pre-1.6 storage marker.
+            if not upgrading:
+                subprocess.run([sys.executable, str(runtime/'runtime/memory/scripts/dev_memory.py'), 'resume'],
+                               check=True, capture_output=True)
             for kind in ('memory', 'storage'):
                 receipt['jobs'].append(enable_job(home, kind, runtime))
             receipt['status'] = 'active'
@@ -290,7 +292,7 @@ def tick_storage(home, now=None):
         if (state_root(home)/'storage-paused').exists():
             return {'status': 'paused', 'results': []}
         previous = read_json(state_root(home)/'automatic-storage.json')
-        if previous and previous.get('status') != 'running' and now - previous.get('at', 0) < CACHE_INTERVAL - 60:
+        if previous and previous.get('status') not in ('running', 'disabled') and now - previous.get('at', 0) < CACHE_INTERVAL - 60:
             receipt = {'status': 'not-due', 'results': [], 'cache_status': previous.get('status')}
         else:
             receipt = clean_caches(home)
@@ -509,6 +511,16 @@ def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
 
 def clean_caches(home):
     """1.3 cleanup of the managed slots and the existing Xcode caches."""
+    try:
+        cfg = tiers_config.load(home)
+    except ValueError as error:
+        receipt = dict(at=time.time(), status='error', error=str(error), results=[])
+        atomic_json(state_root(home)/'automatic-storage.json', receipt)
+        return receipt
+    if not cfg['auto_enabled']:
+        receipt = dict(at=time.time(), status='disabled', results=[])
+        atomic_json(state_root(home)/'automatic-storage.json', receipt)
+        return receipt
     results = []
     for name, build in [('managed', lambda: StorageManager(configure(home))), ('existing-xcode', lambda: common.manager(home))]:
         if (state_root(home)/'storage-paused').exists(): break
@@ -516,11 +528,16 @@ def clean_caches(home):
         # Each family stands alone: a failure is recorded for the dashboard, never hides the other.
         try:
             manager = build()
+            manager.settings.normal_days = manager.settings.pressure_days = manager.settings.critical_days = 7
             plan = manager.plan(activity=common.activity(manager.settings.lease_root))
             def protected_activity():
                 activity = common.activity(manager.settings.lease_root)
-                if (state_root(home)/'storage-paused').exists():
-                    activity.errors.append('automatic maintenance paused')
+                try:
+                    enabled = tiers_config.load(home)['auto_enabled']
+                except ValueError:
+                    enabled = False
+                if not enabled or (state_root(home)/'storage-paused').exists():
+                    activity.errors.append('automatic maintenance paused or configuration invalid')
                 return activity
             result = manager.apply(plan, activity_factory=protected_activity, manual=True)
             results.append(dict(family=name, started=started, eligible_bytes=plan['eligible_accounting_bytes'], result=result))
