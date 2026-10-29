@@ -256,33 +256,69 @@ private struct Cover: View {
             }
             VStack { Spacer(); HStack(alignment: .bottom) {
                 Button { store.page = .switches } label: {
-                    VStack(alignment: .leading, spacing: 1) { ForEach(Array(leftLines(tight).enumerated()), id: \.offset) { _, line in
-                        Text(line.0).foregroundColor(line.1)
-                    } }.font(.system(size: 11)).contentShape(Rectangle())
-                }.buttonStyle(.plain).help("帮你管着")
+                    // While the background works, the line under the ring already says what is going on.
+                    ManageCard(items: model.work == nil ? manageItems(tight, soft: soft) : [])
+                }.buttonStyle(.plain).help("打开「帮你管着」")
                 Spacer()
                 Button { if store.unplugged == nil && s.pending > 0 { store.page = .pending } else { store.page = .switches } } label: {
                     Text(rightLine(s)).font(.system(size: 12)).foregroundColor(store.unplugged == nil ? Ink.cream : Ink.coral)
-                }.buttonStyle(.plain)
-            } }.padding(18)
+                }.buttonStyle(.plain).padding(.bottom, 7)
+            } }.padding(.horizontal, 14).padding(.bottom, 13)
         }
     }
 
-    private func leftLines(_ tight: Bool) -> [(String, Color)] {
+    /// What the card says it manages: a tick per thing that is on, the unplugged drive in coral,
+    /// or, when space is short, how much more can be freed.
+    private func manageItems(_ tight: Bool, soft: Color) -> [(String, Color)] {
         if tight, let freed = store.checkup?.eligibleBytes, freed >= 1 << 30 {
-            return [("还能腾出", Ink.cream), ("约 \(size(freed))", Ink.cream)]
+            return [("还能腾出约 \(size(freed))", Ink.cream)]
         }
-        var lines: [(String, Color)] = []
-        if store.suggestion("caches")?.outcome == "已开启" { lines.append(("缓存共享", Ink.cream)) }
-        if store.suggestion("clean")?.outcome == "已开启" { lines.append(("自动清理", Ink.cream)) }
-        if let gone = store.unplugged { lines.append(("\(gone) 未连接", Ink.coral)) }
-        else if let drive = store.drive { lines.append(("\(drive) 就绪", Ink.cream)) }
-        return lines.isEmpty ? [(store.checkup == nil ? "" : "还没开启", Ink.cream)] : lines
+        var items: [(String, Color)] = []
+        if store.suggestion("caches")?.outcome == "已开启" { items.append(("✓ 缓存共享", soft)) }
+        if store.suggestion("clean")?.outcome == "已开启" { items.append(("✓ 自动清理", soft)) }
+        if let gone = store.unplugged { items.append(("\(gone) 未连接", Ink.coral)) }
+        else if let drive = store.drive { items.append(("✓ \(drive) 就绪", soft)) }
+        return items.isEmpty ? [(store.checkup == nil ? "" : "还没开启", soft)] : items
     }
 
     private func rightLine(_ s: Snapshot) -> String {
         if store.unplugged != nil { return "插上就恢复" }
         return s.pending > 0 ? "\(s.pending) 待确认 ›" : "没有待办"
+    }
+}
+
+/// The way into 「帮你管着」 (RAW-53/54, choice B): a soft card with a title and ›, so it reads as something to press.
+/// On hover it brightens and the pointer becomes a hand.
+private struct ManageCard: View {
+    let items: [(String, Color)]
+    @State private var hover = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 0) {
+                Text("帮你管着").font(.system(size: 11, weight: .medium))
+                Spacer(minLength: 8)
+                Text("›").font(.system(size: 13, weight: .medium))
+            }.foregroundColor(Ink.cream)
+            // Two per line, never broken inside a word.
+            ForEach(Array(stride(from: 0, to: items.count, by: 2)), id: \.self) { start in
+                HStack(spacing: 10) {
+                    ForEach(start..<min(start + 2, items.count), id: \.self) { i in
+                        Text(items[i].0).foregroundColor(items[i].1).lineLimit(1).fixedSize()
+                    }
+                }.font(.system(size: 10.5))
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(width: 150, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(hover ? 0.16 : 0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(hover ? 0.34 : 0.18), lineWidth: 0.8))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .onHover { inside in
+            hover = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .animation(Motion.reduced ? nil : .easeOut(duration: 0.15), value: hover)
     }
 }
 

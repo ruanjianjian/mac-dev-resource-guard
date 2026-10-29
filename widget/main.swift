@@ -392,9 +392,6 @@ func renderCover(_ tab: String, to out: String) throws {
     if let free = env["RENDER_FREE"].flatMap(Double.init) { model.snapshot.free = free }
     if let capacity = env["RENDER_CAPACITY"].flatMap(Double.init) { model.snapshot.capacity = capacity }
     if let pending = env["RENDER_PENDING"].flatMap(Int.init) { model.snapshot.pending = pending }
-    if let parts = env["RENDER_WORK"]?.split(separator: ":").map(String.init), parts.count == 4 {
-        model.work = Work(kind: parts[0], title: parts[1], bytes: Int64(parts[2]) ?? 0, freeBefore: Double(parts[3]))
-    }
     let store = CoverStore()
     store.checkup = try DashboardActions.call("checkup-preview")
     store.pending = try DashboardActions.call("pending-preview")
@@ -402,6 +399,10 @@ func renderCover(_ tab: String, to out: String) throws {
     store.memory = try DashboardActions.call("memory-page")
     if let pressure = env["RENDER_PRESSURE"].flatMap(UInt32.init) {
         model.snapshot.pressure = pressure; model.snapshot.memorySince = Date().timeIntervalSince1970 - 360
+    }
+    // Last, just before drawing: work starts a 2-second resample, which would replace the pinned numbers with this Mac's.
+    if let parts = env["RENDER_WORK"]?.split(separator: ":").map(String.init), parts.count == 4 {
+        model.work = Work(kind: parts[0], title: parts[1], bytes: Int64(parts[2]) ?? 0, freeBefore: Double(parts[3]))
     }
     store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-plan": .plan,
                   "cover-memory": .memory][tab] ?? .cover
