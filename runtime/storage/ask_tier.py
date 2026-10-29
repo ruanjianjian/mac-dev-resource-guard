@@ -107,14 +107,18 @@ def task_blocker(task, cfg, activity, pins, now):
     return None, latest
 
 
-def candidates(home, cfg, activity, pins, simctl, now, memory):
+def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
+    """Everything worth asking about; with `only` (ids), just those, so a confirmation rechecks in seconds."""
     found = {}
+    kinds = None if only is None else {key.split(':', 1)[0] for key in only}
 
     def add(kind, key, title, bytes_, reason, fingerprint, **extra):
         found[kind + ':' + key] = dict(id=kind + ':' + key, kind=kind, title=title, bytes=bytes_ or 0, reason=reason,
                                        loses=LOSES[kind], fingerprint=fingerprint, **extra)
 
-    other_candidates(home, activity, now, add)
+    other_candidates(home, activity, now, add, kinds=kinds)
+    if kinds is not None and not kinds & {'simulator-shutdown', 'simulator-delete', 'runtime-delete'}:
+        return _tasks(cfg, activity, pins, now, add, only, found)
     listing = json.loads(simctl(['list', 'devices', '--json']))
     used_runtimes, booted = set(), set()
     unattached = memory.setdefault('unattached_since', {})
@@ -154,32 +158,36 @@ def candidates(home, cfg, activity, pins, simctl, now, memory):
             add('runtime-delete', runtime.get('identifier', key), 'iOS 运行时 ' + runtime_label(identifier, runtime.get('version'))
                 if '.iOS-' in identifier else '运行时 ' + runtime_label(identifier, runtime.get('version')),
                 runtime.get('sizeBytes'), '没有任何模拟器在用', 'runtime:' + identifier)
+    return _tasks(cfg, activity, pins, now, add, only, found)
+
+
+def _tasks(cfg, activity, pins, now, add, only, found):
     for task in T.discover(cfg):
-        if not task.reachable:
+        if not task.reachable or only is not None and 'task-delete:' + str(task.path) not in only:
             continue
         blocker, latest = task_blocker(task, cfg, activity, pins, now)
         if blocker is None:
             where = '（在外接盘上）' if task.linked else ''
             add('task-delete', str(task.path), task.path.name + where, T.size(task.real),
                 '闲置 {:.0f} 天，改动都已提交并推送'.format((now - latest) / T.DAY), 'latest:{:.0f}'.format(latest))
-    return found
+    return found if only is None else {key: value for key, value in found.items() if key in only}
 
 
-def other_candidates(home, activity, now, add, mounted=None):
-    """Installers, the Trash and Xcode leftovers (space-watch AC-02~04)."""
-    for item in spaces.installers(home, now, mounted):
+def other_candidates(home, activity, now, add, mounted=None, kinds=None):
+    """Installers, the Trash and Xcode leftovers (space-watch AC-02~04); `kinds` limits which are looked at."""
+    for item in (spaces.installers(home, now, mounted) if kinds is None or 'installer-delete' in kinds else []):
         if item['idle'] and not activity.reasons(Path(item['path'])):
             add('installer-delete', item['path'], '下载里的 ' + Path(item['path']).name, item['bytes'],
                 '{:.0f} 天没动，没有挂载'.format(item['idle_days']), 'mtime:{:.0f}'.format(item['mtime']))
-    trash = spaces.trash_size(home)
+    trash = spaces.trash_size(home) if kinds is None or 'trash-empty' in kinds else None
     if trash is not None and trash >= spaces.TRASH_MIN_BYTES:
         add('trash-empty', str(Path(home) / '.Trash'), '废纸篓', trash, '废纸篓占了 {:.1f} GB'.format(trash / GIB),
             'bytes:{}'.format(trash // GIB))
-    for item in spaces.device_support(home, now):
+    for item in (spaces.device_support(home, now) if kinds is None or 'device-support-delete' in kinds else []):
         if item['idle_days'] >= spaces.DEVICE_SUPPORT_IDLE_DAYS and not activity.reasons(Path(item['path'])):
             add('device-support-delete', item['path'], '{} {} 设备支持文件'.format(item['platform'], item['version']), item['bytes'],
                 '{:.0f} 天没连过这个版本的设备'.format(item['idle_days']), 'mtime:{:.0f}'.format(item['mtime']))
-    for item in spaces.archives(home, now):
+    for item in (spaces.archives(home, now) if kinds is None or 'archive-delete' in kinds else []):
         if item['age_days'] >= spaces.ARCHIVE_AGE_DAYS and not activity.reasons(Path(item['path'])):
             add('archive-delete', item['path'], '归档 ' + item['name'], item['bytes'],
                 '{:.0f} 天前打的包'.format(item['age_days']), 'mtime:{:.0f}'.format(item['mtime']))
@@ -287,17 +295,25 @@ def remove_task(path, cfg):
 
 
 def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash):
-    """Run only the confirmed ids, re-checking each against a fresh scan (ask AC-02/06/07)."""
+    """Run only the confirmed ids, each re-checked just before (ask AC-02/06/07). Only those ids are looked
+    at again, so confirming takes seconds instead of a full scan of every task and simulator."""
     now = time.time() if now is None else now
     activity = activity if activity is not None else Activity.collect(settings.lease_root)
     if activity.errors:
         # Without knowing what is in use nothing is deleted, and the list stays as it is.
         return [dict(id=key, outcome='已跳过', reason='这会儿查不清哪些程序在用它，为安全没有删；稍后再试') for key in ids]
-    pending = refresh(home, cfg, settings, simctl, activity, now)
+    pins, _ = StorageManager(settings)._pins(now)
+    fresh = candidates(home, cfg, activity, pins, simctl, now, dict(load(home, ASK_STATE, {})), only=set(ids))
+    pending = load(home, PENDING, empty_pending())
     items = {i['id']: i for i in pending['items']}
+    gone = set()
     results = []
     for key in ids:
         item = items.get(key)
+        if item is None and key in fresh:
+            # Confirmed straight from a check (not yet on the saved list): it qualifies right now.
+            item = items[key] = dict(fresh[key], state='pending', result=None, updated=now)
+            pending['items'].append(item)
         if item is None:
             results.append(dict(id=key, outcome='已跳过', reason='状态已变，不再满足条件或已处理'))
             continue
@@ -307,6 +323,12 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
         if item['state'] not in ('pending', 'failed', 'ignored'):
             results.append(dict(id=key, title=item['title'], outcome='已跳过', reason='已在处理'))
             continue
+        if key not in fresh:
+            # Rechecked just now: in use again, changed, or already gone. It leaves the list.
+            gone.add(key)
+            results.append(dict(id=key, title=item['title'], outcome='已跳过', reason='状态已变，不再满足条件或已处理'))
+            continue
+        item.update(bytes=fresh[key]['bytes'], reason=fresh[key]['reason'])
         item['state'] = 'running'
         save(home, PENDING, pending)
         target = key.split(':', 1)[1]
@@ -333,7 +355,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
             item.update(state='failed', result=str(error), updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='失败', reason=str(error)))
         save(home, PENDING, pending)
-    pending['items'] = [i for i in pending['items'] if i['state'] != 'done']
+    pending['items'] = [i for i in pending['items'] if i['state'] != 'done' and i['id'] not in gone]
     save(home, PENDING, pending)
     return results
 

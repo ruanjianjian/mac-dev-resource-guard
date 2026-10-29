@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from service import activate, ask_consent, enable_recommended, install_skill, stop_menu_app, tiers_config, waiting_lock
+from service import activate, ask_consent, current_target, enable_recommended, install_skill, set_target, stop_menu_app, tiers_config, waiting_lock
 import discover
 
 root = Path(__file__).resolve().parents[1]
@@ -52,6 +52,9 @@ for note in install_skill(home, root):
 # Safe maintenance (expired Xcode intermediates only) is on by default and kept as chosen on upgrades.
 drive = discover.recommended_drive(discover.external_drives(look_inside=False))
 answer = ask_consent(home, drive['name'] if drive else None)
+# The agent passes the target the user agreed to in the same question (RESOURCE_GUARD_TARGET=90).
+if os.environ.get('RESOURCE_GUARD_TARGET', '').strip():
+    set_target(home, os.environ['RESOURCE_GUARD_TARGET'].strip())
 if answer == 'yes':
     print('正在体检并打开，任务多时要一两分钟…')
     for note in enable_recommended(home):
@@ -65,6 +68,8 @@ print({
     'decided': '安装完成：{}，面板不会自己弹出。共享构建缓存和外接盘保持原有选择。'.format(safe),
     'unasked': '安装完成：{}。还没问你要不要打开共享构建缓存和外接盘；同意的话运行：~/.local/bin/resource-guard-service enable'.format(safe),
 }[answer])
+if answer != 'decided':
+    print('空间目标：内置盘至少留 {:.0f} GB（约磁盘的 20%），想改就在菜单栏「资源看板」→「帮你管着」里调，或告诉你的 agent。'.format(current_target(home)['target_gib']))
 if tiers_config.load(home)['external_root']:
     # Every build gets a new local signature, so macOS asks again; without "Allow" moves to the drive pause.
     print('提示：macOS 可能会再问一次「资源看板」能否访问外接盘（每次安装或升级都会问），请点「允许」，否则往外接盘挪东西会暂停。')

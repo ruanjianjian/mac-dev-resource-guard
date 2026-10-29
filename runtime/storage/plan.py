@@ -29,8 +29,8 @@ def is_xcode_build(name):
 
 
 def suggested_target(capacity_bytes):
-    """About 10% of the disk, rounded to 10 GB, never below 20 GB."""
-    return max(20, int(round(capacity_bytes / GIB / 10 / 10.0)) * 10)
+    """About 20% of the disk, rounded to 10 GB, never below 20 GB (RAW-41)."""
+    return max(20, int(round(capacity_bytes / GIB * 0.2 / 10.0)) * 10)
 
 
 def thresholds(target_gib):

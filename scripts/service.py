@@ -138,9 +138,9 @@ def adopt_config(home):
             if key in status:
                 cfg[key] = status[key]
     if not cfg:
-        capacity = shutil.disk_usage(home).total / 2**30
-        cfg = dict(target_free_gib=round(capacity*.2, 1), warning_free_gib=round(capacity*.15, 1),
-                   critical_free_gib=round(capacity*.1, 1), intermediate_budget_gib=round(capacity*.1, 1))
+        # A first install starts with the suggested target (about 20% of the disk), the same number the agent offers.
+        capacity = shutil.disk_usage(home).total
+        cfg = dict(space_plan.thresholds(space_plan.suggested_target(capacity)), intermediate_budget_gib=round(capacity / 2**30 * .1, 1))
     atomic_json(path, cfg)
     configure(home)
 
@@ -624,6 +624,27 @@ def integrate(home, project):
     return {'path': str(project), 'wrapper': str(path)}
 
 
+BUNDLE_ID = 'io.github.ruanjianjian.mac-dev-resource-guard.widget'
+
+
+def app_pids_by_bundle(run=subprocess.run):
+    """The menu app as macOS knows it, whatever path or arguments it was started with (an older install,
+    a moved app). The storage tick runs the same binary without becoming an app, so it is never listed."""
+    pids = []
+    try:
+        found = run(['/usr/bin/lsappinfo', 'find', 'bundleid=' + BUNDLE_ID], capture_output=True, text=True,
+                    errors='surrogateescape', timeout=10).stdout.split()
+        for asn in (token for token in found if token.startswith('ASN:')):
+            info = run(['/usr/bin/lsappinfo', 'info', '-only', 'pid', asn], capture_output=True, text=True,
+                       errors='surrogateescape', timeout=10).stdout
+            match = re.search(r'"?pid"?\s*=\s*(\d+)', info)
+            if match:
+                pids.append(int(match.group(1)))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return pids
+
+
 def menu_app_pids(executable, listing=None):
     """PIDs of the running menu app: exactly this executable, no arguments. The storage tick runs the same
     binary with --run-tick and is left alone. Matched here, not with pkill: one process whose command line
@@ -639,6 +660,11 @@ def menu_app_pids(executable, listing=None):
     return found
 
 
+def running_menu_apps(executable):
+    """Every running menu app: by its exact path and by its bundle id."""
+    return sorted(set(menu_app_pids(executable)) | set(app_pids_by_bundle()))
+
+
 def stop_menu_app(executable, wait=5.0):
     """Quit the running menu app and wait for it, so `open` starts the new build instead of reusing the old one."""
     def alive(pid):
@@ -652,7 +678,7 @@ def stop_menu_app(executable, wait=5.0):
             return True
         except ProcessLookupError:
             return False
-    pids = menu_app_pids(executable)
+    pids = running_menu_apps(executable)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in pids:
             try:

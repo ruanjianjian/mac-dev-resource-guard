@@ -9,20 +9,21 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 
 ## 1. 用户发来仓库链接、要安装时
 
-1. **装之前先问用户一次**（你的命令行没有终端，安装脚本问不到用户）。原话照这个说：
-   > 装好后我会默认打开这两项，可以吗？
-   > · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）；任务目录里的 Xcode 构建产物也放到外接盘
-   > · 外接盘：插着外接盘时，缓存和构建产物放过去；空间不够时，闲置且改动都已推送的任务也整个挪过去
-   > （安全自动清理默认就开着：只清 7 天没用过的编译中间缓存，任务目录和模拟器不动。）
-
-   用户同意就带上 `RESOURCE_GUARD_ENABLE=yes`，不同意就写 `=no`，然后安装。安装会下载源码、在本机编译、装好 App、后台任务和这份 skill；同意时装完就已开好：
+1. **先看是新装还是升级**：`test -x ~/.local/bin/resource-guard-service` 成立就是升级。**升级什么都不用问**，直接运行下面的安装命令（不带变量），装完告诉用户版本和当前设置（`rgs target` 看目标）。
+2. **新装只问一句**（你的命令行没有终端，安装脚本问不到用户）。先算建议目标（磁盘约 20%，取整到 10 GB）：
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | RESOURCE_GUARD_ENABLE=yes bash
+   python3 -c "import shutil; t = shutil.disk_usage('/').total / 2**30; print(max(20, round(t * 0.2 / 10) * 10))"
    ```
-   缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。忘了带这个变量也没关系：安装会提示还没问，用户同意后运行 `rgs enable` 即可。升级时不会再问，原来的开关保持不变。
-2. 记下你是谁，以后看板要交接时会打开你：`rgs agent-app claude`（Claude Code）或 `rgs agent-app codex`（Codex）。
-3. **主动问用户空间目标**：「内置盘至少想留多少？」给一个建议值（磁盘约 10%，取整到 10 GB）。用户答了就 `rgs target 50`；不带数字的 `rgs target` 会显示当前目标和建议值。
-4. macOS 问「资源看板」能否访问外接盘时，请用户点允许。以后要单独开关某一项，让用户在面板「帮你管着」里点。
+   然后用一句话问，不要拆成几个选项、不要单独问外接盘：
+   > 我会装好资源看板，默认打开共享构建缓存（各任务共用一份工具缓存，并打开 Xcode 编译缓存，会在 ~/.zshenv 加一段可一键还原的设置；插着外接盘时，缓存和构建产物也放过去），内置盘至少留 X GB（约磁盘的 20%）。可以吗？
+
+   用户说可以，就带上 `RESOURCE_GUARD_ENABLE=yes RESOURCE_GUARD_TARGET=X`；用户只改了数字，就用他的数字；用户不想开缓存，就写 `RESOURCE_GUARD_ENABLE=no`。安装会下载源码、在本机编译、装好 App、后台任务和这份 skill，装完就已开好：
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/ruanjianjian/mac-dev-resource-guard/main/install.sh | RESOURCE_GUARD_ENABLE=yes RESOURCE_GUARD_TARGET=X bash
+   ```
+   缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。后台正在整理时，安装会自己等它做完。
+3. 记下你是谁，以后看板要交接时会打开你：`rgs agent-app claude`（Claude Code）或 `rgs agent-app codex`（Codex）。
+4. 安装输出提示 macOS 可能问「资源看板」能否访问外接盘时，转告用户点「允许」。以后要改目标或单独开关某一项，用户在面板「帮你管着」里点，或告诉你（`rgs target 90`）。
 5. 用户不用外接盘、又要求全程后台时：同意后照样带 `RESOURCE_GUARD_ENABLE=yes` 安装，再 `python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-off --ids external`。不打开面板、不重启现有终端或 IDE。
 6. 自动清理固定为 `auto_scope=managed-caches`：只删至少 7 天没用的编译中间缓存，不自动删任务、构建产物或模拟器。开了外接盘、空间低于提醒线时，后台会把闲置满 3 天、改动都已提交并推送的任务整个挪过去（不删，原路径留链接）。关闭自动清理的选择会保留，不要手动改规则。
 7. 按第 2 节出计划、处理。

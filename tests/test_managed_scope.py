@@ -237,6 +237,17 @@ class ManagedScopeTests(TierFixture):
             with service.waiting_lock(self.home, 'periodic-storage', wait=0.5, announce=lambda m: None):
                 pass
 
+    def test_the_menu_app_is_also_found_by_bundle_id(self):
+        import subprocess
+        def run(args, **kwargs):
+            out = 'ASN:0x0-0x6668662-"资源看板":\n' if args[1] == 'find' else '"pid"=24009\n'
+            self.assertIn(args[-1], ('bundleid=' + service.BUNDLE_ID, 'ASN:0x0-0x6668662-"资源看板":'))
+            return subprocess.CompletedProcess(args, 0, out, '')
+        self.assertEqual(service.app_pids_by_bundle(run), [24009])
+        verbose = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, 'ASN:1-2-"x":' if args[1] == 'find' else '    pid = 77 !cgsConnection', '')
+        self.assertEqual(service.app_pids_by_bundle(verbose), [77])
+        self.assertEqual(service.app_pids_by_bundle(lambda *a, **k: (_ for _ in ()).throw(OSError())), [])
+
     def test_installer_rejects_invalid_settings_before_any_subprocess(self):
         import runpy
         from test_tiers import ROOT
