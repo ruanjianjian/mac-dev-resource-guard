@@ -215,15 +215,19 @@ struct Overview: View {
 
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
     let model = Monitor()
     let actions = DashboardActions()
     let store = CoverStore()
     var panel: NSPopover!
+    /// An invisible spot on the display in use, for when the icon is not in that display's menu bar.
+    let anchor = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2, height: 1), styleMask: [.borderless], backing: .buffered, defer: true)
     var window: NSWindow!
     var status: NSStatusItem!
     let statusMenu = NSMenu()
     var shortcut: GlobalShortcut?
+    /// --probe-panel: open the cover once for this pointer spot (optionally as if the menu bar were hidden), report, quit.
+    var probe: (pointer: CGPoint, hideIcon: Bool)?
     let badge = NSView(frame: NSRect(x: 14, y: 13, width: 7, height: 7))
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -243,6 +247,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.appearance = NSAppearance(named: .aqua)
         panel.contentSize = NSSize(width: 300, height: 340)
         panel.contentViewController = NSHostingController(rootView: CoverPanel(model: model, store: store))
+        panel.delegate = self
+        anchor.isOpaque = false; anchor.backgroundColor = .clear; anchor.hasShadow = false
+        anchor.ignoresMouseEvents = true; anchor.isReleasedWhenClosed = false
+        anchor.level = .statusBar
+        anchor.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "gauge", accessibilityDescription: "资源看板")
         status.button?.image?.isTemplate = true
@@ -304,6 +313,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             guard let reply = try? DashboardActions.call("checkup-firstrun"), reply.status == "ok" else { return }
             DispatchQueue.main.async { self?.post(title: "体检完成", body: reply.message, tab: "checkup") }
         }
+        if let probe { runProbe(probe) }
+    }
+    func runProbe(_ probe: (pointer: CGPoint, hideIcon: Bool)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.showPanel(page: .cover, pointer: probe.pointer)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                let shown = self.panel.contentViewController?.view.window?.frame
+                let icon = self.status.button.flatMap { $0.window?.convertToScreen($0.convert($0.bounds, to: nil)) }
+                print("screens \(NSScreen.screens.map { $0.frame })")
+                print("icon \(icon.map { "\($0)" } ?? "none") · anchor \(self.anchor.isVisible ? "\(self.anchor.frame)" : "unused")")
+                let ok = self.panel.isShown && shown != nil
+                print("panel \(ok ? "\(shown!)" : "not shown") on \(self.panelScreen.map { "\($0)" } ?? "no display")")
+                self.panel.close(); exit(ok ? 0 : 1)
+            }
+        }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
     func updateStatus(_ s: Snapshot) {
@@ -347,19 +371,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         } else { togglePanel() }
     }
     @objc func show() { showPanel(page: .cover) }
-    /// The cover drops down from the menu-bar icon; data loads only when it is opened.
-    func showPanel(page: CoverPage) {
+    /// The cover drops down on the display under the pointer: from the menu-bar icon when it is there,
+    /// otherwise from the same spot under that display's menu bar. Data loads only when it is opened.
+    func showPanel(page: CoverPage, pointer: CGPoint = NSEvent.mouseLocation) {
         guard let button = status.button else { return }
         store.page = page
         store.refresh()
         model.refresh()
-        if !panel.isShown { panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        let screens = NSScreen.screens.map(PanelScreen.init)
+        if panel.isShown {
+            // Open on another display: bring it over. Open here already: only the page changes.
+            guard panelScreen != PanelPlacement.screen(at: pointer, in: screens)?.frame else { NSApp.activate(ignoringOtherApps: true); return }
+            panel.close()
+        }
+        let seen = !(probe?.hideIcon ?? false) && (button.window?.occlusionState.contains(.visible) ?? false)
+        let icon = seen ? button.window?.convertToScreen(button.convert(button.bounds, to: nil)) : nil
+        switch PanelPlacement.choose(screens: screens, pointer: pointer, icon: icon, width: panel.contentSize.width) {
+        case .icon:
+            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        case .anchor(let spot):
+            anchor.setFrame(NSRect(x: spot.x - 1, y: spot.y - 1, width: 2, height: 1), display: false)
+            anchor.orderFrontRegardless()
+            panel.show(relativeTo: anchor.contentView!.bounds, of: anchor.contentView!, preferredEdge: .minY)
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
-    func togglePanel() { panel.isShown ? panel.performClose(nil) : showPanel(page: .cover) }
-    /// The old full window, kept for the less common tools under 「更多」.
+    var panelScreen: CGRect? { panel.contentViewController?.view.window?.screen?.frame }
+    func popoverDidClose(_ notification: Notification) { if !panel.isShown { anchor.orderOut(nil) } }
+    /// The shortcut on another display moves the cover there instead of closing it.
+    func togglePanel() {
+        let here = PanelPlacement.screen(at: NSEvent.mouseLocation, in: NSScreen.screens.map(PanelScreen.init))?.frame
+        panel.isShown && panelScreen == here ? panel.performClose(nil) : showPanel(page: .cover)
+    }
+    /// The old full window, kept for the less common tools under 「更多」; it opens on the display in use.
     func showWindow(tab: String) {
         panel.performClose(nil)
+        if let frame = PanelPlacement.window(window.frame, screens: NSScreen.screens.map(PanelScreen.init), pointer: NSEvent.mouseLocation) {
+            window.setFrame(frame, display: false)
+        }
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         actions.requestedTab = tab
     }
@@ -464,12 +513,13 @@ if CommandLine.arguments.contains("--run-tick") {
     require(pendingRow.loses == "登录状态" && pendingRow.kind == "simulator-delete")
     let oldRow = try! JSONDecoder().decode(ResourceRow.self, from: Data(#"{"id":"a","title":"t","detail":"","category":"c","bytes":null,"eligible":false,"reason":"r","outcome":null,"command":null}"#.utf8))
     require(oldRow.loses == nil)
+    require(PanelPlacement.selfTest())
     require(try! testHomeArgument(["app"]) == nil)
     require(try! testHomeArgument(["app", "--test-home", "/fixture"]) == "/fixture")
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays")
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-tab"), index + 2 < CommandLine.arguments.count {
     // Only against a marked fixture home, so evidence never reads or changes real data.
     guard let home = try? testHomeArgument(CommandLine.arguments), FileManager.default.fileExists(atPath: home + "/.resource-dashboard-fixture") else {
@@ -489,5 +539,10 @@ if CommandLine.arguments.contains("--run-tick") {
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate(); app.delegate = delegate
+    if let index = CommandLine.arguments.firstIndex(of: "--probe-panel"), index + 1 < CommandLine.arguments.count {
+        let spot = CommandLine.arguments[index + 1].split(separator: ",").compactMap { Double($0) }
+        guard spot.count == 2 else { fputs("--probe-panel needs x,y in screen points\n", stderr); exit(2) }
+        delegate.probe = (CGPoint(x: spot[0], y: spot[1]), CommandLine.arguments.contains("--hide-icon"))
+    }
     withExtendedLifetime(delegate) { app.run() }
 }
