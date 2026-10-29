@@ -51,10 +51,14 @@ final class CoverStore: ObservableObject {
     @Published var plan: BackendReply?
     @Published var working = ""
     @Published var message = ""
+    /// The confirmed items that were not deleted, each with its reason; shown until the next action.
+    @Published var skipped: [ResourceRow] = []
     private var loading = false
+    private var again = false
 
     func refresh(scan: Bool = false) {
-        guard !loading else { return }
+        // A refresh asked for while one runs (say, right after a clean) runs again afterwards, never dropped.
+        guard !loading else { again = true; return }
         loading = true
         if scan { working = "正在体检，任务多时要几分钟…" }
         DispatchQueue.global(qos: .utility).async {
@@ -67,6 +71,7 @@ final class CoverStore: ObservableObject {
                 if let plan, plan.status == "ok" { self.plan = plan }
                 self.loading = false
                 if scan { self.working = "" }
+                if self.again { self.again = false; self.refresh() }
             }
         }
     }
@@ -81,6 +86,51 @@ final class CoverStore: ObservableObject {
                 self.message = reply?.message ?? "没连上后台，请稍后再试。"
                 if action.hasPrefix("checkup"), let reply, reply.status == "ok" { self.checkup = reply }
                 if action == "plan-target", let reply, reply.status == "ok" { self.plan = reply; self.message = "" }
+                self.refresh()
+                (NSApp.delegate as? AppDelegate)?.model.refresh()
+            }
+        }
+    }
+
+    /// 「删除所选」: re-read the list right now and run the ticked items still on it, so a confirmation never
+    /// goes stale; a background cleanup in progress is waited for (up to 2 minutes) instead of refusing.
+    func cleanPending(_ ids: [String]) {
+        guard working.isEmpty, !ids.isEmpty else { return }
+        working = "正在逐项核对并删除…"; message = ""; skipped = []
+        let titles = Dictionary(pendingRows.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        DispatchQueue.global(qos: .utility).async {
+            var reply: BackendReply?
+            var gone: [String] = []
+            for attempt in 0..<40 {
+                guard let preview = try? DashboardActions.call("pending-preview"), preview.status == "ok" else { break }
+                let listed = Set(preview.rows?.filter(\.eligible).map(\.id) ?? [])
+                gone = ids.filter { !listed.contains($0) }
+                let run = ids.filter(listed.contains)
+                if run.isEmpty { break }
+                reply = try? DashboardActions.call("pending-clean", token: preview.token, ids: run)
+                guard reply?.status == "busy" else { break }
+                if attempt == 0 { DispatchQueue.main.async { self.working = "后台正在整理，等它做完就删…" } }
+                Thread.sleep(forTimeInterval: 3)
+            }
+            DispatchQueue.main.async {
+                self.working = ""
+                let rows = reply?.rows ?? []
+                let done = rows.filter { $0.outcome == "已完成" }
+                // The backend names an item it no longer lists by its id; show the title the person ticked.
+                self.skipped = rows.filter { $0.outcome != "已完成" }.map { row in
+                    row.title != row.id ? row : ResourceRow(id: row.id, title: titles[row.id] ?? row.id, detail: row.detail, category: row.category,
+                                                           bytes: row.bytes, eligible: false, reason: row.reason, outcome: row.outcome,
+                                                           command: nil, kind: row.kind, loses: nil)
+                } + gone.map {
+                    ResourceRow(id: $0, title: titles[$0] ?? $0, detail: "", category: "执行结果", bytes: nil, eligible: false,
+                                reason: "已经处理过或状态变了", outcome: "已跳过", command: nil, kind: nil, loses: nil)
+                }
+                let freed = done.reduce(Int64(0)) { $0 + ($1.bytes ?? 0) }
+                if reply == nil && gone.isEmpty { self.message = "没连上后台，请稍后再试。" }
+                else if reply?.status == "busy" { self.message = "后台整理一直没结束，这次没有删除，请稍后再试。" }
+                else if let reply, reply.status != "ok" { self.message = reply.message }
+                else if done.isEmpty { self.message = "这次没有删掉任何一项，原因见上。" }
+                else { self.message = "已删除 \(done.count) 项" + (freed > 0 ? "，腾出约 \(size(freed))" : "") + (self.skipped.isEmpty ? "。" : "；\(self.skipped.count) 项没删，原因见上。") }
                 self.refresh()
                 (NSApp.delegate as? AppDelegate)?.model.refresh()
             }
@@ -209,7 +259,7 @@ private struct Page<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { store.page = .cover; store.message = "" } label: {
+            Button { store.page = .cover; store.message = ""; store.skipped = [] } label: {
                 Text("‹ 还剩 \(number0(model.snapshot.free)) GB").font(.system(size: 12)).foregroundColor(Ink.muted)
             }.buttonStyle(.plain)
             Text(title).font(.system(size: 16, weight: .medium)).foregroundColor(Ink.navy).padding(.top, 4).padding(.bottom, 10)
@@ -238,11 +288,14 @@ private struct PendingPage: View {
         let rows = store.pendingRows
         Page(model: model, store: store, title: "等你确认") {
             if rows.isEmpty {
-                Text(store.pending == nil ? "正在读取…" : "没有要你确认的。").font(.system(size: 12)).foregroundColor(Ink.muted)
+                ForEach(store.skipped) { row in SkippedLine(row: row) }
+                Text(store.pending == nil ? "正在读取…" : store.skipped.isEmpty ? "没有要你确认的。" : "没有别的要你确认了。")
+                    .font(.system(size: 12)).foregroundColor(Ink.muted).padding(.top, store.skipped.isEmpty ? 0 : 10)
                 Spacer()
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
+                        ForEach(store.skipped) { row in SkippedLine(row: row) }
                         ForEach(rows) { row in
                             Button { toggle(row) } label: { PendingLine(row: row, on: selected.contains(row.id)) }
                                 .buttonStyle(.plain).disabled(!row.eligible)
@@ -271,7 +324,7 @@ private struct PendingPage: View {
         .alert("删除所选 \(selected.count) 项？", isPresented: $confirming) {
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
-                store.perform("pending-clean", ids: Array(selected), token: store.pending?.token, doing: "正在逐项核对并删除…")
+                store.cleanPending(Array(selected))
                 selected = []
             }
         } message: {
@@ -299,6 +352,20 @@ private struct Checkbox: View {
             .overlay(RoundedRectangle(cornerRadius: 3).stroke(on || partly ? Ink.navy : Color(hex: 0xB4B2A9), lineWidth: 1))
             .overlay(Rectangle().fill(Ink.navy).frame(width: 7, height: 1.5).opacity(partly ? 1 : 0))
             .frame(width: 13, height: 13)
+    }
+}
+
+/// A confirmed item that was not deleted, and why.
+private struct SkippedLine: View {
+    let row: ResourceRow
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("没删 · " + (row.title.split(separator: "：", maxSplits: 1).last.map(String.init) ?? row.title))
+                .font(.system(size: 12)).foregroundColor(Ink.warm).lineLimit(1)
+            Text(row.reason).font(.system(size: 11)).foregroundColor(Ink.muted).lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+        .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
     }
 }
 

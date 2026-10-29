@@ -197,8 +197,10 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
     pins, _ = StorageManager(settings)._pins(now)
     memory = load(home, ASK_STATE, {})
     pending = load(home, PENDING, empty_pending())
+    if activity.errors:
+        return pending   # cannot tell what is in use: keep the list as it is instead of emptying it
     items = {i['id']: i for i in pending['items']}
-    fresh = {} if activity.errors else candidates(home, cfg, activity, pins, simctl, now, memory)
+    fresh = candidates(home, cfg, activity, pins, simctl, now, memory)
     for key, found in fresh.items():
         old = items.get(key)
         if old and (old['state'] == 'running' or old['state'] == 'ignored' and old['fingerprint'] == found['fingerprint']):
@@ -229,7 +231,7 @@ def dashboard_running(ps_output):
 
 
 def app_running():
-    listing = subprocess.run(['/bin/ps', '-axo', 'command='], capture_output=True, text=True)
+    listing = subprocess.run(['/bin/ps', '-axo', 'command='], capture_output=True, text=True, errors='surrogateescape')
     return listing.returncode == 0 and dashboard_running(listing.stdout)
 
 
@@ -285,6 +287,10 @@ def remove_task(path, cfg):
 def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash):
     """Run only the confirmed ids, re-checking each against a fresh scan (ask AC-02/06/07)."""
     now = time.time() if now is None else now
+    activity = activity if activity is not None else Activity.collect(settings.lease_root)
+    if activity.errors:
+        # Without knowing what is in use nothing is deleted, and the list stays as it is.
+        return [dict(id=key, outcome='已跳过', reason='这会儿查不清哪些程序在用它，为安全没有删；稍后再试') for key in ids]
     pending = refresh(home, cfg, settings, simctl, activity, now)
     items = {i['id']: i for i in pending['items']}
     results = []

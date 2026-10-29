@@ -92,6 +92,25 @@ class AskTierTests(AskFixture):
         pending = self.refresh(simctl, attached, now)
         self.assertEqual(self.ids(pending), ['runtime-delete:R1'])
 
+    def test_unknown_activity_keeps_the_list_and_deletes_nothing(self):
+        simctl = self.sims(); now = time.time()
+        self.refresh(simctl, now=now - 5 * 3600); before = self.ids(self.refresh(simctl, now=now))
+        blind = Activity(errors=['RuntimeError: open-file inventory unavailable'])
+        self.assertEqual(self.ids(self.refresh(simctl, blind, now)), before)   # not emptied
+        results = ask_tier.execute(self.home, self.cfg(task_roots=[]), self.settings, ['runtime-delete:R1'], simctl, blind, now)
+        self.assertEqual([(r['outcome'], '查不清' in r['reason']) for r in results], [('已跳过', True)])
+        self.assertFalse(any(c[:2] == ['runtime', 'delete'] for c in simctl.calls))
+        self.assertEqual(self.ids(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())), before)
+
+    def test_process_with_a_cut_off_chinese_argument_does_not_break_the_check(self):
+        # ps can cut a long command line in the middle of a character; one such process used to crash every check.
+        cut = '整理磁盘'.encode()[:-1]
+        proc = subprocess.Popen([b'/bin/sh', b'-c', b'sleep 20', cut]); self.addCleanup(proc.kill)
+        time.sleep(0.3)
+        activity = Activity.collect()
+        self.assertEqual(activity.errors, [])
+        self.assertTrue(any(pid == proc.pid for pid, _ in activity.commands))
+
     def test_only_confirmed_items_run_after_recheck(self):
         simctl = self.sims(); now = time.time()
         self.refresh(simctl, now=now - 5 * 3600); self.refresh(simctl, now=now)

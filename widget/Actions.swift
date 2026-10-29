@@ -224,7 +224,7 @@ struct Dashboard: View {
         }
         .alert("执行勾选的 \(selected.count) 项？", isPresented: $confirmingPending) {
             Button("取消", role: .cancel) {}
-            Button("确认执行") { actions.run("pending", action: "pending-clean", ids: Array(selected)); selected = [] }
+            Button("确认执行") { actions.run("pending", clean: true, action: "pending-clean", ids: Array(selected)); selected = [] }
         } message: {
             Text(pendingSummary)
         }
