@@ -253,3 +253,26 @@ A02 按你的留言，我的理解是：脚本本来做得好的自动档（挪�
 横向评测要在这台 Mac 上下载这些工具，只放在临时目录、只跑「预演」（不删任何东西），评完就删掉：Mole 1.65.0（GitHub 发布包，约 3 MB + 脚本）、kondo 0.9（0.9 MB）、gdu 5.38（8 MB）、dust 1.2.6（0.9 MB）、npkill 0.12（npm，0.1 MB）、mac-cleanup 3.4（PyPI，不到 0.1 MB）。可以吗？ → 可以，下载评测 (Recommended)
 ```
 
+## 2026-10-28 · Claude Code 会话 d63e22ae · 用 skill 真实处理一次计划
+
+来源：当前 Claude Code 会话 JSONL（session-raw-input.py）；选择题回答取自 AskUserQuestion 工具结果。
+
+## RAW-31
+日期：2026-10-28T12:53:52Z；提出人：阮鉴鉴；场景：对话（粘贴交接给 agent 的那句话）
+```text
+用 mac-dev-resource-guard 这个 skill 帮我看一下磁盘空间：先运行 ~/.local/bin/resource-guard-service plan --json 读计划，按 skill 里的步骤处理「等你点头」和「需要判断」两段，每一项先跟我确认再执行。
+```
+
+## RAW-32
+日期：2026-10-28T13:0x（选择题回答）；提出人：阮鉴鉴；场景：agent 逐项确认（AskUserQuestion 工具结果）
+```text
+【等你点头】删掉 iOS 27.1 模拟器系统（7.3 GB）吗？… → 删掉 (Recommended)
+【需要判断】这些 Xcode 构建副本删哪些？… → 一周内有还在用的都别删,generic 3 份旧副本 22 GB (Recommended),model-layout old 副本 7.3 GB (Recommended),taobao 的 flutter 副本 7.4 GB
+```
+
+## RAW-33
+日期：2026-10-28T13:1x（选择题回答）；提出人：阮鉴鉴；场景：勾选与留言矛盾的澄清（AskUserQuestion 工具结果）
+```text
+你勾的三项都是一周内用过的：…以哪个为准？（现在已剩 54 GB，高于 50 GB 目标。） → 都不删 (Recommended)
+```
+
