@@ -122,10 +122,12 @@ def candidates(home, cfg, activity, pins, simctl, now, memory):
         if devices:
             used_runtimes.add(runtime)
         for device in devices:
-            if device.get('isAvailable') is False:
-                continue   # the auto tier removes unavailable ones
             udid = device['udid']
             title = '{}（{}）'.format(device.get('name', udid), runtime_label(runtime))
+            if device.get('isAvailable') is False:
+                # It cannot boot (its system version is gone); still the user's data, so asked, never auto-deleted.
+                add('simulator-delete', udid, title, device.get('dataPathSize') or 0, '系统标为不可用，开不了机', 'unavailable')
+                continue
             data = device.get('dataPath')
             protected = attached(udid, activity) or (data and T.pin_reason(pins, T.Task(Path(data), Path(data), Path(data))))
             if device.get('state') == 'Booted':

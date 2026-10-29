@@ -211,7 +211,7 @@ def rows_checkup(home, cfg, report, freed, gone):
     short_lines = dict(
         caches='{} 个工具共用一份 · Xcode 编译缓存'.format(tools),
         clean='只清 7 天没用的编译中间缓存',
-        external=('未连接，插上就恢复' if gone else '缓存和构建产物放这里') if cfg['external_root']
+        external=('未连接，插上就恢复' if gone else '缓存、构建产物和闲置任务放这里') if cfg['external_root']
         else ('「{}」剩 {}，可以放缓存和构建产物'.format(drive['name'], gb(drive['free'])) if drive else '没插外接盘'))
     for key in checkup.SUGGESTIONS:
         state = states[key]

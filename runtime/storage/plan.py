@@ -95,8 +95,11 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
         for cache in report.get('caches', []):
             if cache.get('status') == 'local' and cache.get('bytes'):
                 auto.append(item('把 {} 的缓存搬到外接盘'.format(cache['name']), cache['bytes'], '共享构建缓存', cache['path'], 'cache-move'))
-        # Each task's own Xcode build folder goes to the drive too, behind a link (RAW-36).
+        # Each task's own Xcode build folder goes to the drive too, behind a link (RAW-36);
+        # an idle task moves whole below, its builds included.
         for t in tasks:
+            if t.get('idle'):
+                continue
             for copy in duplicate_builds(t['path']):
                 size = sizer(copy) or 0
                 if size:
@@ -105,6 +108,11 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     for entry in pending.get('items', []):
         if entry.get('state') == 'pending' and not entry.get('unreachable'):
             ask.append(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']))
+    if external_ready:
+        for t in tasks:
+            if t.get('idle') and t.get('bytes'):
+                auto.append(item('把闲置的 {} 挪到外接盘'.format(Path(t['path']).name), t['bytes'],
+                                 '闲置满 {} 天；空间不够时整个挪过去，原路径留链接'.format(cfg['auto_idle_days']), t['path'], 'move'))
     busy = sorted((t for t in tasks if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])
     # With the drive in use every build copy is already in 「会自动做的」; deleting old ones frees no internal space.
     for t in ([] if cfg['caches_enabled'] and external_ready else busy[:5]):
@@ -134,7 +142,7 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
             plan['suggestions'].append(item('收尾不再用的任务 ' + Path(t['path']).name, t['bytes'],
                                             '最近还动过，工具不会自己处理；不再需要的话可以交给 agent 收尾', t['path'], 'task'))
         if not external_ready:
-            plan['suggestions'].append(item('插一块外接盘', 0, '选择后可迁移闲置工具缓存；任务目录仍需单独确认', None, 'drive'))
+            plan['suggestions'].append(item('插一块外接盘', 0, '缓存、构建产物和闲置任务可以挪过去，内置盘只放正在做的', None, 'drive'))
     return plan
 
 

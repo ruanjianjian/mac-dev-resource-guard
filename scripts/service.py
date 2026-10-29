@@ -609,7 +609,7 @@ def consent_question(drive=None):
              '  · 共享构建缓存：各任务共用一份工具缓存，并打开 Xcode 编译缓存（在 ~/.zshenv 加一段带标记的设置，可一键还原）'
              + ('；任务目录里的 Xcode 构建产物也放到外接盘' if drive else '')]
     if drive:
-        lines.append('  · 外接盘「{}」：缓存和构建产物放过去'.format(drive))
+        lines.append('  · 外接盘「{}」：缓存和构建产物放过去；空间不够时，闲置且改动都已推送的任务也整个挪过去'.format(drive))
     lines.append('（安全自动清理默认就开着：只清 7 天没用过的编译中间缓存，任务目录和模拟器不动。）')
     return '\n'.join(lines) + '\n同意吗？[Y/n] '
 

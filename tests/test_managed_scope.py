@@ -25,24 +25,59 @@ class ManagedScopeTests(TierFixture):
         self.assertEqual(result['actions'], [])
         self.assertEqual(calls, [])
 
-    def test_scope_keeps_real_task_outputs_and_never_calls_broad_actions(self):
-        task = self.task('idle', 20, dirty=True)
-        cfg = self.cfg(auto_scope='managed-caches')
-        fail = AssertionError('broad action entered')
-        with patch.object(auto_tier, 'recover', side_effect=fail), \
-             patch('tasks.discover', side_effect=fail):
-            result = self.run_tier(cfg, simctl=lambda a: (_ for _ in ()).throw(fail))
-        self.assertEqual(result['status'], 'managed-caches')
-        self.assertEqual(result['actions'], [])
-        self.assertTrue((task / 'app/build/out.o').is_file())
+    def test_idle_pushed_task_moves_whole_and_nothing_is_ever_deleted(self):
+        task = self.task('idle', 20)
+        result = self.run_tier(self.cfg(), free=lambda: GIB)
+        self.assertEqual([(a['kind'], a['result']) for a in result['actions']], [('move', 'done')])
+        self.assertTrue(task.is_symlink())
+        self.assertTrue((task / 'app/build/out.o').is_file(), 'outputs travel with the task, never pruned')
         self.assertTrue((task / 'app/node_modules/pkg/i.js').is_file())
+
+    def test_without_the_drive_switch_tasks_stay_and_nothing_is_pruned(self):
+        task = self.task('idle', 20)
+        result = self.run_tier(self.cfg(task_roots=[{'path': str(self.root)}]), free=lambda: GIB)
+        self.assertEqual(result['actions'], [])
+        self.assertFalse(task.is_symlink())
+        self.assertTrue((task / 'app/build/out.o').is_file())
+
+    def test_unsaved_work_never_leaves_the_internal_disk(self):
+        dirty, unpushed = self.task('dirty', 20, dirty=True), self.task('unpushed', 20, unpushed=True)
+        result = self.run_tier(self.cfg(), free=lambda: GIB)
+        self.assertEqual(result['actions'], [])
+        self.assertFalse(dirty.is_symlink() or unpushed.is_symlink())
+        self.assertEqual(sorted(k['reason'].split('，')[0] for k in result['kept']), sorted(['app：有未提交改动', 'app：有未推送的提交']))
+
+    def test_an_interrupted_move_is_finished_or_undone_first(self):
+        task = self.task('old', 20); self.external.mkdir(parents=True)
+        tmp = self.external / '.guard-moving-old'; tmp.mkdir()
+        marker = auto_tier.state_root(self.home) / auto_tier.MOVE_STATE; marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(dict(src=str(task), dest=str(self.external / 'old'), tmp=str(tmp), phase='copying')))
+        result = self.run_tier(self.cfg(), free=lambda: 50 * GIB)
+        self.assertIn('原目录保留', result['recovered'])
+        self.assertFalse(marker.exists() or tmp.exists())
+        self.assertTrue((task / 'app/main.swift').is_file())
+
+    def test_unavailable_simulator_is_asked_never_auto_deleted(self):
+        import ask_tier
+        from storage import Activity
+        calls = []
+        def simctl(args):
+            calls.append(args)
+            return json.dumps({'devices': {'com.apple.CoreSimulator.SimRuntime.iOS-17-0': [
+                {'udid': 'U1', 'name': 'Old Phone', 'isAvailable': False, 'state': 'Shutdown'}]}}) if args[0] == 'list' else '{}'
+        self.run_tier(self.cfg(), free=lambda: GIB, simctl=simctl)
+        self.assertFalse(any(c[0] == 'delete' for c in calls))
+        pending = ask_tier.refresh(self.home, self.cfg(task_roots=[]), self.settings, simctl, Activity())
+        self.assertEqual([(i['id'], i['reason']) for i in pending['items']], [('simulator-delete:U1', '系统标为不可用，开不了机')])
 
     def test_plan_does_not_offer_automatic_task_deletion(self):
         cfg = self.cfg(auto_scope='managed-caches')
         report = dict(tasks=[dict(path=str(self.root/'idle'), idle=True, bytes=GIB)], categories=[], caches=[])
         with patch.object(plan.T, 'rebuildable', side_effect=AssertionError('must not inspect task outputs')):
             result = plan.build(self.home, cfg, self.settings, report, {'items': []}, GIB, False)
+            moving = plan.build(self.home, cfg, self.settings, report, {'items': []}, GIB, True)
         self.assertEqual(result['sections'][0]['items'], [])
+        self.assertEqual([i['kind'] for i in moving['sections'][0]['items']], ['move'], 'a move, never a deletion')
 
     def test_invalid_scope_fails_closed(self):
         with self.assertRaisesRegex(tiers_config.ConfigError, 'auto_scope'):
