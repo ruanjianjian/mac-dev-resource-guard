@@ -15,7 +15,7 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
    ```
    缺 Xcode 命令行工具时脚本会停下并弹出系统安装窗口，让用户装好再跑。
 2. 记下你是谁，以后看板要交接时会打开你：`rgs agent-app claude`（Claude Code）或 `rgs agent-app codex`（Codex）。
-3. **主动问用户空间目标**：「内置盘至少想留多少？」给一个建议值（磁盘约 10%，取整到 10 GB）。用户答了就 `rgs target 50`。
+3. **主动问用户空间目标**：「内置盘至少想留多少？」给一个建议值（磁盘约 10%，取整到 10 GB）。用户答了就 `rgs target 50`；不带数字的 `rgs target` 会显示当前目标和建议值。
 4. 问用户要不要打开三项（共享构建缓存、自动清理、使用外接盘）。同意后：
    ```bash
    python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-apply --ids caches,clean,external

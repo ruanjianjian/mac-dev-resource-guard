@@ -470,6 +470,14 @@ def prune_output(home, path):
     return {'removed': str(target), 'bytes': size}
 
 
+def current_target(home):
+    """`target` with no number: what is set now, and what we would suggest for this disk."""
+    settings = configure(home)
+    return dict(target_gib=settings.warning_free_gib, stop_at_gib=settings.target_free_gib,
+                critical_gib=settings.critical_free_gib,
+                suggested_gib=space_plan.suggested_target(shutil.disk_usage(str(home)).total))
+
+
 def guard_mole(home, remove=False):
     settings = configure(home)
     cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
@@ -584,6 +592,8 @@ def main():
             result = {k: str(v) for k, v in tiers_config.update(home, dict(agent_app=a.value), owned).items() if k == 'agent_app'}
         else:
             result = current_plan(home, tiers_config.load(home, owned=owned), settings) or {'status': 'no-checkup', 'message': '还没体检过：打开资源看板，或等下一轮后台检查'}
+    elif a.action == 'target' and a.value is None:
+        result = current_target(home)
     elif a.action == 'target':
         result = set_target(home, a.value)
     elif a.action == 'mole-guard':
