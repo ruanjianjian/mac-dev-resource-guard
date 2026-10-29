@@ -680,11 +680,12 @@ class Adapter:
             if sim['reason'] == 'simulator_not_attached':
                 hours = (now - idle_since.get('simulator:' + sim['id'], now)) / 3600
                 rows.append(dict(id='sim:' + sim['id'], title=sim['name'], category='可以关掉', bytes=sim['rss_kib'] * 1024,
-                                 eligible=True, command=None, detail='', outcome=None,
-                                 reason='{:.0f} 小时没被开发工具连过'.format(hours) if hours >= 1 else '现在没被开发工具连着'))
+                                 eligible=True, command=None, detail='', outcome=None, tag='free',
+                                 reason='{:.0f} 小时没连 · 可以关'.format(hours) if hours >= 1 else '现在没连 · 可以关'))
             else:
                 rows.append(dict(id='sim:' + sim['id'], title=sim['name'] + ' 模拟器', category='正在用', bytes=sim['rss_kib'] * 1024,
-                                 eligible=False, command=None, detail='', outcome=None, reason='、'.join(sim['attached']) + ' 正连着'))
+                                 eligible=False, command=None, detail='', outcome=None, tag='link',
+                                 reason=('、'.join(sim['attached']) or '开发工具') + ' 连着'))
         inside = {pid for sim in simulators for pid in sim.get('pids', [])}   # apps running in a simulator count there
         for proc in latest.get('top_memory', [])[:8]:
             if proc.get('pid') in inside or any(word in proc.get('name', '') for word in
@@ -696,9 +697,10 @@ class Adapter:
                 size = int(float(mem.rstrip('KMG+-')) * unit)
             except ValueError:
                 size = None
+            idle = str(proc.get('policy', '')).startswith('可安全回收')
             rows.append(dict(id='proc:{}'.format(proc.get('pid')), title=proc.get('role') or proc.get('name', ''), category='正在用',
                              bytes=size, eligible=False, command=None, detail='', outcome=None,
-                             reason='闲置，会自动收尾' if str(proc.get('policy', '')).startswith('可安全回收') else '正在用的程序，不动'))
+                             tag='auto' if idle else 'use', reason='闲置 · 会自动收尾' if idle else '在用 · 不动'))
         if pressure in (2, 4) and not any(r['category'] in ('可以关掉', '自动处理了') for r in rows):
             busy = sum(1 for r in rows if r['id'].startswith('sim:'))
             rows.insert(1, dict(id='why', title='现在没有能安全关的', category='说明', bytes=None, eligible=False, command=None,

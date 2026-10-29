@@ -417,7 +417,8 @@ class MemoryPageTest(TierFixture):
         now = time.time()
         (root / 'latest.json').write_text(json.dumps(dict(at=now, sample=dict(pressure=2), top_memory=[
             dict(pid=7, name='xcodebuild', mem='6144M', policy='保留：现有任务/未托管资源'),
-            dict(pid=8, name='Runner', mem='600M', policy='保留：现有任务/未托管资源')])))
+            dict(pid=8, name='Runner', mem='600M', policy='保留：现有任务/未托管资源'),
+            dict(pid=9, name='node', mem='300M', policy='可安全回收：闲置的 MCP 服务')])))
         (root / 'state.json').write_text(json.dumps(dict(incident_started=now - 360, simulator_idle_since={'simulator:BBB': now - 3 * 3600})))
         (root / 'last-cleanup.json').write_text(json.dumps(dict(at=now - 60, actions=[dict(kind='gradle', rss_kib_estimate=1 << 20, result=dict(stopped=True))])))
         (self.home / '.fixture-simulators.json').write_text(json.dumps([
@@ -425,10 +426,11 @@ class MemoryPageTest(TierFixture):
             dict(id='BBB', name='Idle Phone', rss_kib=2 << 20, attached=[], reason='simulator_not_attached', pids=[])]))
         (self.home / '.resource-dashboard-fixture').touch()
         rows = backend.Adapter(self.home).run('memory-page')['rows']
-        got = [(r['category'], r['title'], r['reason']) for r in rows]
-        self.assertEqual(got, [('状态', '紧张', '已持续 6 分钟'), ('自动处理了', '停掉闲置的 Gradle 编译后台', ''),
-                               ('正在用', 'Busy Phone 模拟器', 'xcodebuild 正连着'), ('可以关掉', 'Idle Phone', '3 小时没被开发工具连过'),
-                               ('正在用', 'xcodebuild', '正在用的程序，不动')], 'the app inside a simulator is not counted twice')
+        got = [(r['category'], r['title'], r.get('tag'), r['reason']) for r in rows]
+        self.assertEqual(got, [('状态', '紧张', None, '已持续 6 分钟'), ('自动处理了', '停掉闲置的 Gradle 编译后台', None, ''),
+                               ('正在用', 'Busy Phone 模拟器', 'link', 'xcodebuild 连着'), ('可以关掉', 'Idle Phone', 'free', '3 小时没连 · 可以关'),
+                               ('正在用', 'xcodebuild', 'use', '在用 · 不动'), ('正在用', 'node', 'auto', '闲置 · 会自动收尾')],
+                         'the app inside a simulator is not counted twice')
         # Everything in use: the page says plainly why nothing can be closed.
         (root / 'last-cleanup.json').unlink()
         (self.home / '.fixture-simulators.json').write_text(json.dumps([

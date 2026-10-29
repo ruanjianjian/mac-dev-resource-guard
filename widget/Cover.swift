@@ -384,13 +384,34 @@ private struct MemoryLine: View {
             if let on { Checkbox(on: on).padding(.top, 2) }
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title).font(.system(size: 12)).foregroundColor(Ink.text).lineLimit(1)
-                if !row.reason.isEmpty { Text(row.reason).font(.system(size: 11)).foregroundColor(Ink.muted).lineLimit(1) }
+                if let tag = row.tag, !row.reason.isEmpty { StatusTag(kind: tag, text: row.reason).padding(.top, 2) }
+                else if !row.reason.isEmpty { Text(row.reason).font(.system(size: 11)).foregroundColor(Ink.muted).lineLimit(1) }
             }
             Spacer(minLength: 6)
             if let bytes = row.bytes, bytes > 0 { Text(size(bytes)).font(.system(size: 11)).foregroundColor(Ink.muted) }
         }
         .padding(.vertical, 5).contentShape(Rectangle())
         .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
+    }
+}
+
+/// A bright pill for a memory row's state, one colour each, so a long list reads at a glance:
+/// green can be closed, blue in use, violet a dev tool is attached, amber idle and closed automatically.
+private struct StatusTag: View {
+    let kind: String
+    let text: String
+    static let colours: [String: (fill: UInt32, ink: UInt32, dot: UInt32)] = [
+        "free": (0xDCF4E4, 0x16703C, 0x22A35A), "use": (0xE3EBFF, 0x2747A8, 0x3A63D6),
+        "link": (0xEEE5FF, 0x5534B8, 0x7650E0), "auto": (0xFFEED4, 0x9A5600, 0xE08A10)]
+
+    var body: some View {
+        let colour = StatusTag.colours[kind] ?? StatusTag.colours["use"]!
+        HStack(spacing: 4) {
+            Circle().fill(Color(hex: colour.dot)).frame(width: 5, height: 5)
+            Text(text).font(.system(size: 10.5, weight: .medium)).foregroundColor(Color(hex: colour.ink)).lineLimit(1)
+        }
+        .padding(.leading, 6).padding(.trailing, 7).padding(.vertical, 3)
+        .background(Capsule().fill(Color(hex: colour.fill)))
     }
 }
 
