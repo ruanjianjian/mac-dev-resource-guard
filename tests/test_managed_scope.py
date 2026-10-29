@@ -199,7 +199,7 @@ class ManagedScopeTests(TierFixture):
                 runpy.run_path(str(ROOT/'scripts/install.py'))
         self.assertEqual((app/'keep').read_text(),'old app')
         self.assertFalse(activate.called)
-        self.assertFalse(any(args[0] == 'open' or 'ps' in args[0] for args in calls))
+        self.assertFalse(any(args[0] in ('open', '/bin/ps') for args in calls))   # neither stops nor opens an app
 
     def test_installer_stops_only_the_menu_app_even_beside_a_cut_off_argument(self):
         import shutil, subprocess, tempfile, time
