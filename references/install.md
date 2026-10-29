@@ -97,3 +97,22 @@ python3 scripts/setup.py disable-scheduler storage
 ## 已有版本升级
 
 重新运行安装命令，或在新版本源码执行 `python3 scripts/setup.py upgrade`。只接受本工具标准命令包装器和已知发布版本文件；不同实现或本地修改保持原样。先关闭本工具的调度，并等在途维护、托管后台与待核实请求自然收尾。升级先构造完整副本、校验后切换，失败恢复旧目录，备份路径写入结果；配置、pin、lease 和自动暂停状态不变。升级不等于开启自动维护。
+
+## 本机固定签名（1.7.6 起）
+
+`widget/build.py` 用 `widget/local_signing.py` 签名。第一次编译时生成一张自签名代码签名证书，CN 是「Resource Guard Local Signing」，有效期 20 年。它放在 `~/.local/share/dev-resource-guard/signing/` 里一个单独的钥匙串 `signing.keychain-db` 中：
+
+- 钥匙串密码是随机生成的，存在同目录的 `password` 文件里（权限 0600）。
+- 这个钥匙串不加入用户的钥匙串列表，也不改信任设置。
+
+以后每次编译都用这张证书签名，指定要求是 `identifier "…widget" and certificate leaf = H"…"`，不随编译变化。macOS 隐私授权（可移除宗卷、下载文件夹、控制访达）跟着它走，所以升级后不再重复询问。
+
+生成或签名失败时，退回临时签名，并打印原因。临时签名的指定要求是 `cdhash`，每次编译都不同，下次升级时系统会再问一次。
+
+要移除这张证书，运行：
+
+```bash
+security delete-keychain ~/.local/share/dev-resource-guard/signing/signing.keychain-db
+```
+
+然后删掉这个目录。下次安装会重新生成一张，系统也会再问一次权限。

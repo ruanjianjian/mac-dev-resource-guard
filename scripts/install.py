@@ -10,6 +10,8 @@ import time
 
 from service import activate, ask_consent, current_target, enable_recommended, install_skill, set_target, stop_menu_app, tiers_config, waiting_lock
 import discover
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'widget'))
+import local_signing
 
 root = Path(__file__).resolve().parents[1]
 home = Path.home()
@@ -17,6 +19,8 @@ app = home / 'Applications/资源看板.app'
 # Validate before replacing a working app; invalid settings remain untouched.
 tiers_config.load(home)
 staging = home / 'Library/Caches/dev-resource-guard/installation' / str(time.time_ns()) / '资源看板.app'
+# macOS keys permissions on the signature's requirement; compare it to know whether it will ask again.
+before = local_signing.requirement(app) if app.exists() else ''
 if app.exists():
     info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier') != 'io.github.ruanjianjian.mac-dev-resource-guard.widget':
@@ -71,5 +75,11 @@ print({
 if answer != 'decided':
     print('空间目标：内置盘至少留 {:.0f} GB（约磁盘的 20%），想改就在菜单栏「资源看板」→「帮你管着」里调，或告诉你的 agent。'.format(current_target(home)['target_gib']))
 if tiers_config.load(home)['external_root']:
-    # Every build gets a new local signature, so macOS asks again; without "Allow" moves to the drive pause.
-    print('提示：macOS 可能会再问一次「资源看板」能否访问外接盘（每次安装或升级都会问），请点「允许」，否则往外接盘挪东西会暂停。')
+    # Without "Allow" moves to the drive pause. Same requirement as before: macOS keeps the earlier answer.
+    after = local_signing.requirement(app)
+    if 'cdhash' in after:
+        print('提示：macOS 可能会再问一次「资源看板」能否访问外接盘（这次用的是临时签名），请点「允许」，否则往外接盘挪东西会暂停。')
+    elif not before:
+        print('提示：macOS 会问一次「资源看板」能否访问外接盘，请点「允许」；点过以后升级不会再问。')
+    elif after != before:
+        print('提示：macOS 会再问一次「资源看板」能否访问外接盘，请点「允许」；资源看板已换成这台 Mac 的固定签名，以后升级不会再问。')

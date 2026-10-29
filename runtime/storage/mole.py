@@ -61,6 +61,8 @@ def managed_paths(home, cfg, cache_rows):
             if row.get('dest'):
                 paths.append(row['dest'])
     paths.append(str(Path(home) / 'Library/Developer/Xcode/DerivedData'))
+    # Our own install: source, engine versions and the signing keychain that keeps macOS permissions across upgrades.
+    paths.append(str(Path(home) / '.local/share/dev-resource-guard'))
     seen, result = set(), []
     for path in paths:
         for pattern in (path, path.rstrip('/') + '/*'):
