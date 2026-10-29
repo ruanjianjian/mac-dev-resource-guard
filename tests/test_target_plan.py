@@ -122,6 +122,17 @@ class PlanTest(TierFixture):
         with self.assertRaises(ValueError):
             service.set_target(home, 1)
 
+    def test_target_without_a_number_shows_what_is_set(self):
+        env = dict(os.environ, HOME=str(self.home))
+        run = lambda *args: subprocess.run([sys.executable, str(ROOT / 'scripts/service.py'), 'target', *args],
+                                           capture_output=True, text=True, env=env)
+        self.assertEqual(run('40').returncode, 0)
+        shown = run()
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        body = json.loads(shown.stdout)
+        self.assertEqual((body['target_gib'], body['stop_at_gib'], body['critical_gib']), (40.0, 44.0, 20.0))
+        self.assertGreaterEqual(body['suggested_gib'], 20)
+
 
 class MoleGuardTest(TierFixture):
     def fake_mole(self, defaults=True):
