@@ -1,11 +1,13 @@
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'widget'))
@@ -19,6 +21,10 @@ class LocalSigningTest(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.home, True)
+        # verify.py runs tests with a throwaway HOME, but up to macOS 26 security and codesign read the keychain
+        # search list from the real one. The keychain file stays in the temp folder; signing restores the list.
+        real = patch.dict(os.environ, HOME=pwd.getpwuid(os.getuid()).pw_dir)
+        real.start(); self.addCleanup(real.stop)
         keychain = local_signing.folder(self.home) / 'signing.keychain-db'
         self.addCleanup(lambda: keychain.exists() and subprocess.run(['security', 'delete-keychain', str(keychain)], capture_output=True))
 
