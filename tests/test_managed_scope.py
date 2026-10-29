@@ -198,7 +198,22 @@ class ManagedScopeTests(TierFixture):
                 runpy.run_path(str(ROOT/'scripts/install.py'))
         self.assertEqual((app/'keep').read_text(),'old app')
         self.assertFalse(activate.called)
-        self.assertFalse(any(args[0] in ('pkill','open') for args in calls))
+        self.assertFalse(any(args[0] == 'open' or 'ps' in args[0] for args in calls))
+
+    def test_installer_stops_only_the_menu_app_even_beside_a_cut_off_argument(self):
+        import shutil, subprocess, tempfile, time
+        base = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, base, True)
+        exe = base / '资源看板.app/Contents/MacOS/ResourceDashboard'
+        quiet = dict(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Stand-ins that show up in ps exactly like the app: the menu app (no arguments) and the storage tick.
+        menu = subprocess.Popen([str(exe)], executable='/bin/cat', **quiet)
+        tick = subprocess.Popen([str(exe), '-c', 'sleep 30', '--run-tick'], executable='/bin/sh', **quiet)
+        odd = subprocess.Popen([b'/bin/sh', b'-c', b'sleep 30', '整理磁盘'.encode()[:-1]], **quiet)   # what broke pkill
+        for p in (menu, tick, odd): self.addCleanup(p.kill)
+        time.sleep(0.3)
+        self.assertEqual(service.menu_app_pids(exe), [menu.pid])
+        self.assertEqual(service.stop_menu_app(exe), [])
+        self.assertIsNotNone(menu.poll()); self.assertIsNone(tick.poll(), 'the storage tick keeps running')
 
     def test_installer_rejects_invalid_settings_before_any_subprocess(self):
         import runpy
