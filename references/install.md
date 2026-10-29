@@ -103,7 +103,7 @@ python3 scripts/setup.py disable-scheduler storage
 `widget/build.py` 用 `widget/local_signing.py` 签名。第一次编译时生成一张自签名代码签名证书，CN 是「Resource Guard Local Signing」，有效期 20 年。它放在 `~/.local/share/dev-resource-guard/signing/` 里一个单独的钥匙串 `signing.keychain-db` 中：
 
 - 钥匙串密码是随机生成的，存在同目录的 `password` 文件里（权限 0600）。
-- 这个钥匙串不加入用户的钥匙串列表，也不改信任设置。
+- 这个钥匙串不常驻用户的钥匙串列表，也不改信任设置。macOS 26 及更早的系统上，codesign 只认搜索列表里的钥匙串，所以签名的那一刻会临时把它加进列表，签完立刻按原样恢复；证书没被信任不影响签名。
 
 以后每次编译都用这张证书签名，指定要求是 `identifier "…widget" and certificate leaf = H"…"`，不随编译变化。macOS 隐私授权（可移除宗卷、下载文件夹、控制访达）跟着它走，所以升级后不再重复询问。
 
