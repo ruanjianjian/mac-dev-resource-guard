@@ -15,7 +15,7 @@ import tiers_config
 import toolcaches
 
 REPORT = 'checkup.json'
-SUGGESTIONS = ('caches', 'clean', 'external')
+SUGGESTIONS = ('caches', 'clean', 'external', 'update')
 
 
 def report_path(home):
@@ -162,6 +162,7 @@ def suggestion_state(home, cfg, report):
         external=dict(on=external is not None, available=external is not None or drive is not None,
                       detail=('使用{}'.format(drive_label(external)) + ('' if mounted else '（未连接）')) if external
                       else ('使用「{}」，剩 {:.0f} GB'.format(drive['name'], drive['free'] / GIB) if drive else '没有插外接盘')),
+        update=dict(on=cfg['auto_update'], available=True, detail='有正式新版时，空闲时自动装好，装好告诉你；设置和权限都保留'),
     )
     return states
 
@@ -230,6 +231,8 @@ def apply(home, ids, owned=(), probe=auto_tier.external_access, launchctl=toolca
         changes.update(auto_enabled=True, ask_enabled=True, auto_scope='managed-caches')
     if 'clean' in ids or 'external' in changes:
         changes['task_roots'] = roots
+    if 'update' in ids:
+        changes['auto_update'] = True
     if 'caches' in ids:
         changes['caches_enabled'] = True
         try:
@@ -255,6 +258,9 @@ def turn_off(home, which, owned=(), launchctl=toolcaches.default_launchctl):
     if which == 'clean':
         tiers_config.update(home, dict(auto_enabled=False, ask_enabled=False), owned)
         return '自动清理和询问都已关闭；已挪到外接盘的任务目录保持原样。'
+    if which == 'update':
+        tiers_config.update(home, dict(auto_update=False), owned)
+        return '不再自动更新。想更新时再跑一次安装命令，或者告诉你的 agent。'
     if which == 'external':
         raw = tiers_config.read_raw(home)
         roots = [{k: v for k, v in r.items() if k != 'external'} for r in raw.get('task_roots', [])]

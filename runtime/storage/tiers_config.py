@@ -26,8 +26,10 @@ DEFAULTS = {
     'external_root': None,
     # agent-handoff: which agent App to open when the dashboard hands work over (claude / codex).
     'agent_app': None,
+    # one-line-install AC-10: install new releases by itself once the Mac is idle.
+    'auto_update': True,
 }
-FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache')
+FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache', 'auto_update')
 
 
 class ConfigError(ValueError):

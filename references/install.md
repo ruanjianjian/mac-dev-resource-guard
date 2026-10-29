@@ -116,3 +116,30 @@ security delete-keychain ~/.local/share/dev-resource-guard/signing/signing.keych
 ```
 
 然后删掉这个目录。下次安装会重新生成一张，系统也会再问一次权限。
+
+## 自动更新与发版（1.7.7 起）
+
+`runtime/storage/updater.py` 挂在每 5 分钟一次的后台整理后面，在整理释放锁之后运行：
+
+- **检查频率**：每天最多查一次 `https://api.github.com/repos/ruanjianjian/mac-dev-resource-guard/releases/latest`。没联网或被限流时，一小时后再查。
+- **什么时候装**：
+  - 正式版本号比已装的 App 新，才会安装。
+  - 内存紧张时先不装，因为编译要占内存。
+- **怎么装**：新开一个会话，运行和手动安装一模一样的命令，钉在那个 tag 上：`curl … /<tag>/install.sh | RESOURCE_GUARD_REF=refs/tags/<tag> bash`。
+  - 安装器会等后台整理的锁，不打断正在跑的任务，也不弹面板。
+  - tag 只接受 `vX.Y.Z` 格式，否则不执行。
+- **记录**：状态写在 `~/.local/state/dev-resource-guard/update.json`，输出写在 `update.log`。之后每一轮会核对 App 的版本，确认装好了还是失败；失败的话，一小时后重试。
+- **装好后的通知**：新 App 启动时，如果发现自己是被自动更新装上的，就发一条「资源看板已更新到 X」，通知正文是这个 Release 说明的第一行。这一次不再发「体检完成」。已经提醒过的版本记在 `update-announced`。
+- **开关**：配置项是 `auto-cleanup.json` 的 `auto_update`，默认打开；「帮你管着」里的「自动更新」就是它。
+- **手动更新**：`resource-guard-service update` 会当场检查，有新版就在前台装好。
+
+**发版**（合到 main 不等于发布）：
+
+1. 把 `widget/build.py` 里的版本号改好，合进 main。
+2. 打 tag，并创建 GitHub Release：
+
+   ```bash
+   gh release create vX.Y.Z --title "X.Y.Z" --notes "<一句话：这次改了什么>"
+   ```
+
+3. Release 说明的**第一行**会原样出现在用户收到的更新通知里，所以要写成一句给人看的话。

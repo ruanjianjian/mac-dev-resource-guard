@@ -236,8 +236,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
             }
         }
         // After an install or upgrade: one checkup in the background, then one notice (one-line-install AC-05).
+        // An automatic update says 「已更新到 …」 instead, so the user hears about it once, not twice (AC-11).
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let updated = UpdateNotice.pending(version: version)
+        if let updated, let version {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.post(title: updated.title, body: updated.body, tab: "cover") { delivered in
+                    if delivered { UpdateNotice.markAnnounced(version) }
+                }
+            }
+        }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8) { [weak self] in
-            guard let reply = try? DashboardActions.call("checkup-firstrun"), reply.status == "ok" else { return }
+            guard let reply = try? DashboardActions.call("checkup-firstrun"), reply.status == "ok", updated == nil else { return }
             DispatchQueue.main.async { self?.post(title: "体检完成", body: reply.message, tab: "checkup") }
         }
         if let probe { runProbe(probe) }
@@ -447,12 +457,13 @@ if CommandLine.arguments.contains("--run-tick") {
     require(memoryRow.tag == "use")
     require(PanelPlacement.selfTest())
     require(Logo.selfTest())
+    require(UpdateNotice.selfTest())
     require(try! testHomeArgument(["app"]) == nil)
     require(try! testHomeArgument(["app", "--test-home", "/fixture"]) == "/fixture")
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays, motion, logo")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, free-space colour levels, panel placement across displays, motion, logo, update notice")
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-icon"), index + 1 < CommandLine.arguments.count {
     // The build packs this folder into AppIcon.icns, so the icon is drawn from the same code as the menu-bar mark.
     do { try Logo.writeIconset(to: URL(fileURLWithPath: CommandLine.arguments[index + 1])) }

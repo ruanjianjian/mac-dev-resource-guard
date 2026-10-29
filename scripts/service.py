@@ -28,6 +28,7 @@ import toolcaches
 import checkup
 import mole
 import plan as space_plan
+import updater
 from storage import Activity
 
 LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-resource-guard.storage'}
@@ -307,7 +308,8 @@ FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓
 
 
 def tick_storage(home, now=None):
-    """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace."""
+    """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace, then (with the lock
+    released, so the installer can take it) a once-a-day look for a new release."""
     now = time.time() if now is None else now
     with contextlib.ExitStack() as stack:
         try:
@@ -315,16 +317,30 @@ def tick_storage(home, now=None):
         except Busy:
             return {'status': 'busy', 'results': []}   # the previous wake is still working (e.g. a long move)
         if (state_root(home)/'storage-paused').exists():
-            return {'status': 'paused', 'results': []}
-        previous = read_json(state_root(home)/'automatic-storage.json')
-        if previous and previous.get('status') not in ('running', 'disabled') and now - previous.get('at', 0) < CACHE_INTERVAL - 60:
-            receipt = {'status': 'not-due', 'results': [], 'cache_status': previous.get('status')}
+            receipt = {'status': 'paused', 'results': []}
         else:
-            receipt = clean_caches(home)
-        if not (state_root(home)/'storage-paused').exists():
-            tick_caches(home, now)
-            tick_tiers(home, now)
-        return receipt
+            previous = read_json(state_root(home)/'automatic-storage.json')
+            if previous and previous.get('status') not in ('running', 'disabled') and now - previous.get('at', 0) < CACHE_INTERVAL - 60:
+                receipt = {'status': 'not-due', 'results': [], 'cache_status': previous.get('status')}
+            else:
+                receipt = clean_caches(home)
+            if not (state_root(home)/'storage-paused').exists():
+                tick_caches(home, now)
+                tick_tiers(home, now)
+    receipt['update'] = auto_update(home, now)
+    return receipt
+
+
+def auto_update(home, now=None, force=False, **hooks):
+    """A broken settings file or a network hiccup never fails the storage tick."""
+    try:
+        enabled = tiers_config.load(home)['auto_update']
+    except ValueError:
+        enabled = tiers_config.DEFAULTS['auto_update']
+    try:
+        return updater.tick(home, enabled, now=now, force=force, **hooks).get('status')
+    except (OSError, ValueError) as error:
+        return 'error: {}'.format(error)
 
 
 def read_json(path):
@@ -755,8 +771,22 @@ def enable_recommended(home, launchctl=toolcaches.default_launchctl, probe=auto_
     return (['已打开：' + '、'.join(on)] if on else []) + notes
 
 
+def update_now(home, fetch=None, run=subprocess.run):
+    """`resource-guard-service update`: look now and, if a newer release exists, install it here in the foreground."""
+    release = updater.latest(fetch) if fetch else updater.latest()
+    current = updater.installed(home)
+    if updater.version_tuple(release['version']) <= updater.version_tuple(current):
+        return {'status': 'current', 'version': current, 'message': '已是最新：{}'.format(current)}
+    print('正在更新到 {}：{}'.format(release['version'], release['summary'] or release['title']), flush=True)
+    run(updater.command(release['tag']))
+    now = updater.installed(home)
+    done = updater.version_tuple(now) >= updater.version_tuple(release['version'])
+    return {'status': 'installed' if done else 'failed', 'version': now,
+            'message': '已更新到 {}'.format(now) if done else '没有更新成功，仍是 {}；原因见上面的输出'.format(current)}
+
+
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable'])
+    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
@@ -777,6 +807,8 @@ def main():
         result = prune_output(home, a.value or '')
     elif a.action == 'enable':   # the user agreed in their agent's chat after an install that could not ask
         result = {'enabled': enable_recommended(home)}
+    elif a.action == 'update':
+        result = update_now(home)
     else:
         result = activate(home) if a.action=='activate' else tick_storage(home) if a.action=='tick-storage' else integrate(home,a.project)
     print(json.dumps(result,ensure_ascii=False))
