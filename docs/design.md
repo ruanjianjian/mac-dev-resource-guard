@@ -253,5 +253,6 @@ xcrun swiftc -parse-as-library widget/Logo.swift scripts/render_brand.swift -o /
 | 2026-10-29 | 自动更新：只认正式版本，空闲时装，装好发通知；「帮你管着」加第五行 | RAW-51、RAW-52（one-line-install CH-05） |
 | 2026-10-29 | 封面左下角改成「帮你管着 ›」半透明卡片，一看就知道能点 | RAW-53～55，视觉稿选 B（menubar-cover CH-11） |
 | 2026-10-30 | 「帮你管着」改成 agent 的计划页：状态卡 + 只列改过的 + 锁，开关收进「高级」 | 资源管理 agent RAW-10、RAW-16，视觉稿选 B（plan-page） |
+| 2026-10-30 | 看过五版新 logo（精修、大头、留白环、计划本、一笔画），保留现在的小留，不改 | RAW-84、RAW-87 |
 
 原话都记在 [raw-input](epics/one-click-setup/raw-input.md) 里。
