@@ -482,5 +482,57 @@ class LockAndSettleFindingsTest(CommandFixture):
             self.assertIsNone(agent_plan.finish_review(self.home, False, '没改', t0 + week * 7 * DAY)['settled_at'])
 
 
+
+class PlanPageTest(CommandFixture):
+    """plan-page (draft B): what 「帮你管着」 shows, and a lock clicked there."""
+    def backend(self, *args):
+        (self.home / '.resource-dashboard-fixture').touch()
+        out = subprocess.run([sys.executable, str(ROOT / 'widget/backend.py'), *args, '--home', str(self.home)],
+                             capture_output=True, text=True, env=dict(os.environ, HOME=str(self.home)))
+        return json.loads(out.stdout)
+
+    def test_the_state_on_top_what_changed_below_and_the_rest_folded(self):
+        agent_plan.ensure_started(self.home, time.time() - 2 * DAY)
+        for _ in range(3):
+            agent_plan.remember(self.home, 'decision', 'simulator-delete', decision='ignored', note='忽略', source='confirm')
+        agent_plan.set_rule(self.home, 'simulator-delete', 'quiet', why='你忽略过 3 次')
+        task = self.root / '20261021-generic-result-presentation'; task.mkdir()
+        agent_plan.add_keep(self.home, task, '还要对比', by='user')
+        agent_plan.set_lock(self.home, 'target', True, words='目标我自己定')
+        rows = self.backend('rules-preview')['rows']
+        [state] = [r for r in rows if r['category'] == '计划状态']
+        self.assertEqual(state['title'], '计划第 1 版 · 还在调整')
+        self.assertTrue(state['detail'].startswith('记了 4 条你的决定 · '), state['detail'])   # 3 ignores and the lock
+        changed = {r['id']: r for r in rows if r['category'] == '改过的'}
+        self.assertEqual(list(changed)[0], 'setting:target', 'the one number leads')
+        self.assertEqual((changed['setting:target']['outcome'], changed['setting:target']['reason'].endswith('你锁住了')), ('锁住', True))
+        quiet = changed['rule:simulator-delete']
+        self.assertEqual((quiet['tag'], quiet['reason'], quiet['outcome']), ('只列出', 'agent 改的 · 你忽略过 3 次', '未锁'))
+        kept = changed['keep:' + str(task)]
+        self.assertEqual((kept['title'], kept['reason'], kept['eligible']), ('generic-result-presentation', '你说先别动 · 还要对比', False))
+        self.assertEqual(len([r for r in rows if r['category'] == '默认']), len(agent_plan.RULES) - 1)
+
+    def test_a_lock_clicked_in_the_panel_is_the_users_decision(self):
+        reply = self.backend('rules-lock', '--ids', 'rule:trash-empty', '--path', 'lock')
+        self.assertEqual((reply['status'], reply['message']), ('ok', '已锁住，agent 不会再改它。'))
+        self.assertTrue(agent_plan.load(self.home)['rules']['trash-empty']['locked'])
+        memory = agent_plan.memories(self.home)[-1]
+        self.assertEqual((memory['decision'], memory['source'], memory['words']), ('locked', 'panel', '在「帮你管着」里点了锁'))
+        with self.assertRaises(ValueError):
+            agent_plan.set_rule(self.home, 'trash-empty', 'quiet', why='废纸篓你自己清')
+        self.assertEqual(self.backend('rules-lock', '--ids', 'rule:trash-empty', '--path', 'unlock')['message'],
+                         '已解锁，agent 可以按你的习惯调整它。')
+        self.assertEqual(self.backend('rules-lock', '--ids', 'keep:/x', '--path', 'lock')['status'], 'rejected')
+        self.assertEqual(self.backend('rules-lock', '--ids', 'rule:trash-empty', '--path', 'maybe')['status'], 'rejected')
+
+    def test_a_settled_plan_says_so(self):
+        agent_plan.ensure_started(self.home, 1_800_000_000.0)
+        for week in (1, 2, 3, 4):
+            agent_plan.finish_review(self.home, False, '没改', 1_800_000_000.0 + week * 7 * DAY)
+        [state] = [r for r in self.backend('rules-preview')['rows'] if r['category'] == '计划状态']
+        self.assertEqual(state['title'], '计划已定稿')
+        self.assertIn('出现新东西时才再改', state['detail'])
+
+
 if __name__ == '__main__':
     unittest.main()

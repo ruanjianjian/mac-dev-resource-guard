@@ -414,6 +414,7 @@ func renderCover(_ tab: String, to out: String) throws {
     store.pending = try DashboardActions.call("pending-preview")
     store.plan = try DashboardActions.call("plan-preview")
     store.memory = try DashboardActions.call("memory-page")
+    store.rules = try DashboardActions.call("rules-preview")
     if let pressure = env["RENDER_PRESSURE"].flatMap(UInt32.init) {
         model.snapshot.pressure = pressure; model.snapshot.memorySince = Date().timeIntervalSince1970 - 360
     }
@@ -421,8 +422,8 @@ func renderCover(_ tab: String, to out: String) throws {
     if let parts = env["RENDER_WORK"]?.split(separator: ":").map(String.init), parts.count == 4 {
         model.work = Work(kind: parts[0], title: parts[1], bytes: Int64(parts[2]) ?? 0, freeBefore: Double(parts[3]))
     }
-    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-plan": .plan,
-                  "cover-memory": .memory][tab] ?? .cover
+    store.page = ["cover-pending": .pending, "cover-space": .space, "cover-switches": .switches, "cover-advanced": .advanced,
+                  "cover-plan": .plan, "cover-memory": .memory][tab] ?? .cover
     if let message = store.checkup?.message, !message.isEmpty { print("体检 · " + message) }
     for row in store.checkup?.rows ?? [] where ["建议", "提醒", "外接盘"].contains(row.category) { print("\(row.title) → \(row.outcome ?? "") · \(row.reason)") }
     for row in store.pendingRows { print("待确认 · \(row.title) · \(row.reason)") }

@@ -138,6 +138,63 @@ def tier_modules():
     return ask_tier, auto_tier, tiers_config
 
 
+# Short words for the tags on the plan page (draft B); the full words are in the plan itself.
+TAG_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'quiet': '只列出', 'off': '不管', 'keep': '先别动'}
+
+
+def _who(entry, default):
+    """Who set this and why, in one short line: 「agent 改的 · 你忽略过 3 次」「你定的 · 你锁住了」."""
+    if entry['set_by'] == 'agent':
+        line = 'agent 改的' + (' · ' + entry['why'] if entry['why'] else '')
+    elif entry['set_by'] == 'user':
+        line = '你定的' + (' · ' + entry['why'] if entry['why'] else '')
+    else:
+        line = default
+    return line + (' · 你锁住了' if entry.get('locked') else '')
+
+
+def rows_rules(home, now=None):
+    """plan-page (draft B): the plan's state on top, then only what someone changed, the rest folded away."""
+    import agent_plan, service
+    now = time.time() if now is None else now
+    plan = agent_plan.load(home)
+    done = agent_plan.reviews(home)
+    since = done[-1]['at'] if done else (plan['meta']['started_at'] or now)
+    decided = sum(1 for m in agent_plan.memories(home) if m.get('kind') == 'decision' and m.get('at', 0) > since)
+    day = lambda t: time.strftime('%m-%d', time.localtime(t))
+    if plan['meta']['settled_at']:
+        state, line = '计划已定稿', '定稿于 {} · 出现新东西时才再改'.format(day(plan['meta']['settled_at']))
+    else:
+        owed = agent_plan.next_review_at(home)
+        state = '计划第 {} 版 · 还在调整'.format(1 + sum(1 for r in done if r.get('changed')))
+        line = '记了 {} 条你的决定'.format(decided) + (' · {} 复查'.format(day(owed)) if owed else '')
+    rows = [dict(id='state', title=state, detail=line, category='计划状态', bytes=None, eligible=False, reason='',
+                 command=None, outcome=None)]
+    def add(category, key, title, entry, kind, default, lockable=True):
+        rows.append(dict(id=key, title=title, detail='', category=category, bytes=None, eligible=lockable,
+                         reason=_who(entry, default), command=None, kind=kind, tag=TAG_WORDS.get(kind),
+                         outcome='锁住' if entry.get('locked') else '未锁'))
+    # The one number the user sets always leads; other settings only once someone changed or locked them.
+    add('改过的', 'setting:target', '空间目标 ' + service.setting_now(home, 'target'), plan['settings']['target'], None,
+        '默认，约磁盘的 20%')
+    for name, title in agent_plan.SETTINGS.items():
+        entry = plan['settings'][name]
+        if name != 'target' and (entry['set_by'] != 'default' or entry['locked']):
+            add('改过的', 'setting:' + name, '{} · {}'.format(title, service.setting_now(home, name)), entry, None, '')
+    for rid, entry in plan['rules'].items():
+        changed = entry['set_by'] != 'default' or entry['locked']
+        add('改过的' if changed else '默认', 'rule:' + rid, agent_plan.RULES[rid]['title'], entry, entry['action'], '默认做法')
+    for entry in plan['keep']:
+        mine = entry.get('set_by') == 'user'
+        name = Path(entry['path']).name
+        name = name[9:] if name[:8].isdigit() and name[8:9] == '-' and len(name) > 9 else name   # 20261021-generic-… → generic-…
+        rows.append(dict(id='keep:' + entry['path'], title=name, detail=entry['path'], category='改过的',
+                         bytes=None, eligible=False, command=None, kind='keep', tag=TAG_WORDS['keep'],
+                         reason=('你说先别动' if mine else 'agent 先留着') + (' · ' + entry['why'] if entry.get('why') else ''),
+                         outcome='锁住' if mine else '未锁'))
+    return rows
+
+
 def note_user_settings(home, before):
     """The user changed settings in 「帮你管着」: the plan marks them as the user's, and each change is one of
     the user's decisions the agent learns from (agent-plan settings-locks, resource-memory)."""
@@ -673,6 +730,23 @@ class Adapter:
             message += '，离目标还差 {}'.format(gb(plan['shortfall_bytes']))
         return dict(status='ok', message=message, rows=rows, eligibleBytes=plan['reach_bytes'], created=plan['at'])
 
+    def rules(self, verb, ids, path):
+        """plan-page: the rules as the panel shows them; a click on a lock is the user's own decision."""
+        tier_modules()
+        sys.path.insert(0, str(engine_root() / 'scripts'))
+        import agent_plan
+        message = ''
+        if verb == 'lock':
+            if len(ids) != 1 or path not in ('lock', 'unlock') or ':' not in ids[0]:
+                return dict(status='rejected', message='要锁的那一项不对，请重新打开「帮你管着」。', rows=[])
+            kind, key = ids[0].split(':', 1)
+            if kind not in ('rule', 'setting'):
+                return dict(status='rejected', message='「先别动」本来就只有你能拿掉，不用另外锁。', rows=[])
+            agent_plan.set_lock(self.home, key, path == 'lock', source='panel', by='user',
+                                words='在「帮你管着」里点了{}'.format('锁' if path == 'lock' else '解锁'))
+            message = '已锁住，agent 不会再改它。' if path == 'lock' else '已解锁，agent 可以按你的习惯调整它。'
+        return dict(status='ok', message=message, rows=rows_rules(self.home))
+
     def memory_page(self):
         """What is using memory, what was handled automatically, what can be closed, and what must stay."""
         sys.path.insert(0, str(engine_root() / 'runtime/memory/scripts'))
@@ -755,6 +829,8 @@ class Adapter:
             return self.memory_close([i for i in (ids or '').split(',') if i])
         if family == 'plan':
             return self.plan(verb, path)
+        if family == 'rules':
+            return self.rules(verb, [i for i in (ids or '').split(',') if i], path)
         if family == 'checkup' and verb in ('preview', 'scan', 'firstrun', 'status'):
             # Read-only: a long background checkup must not make the panel's buttons answer "busy".
             return self.checkup(verb, [], path)
@@ -819,7 +895,7 @@ def main():
                                           'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',
                                           'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview',
                                           'checkup-preview', 'checkup-scan', 'checkup-apply', 'checkup-off', 'checkup-firstrun',
-                                          'checkup-status', 'plan-preview', 'plan-target', 'plan-handoff'])
+                                          'checkup-status', 'plan-preview', 'plan-target', 'plan-handoff', 'rules-preview', 'rules-lock'])
     parser.add_argument('--token')
     parser.add_argument('--path')
     parser.add_argument('--ids', help='Comma-separated pending ids the user ticked')

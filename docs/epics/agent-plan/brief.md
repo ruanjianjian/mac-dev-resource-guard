@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 [raw-input.md](./raw-input.md)；RAW-01～10：新方向原话 RAW-01，引出它的那次问题 RAW-02，决策卡的选择 RAW-03～10。
+原话全量在 [raw-input.md](./raw-input.md)；RAW-01～10：新方向原话 RAW-01，引出它的那次问题 RAW-02，决策卡的选择 RAW-03～10。RAW-11～16：确认 brief 开工、接着做第二批、同意派 Codex 评审和建每周复查、计划页视觉稿选 B。
 
 讨论过程：决策卡 https://claude.ai/artifact/NVzY3dsLGW9vDeGQs8Kecg（10 张，用户 2026-10-30 看完，全部选推荐项）。
 
@@ -27,7 +27,7 @@
 | [settings-locks](specs/settings-locks.md) | agent 改设置：发现用户设得不对就直接改，记下理由并通知一次；用户能把某项锁住，锁住的 agent 不碰（RAW-07） | 已实现 |
 | [first-plan](specs/first-plan.md) | 首次安装：agent 只问一句就开跑，第一版计划就是现在这套安全规则；第一周把用户的取舍都记下，第一周结束出修订版并说清改了什么（RAW-08） | 已实现 |
 | [plan-settle](specs/plan-settle.md) | 计划定稿：连续几次复查都不用改、用户的决定也都和计划一致，就定稿；之后只在出现新类型的占用、换了硬盘或外接盘、用户要求时重开（RAW-09） | 已实现 |
-| plan-page | 「帮你管着」改成 agent 的计划：每条规则一行，写着谁定的、为什么，旁边一个锁；原来的手动开关收进「高级」（RAW-10） | 未开 spec |
+| [plan-page](specs/plan-page.md) | 「帮你管着」改成 agent 的计划：每条规则一行，写着谁定的、为什么，旁边一个锁；原来的手动开关收进「高级」（RAW-10） | 已实现 |
 
 全景图随第一批 spec 一起画。
 
