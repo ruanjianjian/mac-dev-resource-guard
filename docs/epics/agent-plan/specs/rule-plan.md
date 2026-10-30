@@ -42,7 +42,7 @@
 | AC-04 | [核] | 某一类设成「只列出、不催」或「不管」 | 后台刷新「等你确认」 | 「只列出、不催」的照样列着、但不为它发通知；「不管」的不列 | CLI后端 | ✅ | auto: ExecutorTest.test_quiet_kinds_are_listed_without_a_nudge_and_off_kinds_not_at_all |
 | AC-05 | [核] | 「先别动」名单上有一个任务 | 后台挪闲置任务、挪构建产物、列「等你确认」、算计划 | 都跳过它，挪任务的记录里写「先别动：理由」；用户加的只有用户能拿掉 | CLI后端 | ✅ | auto: ExecutorTest.test_kept_paths_are_left_alone_by_every_part、test_the_plan_page_follows_the_rules |
 | AC-06 | [核] | 「闲置任务」「工具缓存」「任务构建产物」「Xcode 中间缓存」某一条设成「不管」 | 后台下一轮 | 对应那一类不再挪、不再清 | CLI后端 | ✅ | auto: ExecutorTest.test_idle_tasks_set_to_off_stay_on_the_internal_disk；工具缓存、构建产物、Xcode 中间缓存三处同一个判断（service.tick_caches、clean_caches） |
-| AC-07 | [核] | 一台开着的模拟器，只被一个「看画面」或「看日志」的程序挂着 | 那个程序已经跑了 12 小时以上，再过 4 小时 | 列进「等你确认」：要不要关这台模拟器；挂着不到 12 小时的，或有构建、测试程序连着的，照旧算在用 | CLI后端 | ✅ | auto: ExecutorTest.test_a_simulator_held_only_by_a_long_running_stream_is_asked_about（baguette stream 13 小时、log stream 30 小时列出；1 小时、xcodebuild 不列） |
+| AC-07 | [核] | 一台开着的模拟器，只被一个「看画面」或「看日志」的程序挂着 | 那个程序已经跑了 12 小时以上，再过 4 小时 | 列进「等你确认」：要不要关这台模拟器；挂着不到 12 小时的，或有构建、测试程序连着的，照旧算在用 | CLI后端 | ✅ | auto: ExecutorTest.test_a_simulator_held_only_by_a_long_running_stream_is_asked_about（baguette stream 13 小时、log stream 30 小时列出；1 小时、xcodebuild 不列）；本机实测 2026-10-30 19:43（main c6f54cf）：RollingGo r3 Flutter 只被跑了 1 天 2 小时的 baguette stream 挂着，开始算没人用；r3 Native（stream 1 小时 53 分）、TBG Gray（12～17 分钟前刚开的看画面和看日志）照旧算在用 |
 | AC-08 | [核] | 有计划 | agent 运行 `resource-guard-service rules` | 列出每条规则的做法、可选做法、谁定的、为什么、锁没锁，以及「先别动」名单 | CLI后端 | ✅ | auto: CommandTest.test_the_agent_reads_and_changes_the_plan_with_commands |
 
 ## 变更记录

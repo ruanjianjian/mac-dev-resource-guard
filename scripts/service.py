@@ -411,6 +411,7 @@ def current_plan(home, cfg, settings, report=None, now=None):
 
 def refresh_plan(home, cfg, settings, now):
     """Keep the checkup fresh, save the plan, and wake the agent only for the unexpected (agent-handoff AC-05)."""
+    agent_plan.ensure_started(home, now)   # first-plan: the first review is due a week after this
     report = checkup.load_report(home)
     if report is None or now - report.get('at', 0) > 6 * 3600:
         report = checkup.scan(home, cfg, now=now)
@@ -568,6 +569,18 @@ def plan_command(home, a):
     target = a.more[0] if a.more else None
     if a.action == 'rules':
         return agent_plan.describe(home)
+    if a.action == 'review':
+        if a.value in (None, 'show'):
+            return agent_plan.review_packet(home)
+        if a.value == 'done':
+            if a.changed is None:
+                raise ValueError('写明这次复查改没改计划：--changed yes 或 --changed no')
+            return agent_plan.finish_review(home, a.changed == 'yes', a.summary or a.note)
+        if a.value == 'scheduled':
+            return agent_plan.note_schedule(home, target or '')
+        if a.value == 'reopen':
+            return agent_plan.reopen(home, a.why or a.words, by=a.by) or dict(status='not-settled')
+        raise ValueError('review 只有 show、done、scheduled、reopen')
     if a.action == 'memory':
         if a.value in (None, 'list'):
             return dict(memories=agent_plan.memories(home, about=a.about, last=a.last or 30))
@@ -922,7 +935,7 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
-                                                                    'memory', 'rules', 'rule', 'keep', 'setting'])
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
     p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
@@ -933,8 +946,10 @@ def main():
     p.add_argument('--kind', choices=agent_plan.KINDS); p.add_argument('--about'); p.add_argument('--path')
     p.add_argument('--note', default=''); p.add_argument('--decision'); p.add_argument('--last', type=int)
     p.add_argument('--stream-hours', type=float, help='rule simulator-shutdown: hours after which a screen or log stream no longer counts as use')
+    p.add_argument('--changed', choices=['yes', 'no'], help='review done: did this review change the plan')
+    p.add_argument('--summary', default='', help='review done: the conclusion, also told to the user')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
-    if a.action in ('memory', 'rules', 'rule', 'keep', 'setting'):
+    if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):
         result = plan_command(home, a)
     elif a.action in ('plan', 'agent-app'):
         settings = configure(home)
