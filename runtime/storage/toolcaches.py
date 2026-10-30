@@ -158,17 +158,21 @@ def take_over(home, external_root, activity, free_bytes=None):
     busy = busy_tools(activity)
     free_before = round(auto_tier.shutil.disk_usage(str(home)).free / auto_tier.GIB, 2)
     try:
-        _move_all(home, external_root, state, busy, actions, free_bytes, free_before)
+        _move_all(home, external_root, state, busy, actions, free_bytes, free_before, agent_plan.load(home))
     finally:
         auto_tier.working(home)
     return actions
 
 
-def _move_all(home, external_root, state, busy, actions, free_bytes, free_before):
+def _move_all(home, external_root, state, busy, actions, free_bytes, free_before, plan):
     for row in inspect(home, external_root, sizes=False):
         if row['status'] != 'local':
             continue
         tool, path = row['tool'], Path(row['path'])
+        keep = agent_plan.kept(plan, path)
+        if keep:
+            actions.append(dict(kind='cache-move', path=str(path), bytes=0, result='skipped', reason='先别动：' + (keep.get('why') or '计划里写着')))
+            continue
         dest = Path(external_root) / 'caches' / tool / row['label']
         if tool in busy:
             actions.append(dict(kind='cache-move', path=str(path), bytes=0, result='skipped', reason=row['name'] + ' 正在运行，下一轮再搬'))

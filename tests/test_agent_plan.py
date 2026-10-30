@@ -11,6 +11,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ask_tier import AskFixture
 from test_tiers import ROOT, TierFixture
+from test_one_click import CacheFixture, idle
+import toolcaches
 import agent_plan
 import ask_tier
 import plan as space_plan
@@ -46,7 +48,7 @@ class RulesTest(AskFixture):
         self.assertEqual((rule['action'], rule['set_by'], rule['evidence']), ('quiet', 'agent', ['m1']))
         [change] = agent_plan.changes(self.home)
         self.assertEqual((change['by'], change['before'], change['after']), ('agent', '先问', '只列出、不催'))
-        asked = json.loads((agent_plan.state_dir(self.home) / agent_plan.NOTICE).read_text())
+        [asked] = agent_plan.queued_notices(self.home)
         self.assertEqual(asked['title'], '资源看板的计划改了')
         self.assertIn('不可用或很久没开的模拟器：先问 → 只列出、不催。你拒绝过 3 次删模拟器', asked['body'])
 
@@ -55,14 +57,14 @@ class RulesTest(AskFixture):
         with self.assertRaises(ValueError) as caught:
             agent_plan.set_rule(self.home, 'idle-tasks', 'off', why='空间够了')
         self.assertIn('锁住', str(caught.exception))
-        agent_plan.set_rule(self.home, 'idle-tasks', 'off', by='user')
-        agent_plan.set_lock(self.home, 'target', True)
+        agent_plan.set_rule(self.home, 'idle-tasks', 'off', by='user', words='那就先不挪')
+        agent_plan.set_lock(self.home, 'target', True, words='目标我自己定')
         with self.assertRaises(ValueError):
             agent_plan.check_setting(self.home, 'target', '过去两周 12 次低于目标')
         [first, second] = agent_plan.memories(self.home)
         self.assertEqual((first['decision'], first['words']), ('locked', '任务别挪，我要在本机对比'))
         self.assertEqual(second['about'], 'target')
-        self.assertFalse((agent_plan.state_dir(self.home) / agent_plan.NOTICE).exists(), 'the user is not told of their own change')
+        self.assertEqual(agent_plan.queued_notices(self.home), [], 'the user is not told of their own change')
 
 
 class MemoryTest(AskFixture):
@@ -122,7 +124,7 @@ class ExecutorTest(AskFixture):
         self.assertIn('先别动：用户说还要对比', [k['reason'] for k in receipt['kept'] if k['path'] == str(task)])
         with self.assertRaises(ValueError):
             agent_plan.remove_keep(self.home, task)   # the user's 「先别动」 is theirs to lift
-        agent_plan.remove_keep(self.home, task, by='user')
+        agent_plan.remove_keep(self.home, task, by='user', why='可以挪了')
         self.run_tier(self.cfg())
         self.assertTrue(task.is_symlink(), 'moved once the user lifted it')
 
@@ -170,12 +172,13 @@ class CommandTest(CommandFixture):
         code, done = self.rgs('setting', 'target', '60', '--why', '这台 Mac 平时就在 30～60 GB 之间', '--evidence', 'm2')
         self.assertEqual((code, done['after'], done['by']), (0, '60 GB', 'agent'))
         self.assertEqual(self.rgs('setting', 'target', '70')[0], 2, 'no reason, no change')
-        asked = json.loads((agent_plan.state_dir(self.home) / agent_plan.NOTICE).read_text())
+        [asked] = agent_plan.queued_notices(self.home)
         self.assertIn('空间目标：', asked['body']); self.assertIn('→ 60 GB', asked['body'])
         self.assertEqual(agent_plan.load(self.home)['settings']['target']['evidence'], ['m2'])
 
     def test_a_locked_setting_is_refused_to_the_agent_with_a_reason_to_pass_on(self):
-        self.assertEqual(self.rgs('setting', 'target', 'lock', '--words', '目标我自己定')[0], 0)
+        self.assertEqual(self.rgs('setting', 'target', 'lock', '--words', '目标我自己定')[0], 2, 'only the user locks')
+        self.assertEqual(self.rgs('setting', 'target', 'lock', '--by', 'user', '--words', '目标我自己定')[0], 0)
         code, error = self.rgs('setting', 'target', '30', '--why', '过去两周 10 次低于目标你都没处理')
         self.assertEqual(code, 2)
         self.assertIn('锁住', error)
@@ -267,7 +270,7 @@ class ReviewTest(TierFixture):
         for week in (5, 6, 7):
             self.assertIsNone(self.review(self.T0 + week * 7 * DAY)['settled_at'], week)
         self.assertEqual(self.review(self.T0 + 8 * 7 * DAY)['settled_at'], self.T0 + 8 * 7 * DAY)
-        asked = json.loads((agent_plan.state_dir(self.home) / agent_plan.NOTICE).read_text())
+        asked = agent_plan.queued_notices(self.home)[-1]
         self.assertEqual(asked['title'], '资源看板的计划定稿了')
         self.assertIn('定稿', agent_plan.review_packet(self.home)['steps'])
 
@@ -293,7 +296,7 @@ class ReviewTest(TierFixture):
 
     def test_the_user_changing_a_settled_plan_opens_it_again(self):
         self.settle()
-        agent_plan.set_rule(self.home, 'installer-delete', 'off', by='user')
+        agent_plan.set_rule(self.home, 'installer-delete', 'off', by='user', words='安装包我自己管')
         self.assertIsNone(agent_plan.load(self.home)['meta']['settled_at'])
         reopened = [c for c in agent_plan.changes(self.home) if c['after'] == '重新打开']
         self.assertEqual((reopened[0]['by'], reopened[0]['why']), ('user', '用户自己把「下载里的大安装包」改成不管'))
@@ -309,6 +312,174 @@ class ReviewCommandTest(CommandFixture):
         self.assertEqual(self.rgs('review', 'scheduled', 'codex')[1]['agent'], 'codex')
         self.assertEqual(self.rgs('review', 'reopen', '--why', '换了外接盘')[1], {'status': 'not-settled'})
         self.assertIn('review', space_plan.AGENT_PROMPT)
+
+
+
+class ReviewFindingsTest(AskFixture):
+    """Codex review CR-01 (2026-10-30) of batches 1 and 2: each case is a sequence it showed would go wrong."""
+
+    def test_1_the_agent_cannot_take_over_and_then_lift_the_users_keep(self):
+        task = self.root / 'x'
+        agent_plan.add_keep(self.home, task, '我要对比', by='user')
+        agent_plan.add_keep(self.home, task, '先留着')   # the agent adds the same path again
+        [entry] = agent_plan.load(self.home)['keep']
+        self.assertEqual((entry['set_by'], entry['why']), ('user', '我要对比'))
+        with self.assertRaises(ValueError):
+            agent_plan.remove_keep(self.home, task, why='可以挪了')
+
+    def test_2_a_stale_confirmation_cannot_run_what_the_plan_now_leaves_alone(self):
+        simctl = self.sims(); now = time.time()
+        self.refresh(simctl, now=now, task_roots=[])
+        agent_plan.set_rule(self.home, 'runtime-delete', 'off', why='运行时你自己管')
+        old = Path(json.loads(simctl(['list', 'devices', '--json']))['devices'][self.IOS][0]['dataPath'])
+        agent_plan.add_keep(self.home, old.parent, '这台模拟器有测试账号', by='user')
+        results = ask_tier.execute(self.home, self.cfg(task_roots=[]), self.settings, ['runtime-delete:R1', 'simulator-delete:OLD'],
+                                   simctl, Activity(), now)
+        self.assertEqual([r['outcome'] for r in results], ['已跳过', '已跳过'])
+        self.assertIn('不管', results[0]['reason']); self.assertIn('先别动', results[1]['reason'])
+        self.assertFalse(any(c[:2] in (['runtime', 'delete'], ['delete', 'OLD']) for c in simctl.calls))
+
+    def test_3_the_xcode_cache_cleanup_leaves_a_kept_folder(self):
+        import service
+        from test_tiers import age
+        self.cfg()
+        cache = self.home / 'Library/Developer/Xcode/DerivedData/Old/Build/Intermediates.noindex'
+        cache.mkdir(parents=True); (cache / 'file.o').write_bytes(b'x' * 4096); age(cache, 20)
+        agent_plan.add_keep(self.home, self.home / 'Library/Developer/Xcode/DerivedData/Old', '还在对比编译结果', by='user')
+        with patch.object(service.common, 'activity', return_value=Activity()):
+            service.clean_caches(self.home)
+        self.assertTrue((cache / 'file.o').exists())
+
+    def test_4_overlapping_writers_lose_nothing_and_memories_get_their_own_ids(self):
+        import threading
+        def remember(i):
+            agent_plan.remember(self.home, 'lesson', 'task-builds', note='第 {} 条'.format(i))
+        def change(i):
+            agent_plan.set_rule(self.home, 'trash-empty' if i % 2 else 'archive-delete', 'quiet', why='第 {} 次'.format(i))
+        threads = [threading.Thread(target=remember, args=(i,)) for i in range(20)]
+        threads += [threading.Thread(target=change, args=(i,)) for i in range(6)]
+        threads += [threading.Thread(target=lambda: agent_plan.set_lock(self.home, 'target', True, words='别动目标'))]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        ids = [m['id'] for m in agent_plan.memories(self.home)]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        plan = agent_plan.load(self.home)
+        self.assertEqual((plan['rules']['trash-empty']['action'], plan['rules']['archive-delete']['action']), ('quiet', 'quiet'))
+        self.assertTrue(plan['settings']['target']['locked'])
+
+    def test_10_a_readable_but_wrong_plan_file_degrades_entry_by_entry(self):
+        path = agent_plan.plan_path(self.home); path.parent.mkdir(parents=True, exist_ok=True)
+        for broken in ({'rules': [1]}, {'meta': [1]}, {'settings': 'x', 'keep': {'a': 1}},
+                       {'rules': {'simulator-shutdown': {'action': 'ask', 'params': {'stream_hours': 'soon'}}}},
+                       {'keep': [{'path': 'relative/path'}, {'path': '/abs/kept', 'why': 3}]}):
+            path.write_text(json.dumps(broken))
+            plan = agent_plan.load(self.home)
+            self.assertEqual(plan['rules']['simulator-shutdown']['params']['stream_hours'], 12, broken)
+        self.assertEqual([k['path'] for k in plan['keep']], ['/abs/kept'])
+        memory = agent_plan.state_dir(self.home) / agent_plan.MEMORY; memory.parent.mkdir(parents=True, exist_ok=True)
+        memory.write_text('null\n[1]\n{"id": "m1", "kind": "lesson", "about": "x", "note": "y"}\n')
+        self.assertEqual([m['id'] for m in agent_plan.memories(self.home)], ['m1'])
+
+    def test_9_paths_relative_inside_a_task_and_simulator_data_are_all_covered(self):
+        here = os.getcwd(); os.chdir(self.home)
+        try:
+            entry = agent_plan.add_keep(self.home, 'work/worktrees/t1/notes', '笔记', by='user')
+        finally:
+            os.chdir(here)
+        self.assertEqual(entry['path'], str(self.root / 't1/notes'), 'kept as an absolute path')
+        plan = agent_plan.load(self.home)
+        self.assertTrue(agent_plan.kept(plan, self.root / 't1'), 'moving the whole task would take the kept notes along')
+        self.assertIsNone(agent_plan.kept(plan, self.root / 't2'))
+        simctl = self.sims()
+        data = Path(json.loads(simctl(['list', 'devices', '--json']))['devices'][self.IOS][0]['dataPath'])
+        agent_plan.add_keep(self.home, data, '有登录态', by='user')
+        self.assertNotIn('simulator-delete:OLD', self.ids(self.refresh(simctl, task_roots=[])))
+
+    def test_11_quiet_items_never_nudge_through_the_agent_notice(self):
+        plan = dict(free_bytes=40 * GIB, gap_bytes=10 * GIB, suggestions=[],
+                    sections=[dict(id='auto', bytes=0, items=[]), dict(id='ask', bytes=GIB, items=[dict(bytes=GIB, quiet=True)]),
+                              dict(id='judge', bytes=0, items=[])])
+        self.assertIsNone(space_plan.agent_needed(self.home, plan, [], time.time(), 25 * GIB))
+        loud = dict(plan, sections=[plan['sections'][0], dict(id='ask', bytes=GIB, items=[dict(bytes=GIB, quiet=False)]), plan['sections'][2]])
+        self.assertIn('还差 10 GB', space_plan.agent_needed(self.home, loud, [], time.time(), 25 * GIB)['reason'])
+
+    def test_12_two_changes_are_both_said_and_a_change_of_hours_is_visible(self):
+        agent_plan.set_rule(self.home, 'trash-empty', 'quiet', why='废纸篓你自己清')
+        agent_plan.set_rule(self.home, 'simulator-shutdown', 'ask', why='看画面 6 小时就算没人用', params={'stream_hours': 6})
+        bodies = [n['body'] for n in agent_plan.queued_notices(self.home)]
+        self.assertEqual(len(bodies), 2)
+        self.assertIn('超过 12 小时算没人用） → 先问（看画面或日志超过 6 小时算没人用）', bodies[1])
+
+    def test_13_the_plan_page_counts_only_build_copies_that_will_move(self):
+        task = self.root / 't'
+        for copy in ('DerivedData', 'old/DerivedData'):
+            (task / copy / 'Build').mkdir(parents=True)
+        agent_plan.add_keep(self.home, task / 'DerivedData', '对比用', by='user')
+        report = dict(tasks=[dict(path=str(task), linked=False, bytes=9 * GIB, idle=False)], caches=[], categories=[])
+        cfg = self.cfg(caches_enabled=True)
+        result = space_plan.build(self.home, cfg, self.settings, report, dict(items=[]), GIB, True, sizer=lambda p: 8 * GIB)
+        self.assertEqual([i['path'] for i in result['sections'][0]['items']], [str(task / 'old/DerivedData')])
+
+    def test_14_a_path_holding_the_words_is_not_a_stream(self):
+        for command, passive in (('xcodebuild -project /repos/baguette/stream/App.xcodeproj -destination id=ON test', False),
+                                 ('/Users/me/.local/share/baguette-0.2.12/Baguette stream --udid ON --fps 1', True),
+                                 ('/bin/zsh -c source s.sh && baguette stream --udid ON --fps 1', True),
+                                 ('/Applications/Claude.app/Contents/Helpers/disclaimer -- xcrun simctl spawn ON log stream --style compact', True),
+                                 ('flutter test -d ON', False)):
+            self.assertEqual(bool(ask_tier.PASSIVE.search(command)), passive, command)
+
+
+
+class ToolCacheKeepTest(CacheFixture):
+    def test_8_a_kept_tool_cache_is_not_moved(self):
+        npm = self.cache('.npm')
+        agent_plan.add_keep(self.home, npm, '离线时要用', by='user')
+        actions = toolcaches.take_over(self.home, self.managed, idle())
+        self.assertFalse(npm.is_symlink())
+        self.assertEqual([a['reason'] for a in actions if a['path'] == str(npm)], ['先别动：离线时要用'])
+
+class LockAndSettleFindingsTest(CommandFixture):
+    def test_5_only_the_users_words_lock_unlock_or_speak_for_the_user(self):
+        agent_plan.set_lock(self.home, 'target', True, words='目标我自己定')
+        with self.assertRaises(ValueError):
+            agent_plan.set_lock(self.home, 'target', False, words='', by='user')
+        with self.assertRaises(ValueError):
+            agent_plan.set_lock(self.home, 'target', False, words='用户说可以', by='agent')
+        self.assertEqual(self.rgs('setting', 'target', 'unlock')[0], 2)
+        self.assertEqual(self.rgs('target', '30')[0], 2, 'the old command goes through the same door')
+        self.assertEqual(self.rgs('target', '30', '--why', '空间够了')[0], 2, 'locked')
+        self.assertEqual(self.rgs('rule', 'trash-empty', 'quiet', '--by', 'user')[0], 2, 'no words, no user')
+        code, done = self.rgs('target', '30', '--by', 'user', '--words', '改成 30')
+        self.assertEqual((code, done['after']), (0, '30 GB'))
+
+    def test_6_a_switch_that_moves_a_locked_one_is_refused(self):
+        import service
+        with patch.object(service.checkup, 'apply', side_effect=AssertionError('must not run')):
+            agent_plan.set_lock(self.home, 'ask', True, words='等你确认别动')
+            with self.assertRaises(ValueError) as caught:
+                service.change_setting(self.home, 'clean', 'on', why='该清就清')
+        self.assertIn('等你确认', str(caught.exception))
+
+    def test_7_after_reopening_the_quiet_weeks_start_over(self):
+        t0 = 1_800_000_000.0
+        agent_plan.ensure_started(self.home, t0)
+        for week in (1, 2, 3, 4):
+            agent_plan.finish_review(self.home, False, '没改', t0 + week * 7 * DAY)
+        with patch.object(agent_plan.time, 'time', return_value=t0 + 30 * DAY):
+            agent_plan.reopen(self.home, '换了一块外接盘')
+        self.assertIsNone(agent_plan.finish_review(self.home, False, '没改', t0 + 35 * DAY)['settled_at'])
+        for week in (6, 7):
+            self.assertIsNone(agent_plan.finish_review(self.home, False, '没改', t0 + week * 7 * DAY)['settled_at'])
+        self.assertTrue(agent_plan.finish_review(self.home, False, '没改', t0 + 8 * 7 * DAY)['settled_at'])
+
+    def test_7b_a_review_that_says_no_change_while_the_plan_changed_does_not_count(self):
+        t0 = 1_800_000_000.0
+        agent_plan.ensure_started(self.home, t0)
+        agent_plan.finish_review(self.home, False, '没改', t0 + 7 * DAY)
+        with patch.object(agent_plan.time, 'time', return_value=t0 + 10 * DAY):
+            agent_plan.set_rule(self.home, 'trash-empty', 'quiet', why='废纸篓你自己清')
+        for week in (2, 3, 4):
+            self.assertIsNone(agent_plan.finish_review(self.home, False, '没改', t0 + week * 7 * DAY)['settled_at'])
 
 
 if __name__ == '__main__':

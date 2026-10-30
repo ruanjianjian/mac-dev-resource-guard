@@ -28,7 +28,9 @@ LOSES = {
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
 # Watching, not using: an agent's screen stream or a log stream it left running (10-30: five simulators held
 # for up to a day this way). Only how long such a stream has run says whether anyone still looks.
-PASSIVE = re.compile(r'\bbaguette\b.*\bstream\b|\bsimctl\s+spawn\s+\S+\s+log\s+stream\b')
+# The program itself must be the stream (a word of its own, or the last part of a path), not a path that happens
+# to hold these words, like a project in /repos/baguette/stream.
+PASSIVE = re.compile(r'(?i)(?:^|[\s;&|(/])baguette\s+stream(?:\s|$)|(?:^|[\s;&|(/])simctl\s+spawn\s+\S+\s+log\s+stream(?:\s|$)')
 APP = Path.home() / 'Applications/资源看板.app'
 
 
@@ -163,7 +165,8 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
             title = '{}（{}）'.format(device.get('name', udid), runtime_label(runtime))
             if device.get('isAvailable') is False:
                 # It cannot boot (its system version is gone); still the user's data, so asked, never auto-deleted.
-                add('simulator-delete', udid, title, device.get('dataPathSize') or 0, '系统标为不可用，开不了机', 'unavailable')
+                add('simulator-delete', udid, title, device.get('dataPathSize') or 0, '系统标为不可用，开不了机', 'unavailable',
+                    path=device.get('dataPath'))
                 continue
             data = device.get('dataPath')
             pinned = data and T.pin_reason(pins, T.Task(Path(data), Path(data), Path(data)))
@@ -176,12 +179,13 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
                 since = unattached.setdefault(udid, now)
                 hours = (now - since) / 3600
                 if hours >= cfg['ask']['simulator_unattached_hours']:
-                    add('simulator-shutdown', udid, title, 0, '开着 {:.0f} 小时没有开发工具连着'.format(hours), 'since:{:.0f}'.format(since))
+                    add('simulator-shutdown', udid, title, 0, '开着 {:.0f} 小时没有开发工具连着'.format(hours), 'since:{:.0f}'.format(since),
+                        path=data)
             elif device.get('state') == 'Shutdown' and not protected:
                 last = last_used(device)
                 if last is not None and now - last >= cfg['ask']['simulator_unused_days'] * T.DAY:
                     add('simulator-delete', udid, title, device.get('dataPathSize') or (T.size(data) if data else 0),
-                        '已关机 {:.0f} 天没开过'.format((now - last) / T.DAY), 'last:{:.0f}'.format(last))
+                        '已关机 {:.0f} 天没开过'.format((now - last) / T.DAY), 'last:{:.0f}'.format(last), path=data)
     for udid in list(unattached):
         if udid not in booted:
             unattached.pop(udid)
@@ -234,6 +238,18 @@ def empty_trash():
         raise RuntimeError((out.stderr or out.stdout).strip() or '访达没有清空废纸篓')
 
 
+def left_alone(plan, key, item):
+    """Why the plan says to leave this item alone (its kind is set to 不管, or it touches a 「先别动」 path), or None.
+    Checked when the list is built and again right before anything runs, so a stale confirmation cannot win."""
+    if agent_plan.action(plan, item.get('kind') or key.split(':', 1)[0]) == 'off':
+        return '计划里这一类设成了不管'
+    for path in (item.get('path'), key.split(':', 1)[1]):
+        keep = agent_plan.kept(plan, path) if path and str(path).startswith('/') else None
+        if keep:
+            return '先别动：' + (keep.get('why') or '计划里写着')
+    return None
+
+
 def refresh(home, cfg, settings, simctl, activity=None, now=None):
     """Rebuild the pending list (C4); ignored items return only when their object changes."""
     now = time.time() if now is None else now
@@ -248,7 +264,7 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
     # The plan decides which kinds are asked about, listed quietly or left alone, and what is kept for now.
     plan = agent_plan.load(home)
     fresh = {key: dict(found, quiet=agent_plan.action(plan, found['kind']) == 'quiet') for key, found in fresh.items()
-             if agent_plan.action(plan, found['kind']) != 'off' and not agent_plan.kept(plan, key.split(':', 1)[1])}
+             if not left_alone(plan, key, found)}
     for key, found in fresh.items():
         old = items.get(key)
         if old and (old['state'] == 'running' or old['state'] == 'ignored' and old['fingerprint'] == found['fingerprint']):
@@ -342,6 +358,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
         return [dict(id=key, outcome='已跳过', reason='这会儿查不清哪些程序在用它，为安全没有删；稍后再试') for key in ids]
     pins, _ = StorageManager(settings)._pins(now)
     fresh = candidates(home, cfg, activity, pins, simctl, now, dict(load(home, ASK_STATE, {})), only=set(ids))
+    plan = agent_plan.load(home)
     pending = load(home, PENDING, empty_pending())
     items = {i['id']: i for i in pending['items']}
     gone = set()
@@ -354,6 +371,10 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
             pending['items'].append(item)
         if item is None:
             results.append(dict(id=key, outcome='已跳过', reason='状态已变，不再满足条件或已处理'))
+            continue
+        alone = left_alone(plan, key, dict(item, **{k: v for k, v in fresh.get(key, {}).items() if k == 'path'}))
+        if alone:
+            results.append(dict(id=key, title=item['title'], outcome='已跳过', reason=alone))
             continue
         if item.get('unreachable'):
             results.append(dict(id=key, title=item['title'], outcome='已跳过', reason='外接盘未连接'))
