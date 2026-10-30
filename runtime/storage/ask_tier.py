@@ -9,6 +9,7 @@ import subprocess
 import time
 
 from storage import GIB, Activity, StorageManager, atomic_json
+import agent_plan
 import spaces
 import tasks as T
 
@@ -25,6 +26,9 @@ LOSES = {
 }
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
+# Watching, not using: an agent's screen stream or a log stream it left running (10-30: five simulators held
+# for up to a day this way). Only how long such a stream has run says whether anyone still looks.
+PASSIVE = re.compile(r'\bbaguette\b.*\bstream\b|\bsimctl\s+spawn\s+\S+\s+log\s+stream\b')
 APP = Path.home() / 'Applications/资源看板.app'
 
 
@@ -73,9 +77,36 @@ def last_used(device):
     return max(times) if times else None
 
 
-def attached(udid, activity):
-    return (any(udid in command and not NOT_A_TOOL.search(command) for _, command in activity.commands) or
-            any(udid in reference for reference in activity.lease_refs))
+def attached(udid, activity, stream_hours=None, ages=None):
+    """Something uses this simulator. With `stream_hours`, a screen or log stream running longer than that
+    no longer counts (rule simulator-shutdown); `ages` maps pid to seconds running."""
+    for pid, command in activity.commands:
+        if udid not in command or NOT_A_TOOL.search(command):
+            continue
+        if stream_hours and PASSIVE.search(command) and (ages or {}).get(pid, 0) >= stream_hours * 3600:
+            continue
+        return True
+    return any(udid in reference for reference in activity.lease_refs)
+
+
+def process_ages(run=subprocess.run):
+    """Seconds each process has been running ({pid: seconds}); empty when ps cannot say."""
+    ages = {}
+    try:
+        out = run(['/bin/ps', '-axo', 'pid=,etime='], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ages
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        days, _, clock = fields[1].rpartition('-')
+        parts = [int(p) for p in clock.split(':') if p.isdigit()]
+        seconds = 0
+        for part in parts:
+            seconds = seconds * 60 + part
+        ages[int(fields[0])] = seconds + (int(days) * 86400 if days.isdigit() else 0)
+    return ages
 
 
 def runtime_label(identifier, version=None):
@@ -120,6 +151,8 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
     if kinds is not None and not kinds & {'simulator-shutdown', 'simulator-delete', 'runtime-delete'}:
         return _tasks(cfg, activity, pins, now, add, only, found)
     listing = json.loads(simctl(['list', 'devices', '--json']))
+    stream_hours = agent_plan.load(home)['rules']['simulator-shutdown']['params'].get('stream_hours')
+    ages = process_ages() if stream_hours else {}
     used_runtimes, booted = set(), set()
     unattached = memory.setdefault('unattached_since', {})
     for runtime, devices in listing.get('devices', {}).items():
@@ -133,10 +166,11 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
                 add('simulator-delete', udid, title, device.get('dataPathSize') or 0, '系统标为不可用，开不了机', 'unavailable')
                 continue
             data = device.get('dataPath')
-            protected = attached(udid, activity) or (data and T.pin_reason(pins, T.Task(Path(data), Path(data), Path(data))))
+            pinned = data and T.pin_reason(pins, T.Task(Path(data), Path(data), Path(data)))
+            protected = attached(udid, activity) or pinned
             if device.get('state') == 'Booted':
                 booted.add(udid)
-                if protected:
+                if attached(udid, activity, stream_hours, ages) or pinned:
                     unattached.pop(udid, None)
                     continue
                 since = unattached.setdefault(udid, now)
@@ -211,6 +245,10 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
         return pending   # cannot tell what is in use: keep the list as it is instead of emptying it
     items = {i['id']: i for i in pending['items']}
     fresh = candidates(home, cfg, activity, pins, simctl, now, memory)
+    # The plan decides which kinds are asked about, listed quietly or left alone, and what is kept for now.
+    plan = agent_plan.load(home)
+    fresh = {key: dict(found, quiet=agent_plan.action(plan, found['kind']) == 'quiet') for key, found in fresh.items()
+             if agent_plan.action(plan, found['kind']) != 'off' and not agent_plan.kept(plan, key.split(':', 1)[1])}
     for key, found in fresh.items():
         old = items.get(key)
         if old and (old['state'] == 'running' or old['state'] == 'ignored' and old['fingerprint'] == found['fingerprint']):
@@ -253,7 +291,7 @@ def launch_app():
 def maybe_notify(home, pending, free_bytes, critical_bytes, now=None, launch=launch_app):
     """At most one daily notice; one more as soon as space drops below the critical line (C6)."""
     now = time.time() if now is None else now
-    count = sum(1 for i in pending['items'] if i['state'] == 'pending' and not i.get('unreachable'))
+    count = sum(1 for i in pending['items'] if i['state'] == 'pending' and not i.get('unreachable') and not i.get('quiet'))
     notify = pending.setdefault('notify', {})
     today = datetime.fromtimestamp(now).strftime('%Y-%m-%d')
     reason = None
@@ -351,6 +389,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 remove_task(target, cfg)
             item.update(state='done', result=None, updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='已完成', reason=item['reason'], bytes=item['bytes']))
+            remember_choice(home, item, 'confirmed')
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             item.update(state='failed', result=str(error), updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='失败', reason=str(error)))
@@ -365,5 +404,16 @@ def ignore(home, ids):
     for item in pending['items']:
         if item['id'] in ids and item['state'] in ('pending', 'failed'):
             item['state'] = 'ignored'
+            remember_choice(home, item, 'ignored')
     save(home, PENDING, pending)
     return pending
+
+
+def remember_choice(home, item, decision):
+    """Each yes or no in 「等你确认」 is one of the user's decisions the agent learns from (RAW-04)."""
+    try:
+        agent_plan.remember(home, 'decision', item['kind'], decision=decision, path=item['id'].split(':', 1)[1],
+                            source='confirm', note='{}「{}」：{}'.format('确认处理' if decision == 'confirmed' else '忽略',
+                                                                    item['title'], item['reason']))
+    except (OSError, ValueError):
+        pass   # memory is a record; it never stops the cleanup the user asked for

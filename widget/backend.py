@@ -138,6 +138,21 @@ def tier_modules():
     return ask_tier, auto_tier, tiers_config
 
 
+def note_user_settings(home, before):
+    """The user changed settings in 「帮你管着」: the plan marks them as the user's, and each change is one of
+    the user's decisions the agent learns from (agent-plan settings-locks, resource-memory)."""
+    import agent_plan, service
+    for name, was in before.items():
+        try:
+            now = service.setting_now(home, name)
+            agent_plan.note_setting(home, name, 'user', before=was, after=now)
+            if was != now:
+                agent_plan.remember(home, 'decision', name, decision='switched', source='panel',
+                                    note='在「帮你管着」把「{}」从{}改成{}'.format(agent_plan.SETTINGS[name], was, now))
+        except (OSError, ValueError):
+            pass   # a record only; never undoes what the user just did
+
+
 def checkup_modules():
     tier_modules()
     import checkup, toolcaches
@@ -576,6 +591,9 @@ class Adapter:
                          detail=d['volume'], bytes=None, eligible=False, command=None, outcome='未连接') for d in gone]
             return dict(status='ok' if rows else 'skip', message=rows[0]['reason'] if rows else '', rows=rows)
         notes = []
+        if verb in ('apply', 'off'):
+            import agent_plan, service
+            before = {n: service.setting_now(self.home, n, cfg) for n in (ids[:1] if verb == 'off' else ids) if n in agent_plan.SETTINGS}
         if verb == 'apply':
             cfg, notes = checkup.apply(self.home, ids, owned, launchctl=launchctl)
             if not self.isolated:
@@ -584,6 +602,8 @@ class Adapter:
         elif verb == 'off':
             notes = [checkup.turn_off(self.home, ids[0] if ids else '', owned, launchctl=launchctl)]
             cfg = tiers_config.load(self.home, owned=owned)
+        if verb in ('apply', 'off'):
+            note_user_settings(self.home, before)
         report = checkup.load_report(self.home)
         version = app_version()
         if verb == 'firstrun' and report and report.get('notified_version') == version:
@@ -628,7 +648,9 @@ class Adapter:
                         rows=[dict(id='app', title=name, detail=app[1] if app else '', category='agent', bytes=None,
                                    eligible=bool(app), reason='', command=None, outcome=None)])
         if verb == 'target':
+            before = {'target': service.setting_now(self.home, 'target')}
             service.set_target(self.home, value)
+            note_user_settings(self.home, before)
             settings = configure(self.home)
         plan = service.current_plan(self.home, cfg, settings)
         if plan is None:

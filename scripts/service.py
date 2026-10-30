@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'runtime/storage'))
 from storage import GIB, StorageManager, atomic_json
 from portable_config import configure
+import agent_plan
 import ask_tier
 import auto_tier
 import common
@@ -522,6 +523,88 @@ def current_target(home):
                 suggested_gib=space_plan.suggested_target(shutil.disk_usage(str(home)).total))
 
 
+SWITCHES = {'caches': 'caches_enabled', 'clean': 'auto_enabled', 'update': 'auto_update', 'ask': 'ask_enabled'}
+ON, OFF = ('on', 'yes', 'true', '1', '开'), ('off', 'no', 'false', '0', '关')
+
+
+def setting_now(home, name, cfg=None):
+    """One setting of 「帮你管着」 as people read it: the target in GB, or 开 / 关."""
+    if name == 'target':
+        return '{:g} GB'.format(configure(home).warning_free_gib)
+    cfg = cfg or tiers_config.load(home)
+    on = cfg['external_root'] is not None if name == 'external' else cfg[SWITCHES[name]]
+    return '开' if on else '关'
+
+
+def change_setting(home, name, value, by='agent', why='', evidence=()):
+    """settings-locks: the agent (or the user through it) changes one setting; a locked one only by the user."""
+    if name not in agent_plan.SETTINGS:
+        raise ValueError('没有这个设置：{}；可选：{}'.format(name, '、'.join(agent_plan.SETTINGS)))
+    if by == 'agent':
+        agent_plan.check_setting(home, name, why)
+    before = setting_now(home, name)
+    if name == 'target':
+        set_target(home, value)
+    else:
+        word = str(value).strip().lower()
+        if word not in ON + OFF:
+            raise ValueError('{} 只能设成 on 或 off'.format(name))
+        settings = configure(home)
+        owned = [settings.cache_roots[0], settings.state_root, state_root(home)]
+        if name == 'ask':
+            tiers_config.set_flag(home, 'ask_enabled', word in ON)
+        elif word in ON:
+            checkup.apply(home, [name], owned)
+        else:
+            checkup.turn_off(home, name, owned)
+    after = setting_now(home, name)
+    agent_plan.note_setting(home, name, by, why, evidence, before=before, after=after)
+    return dict(setting=name, before=before, after=after, by=by)
+
+
+def plan_command(home, a):
+    """`memory`, `rules`, `rule`, `keep`, `setting`: the plan and memory as agent capabilities (agent-plan epic)."""
+    evidence = [e.strip() for e in a.evidence.split(',') if e.strip()]
+    target = a.more[0] if a.more else None
+    if a.action == 'rules':
+        return agent_plan.describe(home)
+    if a.action == 'memory':
+        if a.value in (None, 'list'):
+            return dict(memories=agent_plan.memories(home, about=a.about, last=a.last or 30))
+        if a.value != 'add':
+            raise ValueError('memory 只有 list 和 add')
+        return agent_plan.remember(home, a.kind or 'decision', a.about, note=a.note, words=a.words, path=a.path,
+                                   decision=a.decision, source='chat' if a.words else 'agent')
+    if a.action == 'rule':
+        if target in ('lock', 'unlock'):
+            return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words or a.why)
+        params = {'stream_hours': a.stream_hours} if a.stream_hours else None
+        entry = agent_plan.set_rule(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence, params=params)
+        if a.by == 'user':   # the user said it in so many words: one of their decisions
+            agent_plan.remember(home, 'decision', a.value, decision='set', words=a.words, source='chat',
+                                note='用户要求把「{}」设成{}'.format(agent_plan.RULES[a.value]['title'], agent_plan.ACTION_WORDS[target]))
+        return entry
+    if a.action == 'keep':
+        if a.value == 'add' and target:
+            entry = agent_plan.add_keep(home, target, a.why or a.words, by=a.by, evidence=evidence)
+            if a.by == 'user':
+                agent_plan.remember(home, 'decision', 'keep', decision='keep', path=entry['path'], words=a.words,
+                                    source='chat', note='用户说先别动：' + entry['path'])
+            return entry
+        if a.value == 'remove' and target:
+            return agent_plan.remove_keep(home, target, by=a.by, why=a.why)
+        raise ValueError('用法：keep add <路径> --why 原因，或 keep remove <路径>')
+    if target in ('lock', 'unlock'):
+        return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words or a.why)
+    if target is None:
+        raise ValueError('用法：setting <名字> <新值> --why 原因，或 setting <名字> lock / unlock')
+    result = change_setting(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence)
+    if a.by == 'user' and result['before'] != result['after']:
+        agent_plan.remember(home, 'decision', a.value, decision='switched', words=a.words, source='chat',
+                            note='用户要求把「{}」从{}改成{}'.format(agent_plan.SETTINGS[a.value], result['before'], result['after']))
+    return result
+
+
 def guard_mole(home, remove=False):
     settings = configure(home)
     cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
@@ -543,11 +626,14 @@ def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
             return None
         activity = Activity.collect(settings.lease_root)
         actions = []
-        if any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
+        plan = agent_plan.load(home)
+        if agent_plan.action(plan, 'tool-caches') == 'move' and \
+                any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
             actions += toolcaches.take_over(home, cfg['external_root'], activity)
         # Below the warning line the space is needed now: several quiet build folders per round instead of one.
         low = shutil.disk_usage(str(settings.volume)).free < settings.warning_free_gib * GIB
-        actions += toolcaches.take_over_builds(home, cfg['external_root'], cfg, activity, limit=BUILD_MOVES_WHEN_LOW if low else 1)
+        if agent_plan.action(plan, 'task-builds') == 'move':
+            actions += toolcaches.take_over_builds(home, cfg['external_root'], cfg, activity, limit=BUILD_MOVES_WHEN_LOW if low else 1)
     except Exception as error:
         actions = [dict(kind='cache-move', path=str(cfg['external_root']), bytes=0, result='failed', reason=str(error) or type(error).__name__)]
     if actions:
@@ -563,7 +649,7 @@ def clean_caches(home):
         receipt = dict(at=time.time(), status='error', error=str(error), results=[])
         atomic_json(state_root(home)/'automatic-storage.json', receipt)
         return receipt
-    if not cfg['auto_enabled']:
+    if not cfg['auto_enabled'] or agent_plan.action(agent_plan.load(home), 'xcode-intermediates') != 'clean':
         receipt = dict(at=time.time(), status='disabled', results=[])
         atomic_json(state_root(home)/'automatic-storage.json', receipt)
         return receipt
@@ -835,11 +921,22 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update'])
-    p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove')
+    p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting'])
+    p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
+    p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
+    p.add_argument('--why', default='', help='why the agent changes the plan (required for the agent)')
+    p.add_argument('--evidence', default='', help='memory ids this change rests on, e.g. m3,m7')
+    p.add_argument('--by', choices=['agent', 'user'], default='agent', help='user: the user asked for it in so many words')
+    p.add_argument('--words', default='', help="the user's own words, as they said them")
+    p.add_argument('--kind', choices=agent_plan.KINDS); p.add_argument('--about'); p.add_argument('--path')
+    p.add_argument('--note', default=''); p.add_argument('--decision'); p.add_argument('--last', type=int)
+    p.add_argument('--stream-hours', type=float, help='rule simulator-shutdown: hours after which a screen or log stream no longer counts as use')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
-    if a.action in ('plan', 'agent-app'):
+    if a.action in ('memory', 'rules', 'rule', 'keep', 'setting'):
+        result = plan_command(home, a)
+    elif a.action in ('plan', 'agent-app'):
         settings = configure(home)
         owned = [settings.cache_roots[0], settings.state_root, state_root(home)]
         if a.action == 'agent-app':

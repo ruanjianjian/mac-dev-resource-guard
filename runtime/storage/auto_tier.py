@@ -13,6 +13,7 @@ import sys
 import time
 
 from storage import GIB, Activity, StorageManager, atomic_json
+import agent_plan
 import tasks as T
 
 RECEIPT, LOG, MOVE_STATE = 'auto-tier.json', 'auto-tier-log.jsonl', 'auto-tier-move.json'
@@ -225,12 +226,19 @@ def unsaved(task, cfg):
 
 def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
     """Idle, fully pushed task folders whose task root has a drive go there, oldest first, until the target line."""
+    plan = agent_plan.load(home)
+    if agent_plan.action(plan, 'idle-tasks') != 'move':
+        return   # the plan leaves idle tasks where they are
     pins, pin_errors = StorageManager(settings)._pins(now)
     activity = collect()
     candidates = []
     for task in T.discover(cfg):
         if task.linked or task.external is None:
             continue    # already on the drive, or this task root has no drive switched on
+        keep = agent_plan.kept(plan, task.path)
+        if keep:
+            receipt['kept'].append(dict(path=str(task.path), reason='先别动：' + (keep.get('why') or '计划里写着')))
+            continue
         reasons, latest = T.idle_check(task, activity, pins, cfg['auto_idle_days'], cfg, now)
         reasons += pin_errors
         if not reasons and unsaved(task, cfg):
