@@ -314,18 +314,22 @@ def note_schedule(home, agent, now=None):
     return plan['meta']['schedule']
 
 
+def next_review_at(home):
+    """When the next review is owed: a week after the last one (or after the first plan started)."""
+    plan = load(home)
+    done = reviews(home)
+    last = done[-1]['at'] if done else plan['meta']['started_at']
+    return last + WEEK if last else None
+
+
 def review_due(home, now=None):
     """'first' or 'weekly' when a review is owed, else None. A scheduled review gets two days' grace."""
     now = time.time() if now is None else now
     plan = load(home)
-    started = plan['meta']['started_at']
-    if not started:
+    owed = next_review_at(home)
+    if owed is None or now < owed + (2 * 86400 if plan['meta']['schedule'] else 0):
         return None
-    done = reviews(home)
-    last = done[-1]['at'] if done else started
-    if now - last < WEEK + (2 * 86400 if plan['meta']['schedule'] else 0):
-        return None
-    return 'weekly' if done else 'first'
+    return 'weekly' if reviews(home) else 'first'
 
 
 REVIEW_STEPS = (
@@ -346,7 +350,13 @@ def review_packet(home, now=None):
     if plan['meta']['settled_at']:
         steps = ('计划已定稿：只看有没有出现新类型的占用、是否换了硬盘或外接盘。没有就 review done --changed no；'
                  '有就先 review reopen --why "原因"，再按下面做。') + steps
+    owed = next_review_at(home)
+    if owed and now < owed:
+        # A weekly schedule fires every Monday; the first review waits for a full week of the user's choices.
+        steps = ('还没到复查时间（下次是 {}）。如果是定时任务叫你来的，回复一句「还没到复查时间」就结束，不运行 review done；'
+                 '用户主动让你看计划时再照下面做。').format(time.strftime('%m-%d', time.localtime(owed))) + steps
     return dict(since=since, first_review=not done, reviews_done=len(done), settled_at=plan['meta']['settled_at'],
+                due=bool(owed and now >= owed), next_review_at=owed,
                 schedule=plan['meta']['schedule'], steps=steps,
                 memories=[m for m in memories(home) if m.get('at', 0) > since],
                 changes=[c for c in changes(home) if c.get('at', 0) > since], plan=describe(home))

@@ -29,9 +29,11 @@ agent 平时不在线，要有人把它叫来，它才能按记忆更新计划�
 | AC-03 | [核] | 到了复查的时候 | agent 运行 `review` | 拿到复查材料：上次复查以来的决定和教训、计划的变化、现在的规则，以及要做的步骤 | CLI后端 | ✅ | auto: ReviewTest.test_the_review_packet_holds_what_happened_since_the_last_review |
 | AC-04 | [核] | agent 复查完 | 运行 `review done --changed yes/no --summary "…"` | 记下这次复查改没改计划和结论；没写结论或没说改没改就拒绝 | CLI后端 | ✅ | auto: ReviewCommandTest.test_the_review_commands、ReviewTest.test_the_review_packet_holds_what_happened_since_the_last_review |
 | AC-05 | [核] | 用户点了任何一条「交给 agent」的通知 | agent 收到复制好的那句话 | 那句话先让 agent 运行 `review` 复查，再读计划处理「等你点头」和「需要判断」 | CLI后端、mac原生 | ✅ | auto: ReviewCommandTest.test_the_review_commands（交接那句话里有 review）、BackendPlanTest.test_target_plan_rows_and_handoff_words |
+| AC-06 | [边] | 定时任务每周一触发，但第一版计划还没满一周（或离上次复查不到一周） | agent 运行 `review` | 复查材料写明「还没到复查时间（下次是几号）」：定时任务来的只回一句就结束，不记复查；用户主动要求时照常复查 | CLI后端 | ✅ | auto: test_agent_plan.ReviewTest.test_a_scheduled_run_before_the_first_week_is_told_to_wait |
 
 ## 变更记录
 
 | ID | 日期 | 变更 | 类型 |
 |---|---|---|---|
 | CH-01 | 2026-10-30 | 新建（RAW-01、RAW-06）；查明 Claude 桌面定时任务和 Codex 自动化只能由 agent 自己的工具建，改为 agent 自建 + 资源看板每周提醒兜底 | [需求变更] |
+| CH-02 | 2026-10-30 | 在本机 Claude 建每周一的复查时发现：第一次复查要等满一周，周一的定时任务可能来早；复查材料加「到没到时间」（AC-06） | [实现引入] |

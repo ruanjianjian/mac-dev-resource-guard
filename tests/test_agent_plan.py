@@ -243,6 +243,16 @@ class ReviewTest(TierFixture):
         with self.assertRaises(ValueError):
             agent_plan.finish_review(self.home, False, ' ')
 
+    def test_a_scheduled_run_before_the_first_week_is_told_to_wait(self):
+        started = time.time() - 3 * DAY
+        agent_plan.ensure_started(self.home, started)
+        early = agent_plan.review_packet(self.home)
+        self.assertEqual((early['due'], early['next_review_at']), (False, started + 7 * DAY))
+        self.assertTrue(early['steps'].startswith('还没到复查时间'))
+        later = agent_plan.review_packet(self.home, now=started + 7 * DAY + 60)
+        self.assertTrue(later['due'])
+        self.assertTrue(later['steps'].startswith('这是第一周结束的复查'))
+
     def review(self, at, changed=False):
         return agent_plan.finish_review(self.home, changed, '第 {} 次'.format(len(agent_plan.reviews(self.home)) + 1), at)
 
