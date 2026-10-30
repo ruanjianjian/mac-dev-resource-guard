@@ -23,6 +23,7 @@ struct Snapshot {
     var pending = 0
     var notice: (count: Int, critical: Bool)? = nil
     var agentReason: String? = nil
+    var agentTitle = "有新占用需要判断"
     var at = Date()
     var errors: [String] = []
     var pressureLabel: String {
@@ -108,8 +109,10 @@ func sample() -> Snapshot {
         try? FileManager.default.removeItem(at: request)   // one notice per request (design C6)
     }
     let agent = tiers.appendingPathComponent("agent-request.json")
-    if let reason = readJSON(agent)["reason"] as? String {
+    let handoff = readJSON(agent)
+    if let reason = handoff["reason"] as? String {
         s.agentReason = reason
+        s.agentTitle = handoff["title"] as? String ?? "有新占用需要判断"
         try? FileManager.default.removeItem(at: agent)
     }
     return s
@@ -147,7 +150,7 @@ final class Monitor: ObservableObject {
                 (NSApp.delegate as? AppDelegate)?.updateStatus(value)
                 if let notice = value.notice { (NSApp.delegate as? AppDelegate)?.notify(notice.count, critical: notice.critical) }
                 if let reason = value.agentReason {
-                    (NSApp.delegate as? AppDelegate)?.post(title: "有新占用需要判断", body: reason + "。点一下交给 agent。", tab: "agent")
+                    (NSApp.delegate as? AppDelegate)?.post(title: value.agentTitle, body: reason + "。点一下交给 agent。", tab: "agent")
                 }
             }
         }

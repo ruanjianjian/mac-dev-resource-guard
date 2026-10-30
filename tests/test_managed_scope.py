@@ -219,6 +219,17 @@ class ManagedScopeTests(TierFixture):
             self.assertEqual(service.stop_menu_app(exe), [])
         self.assertIsNotNone(menu.poll()); self.assertIsNone(tick.poll(), 'the storage tick keeps running')
 
+    def test_an_install_for_another_home_never_quits_this_users_app(self):
+        # 10-30: a test run installed into a throwaway home, found 资源看板 by its bundle id and quit the user's own.
+        mine, other = '/Users/me', '/tmp/throwaway'
+        paths = {11: mine + '/Applications/资源看板.app/Contents/MacOS/ResourceDashboard',
+                 22: other + '/Applications/资源看板.app/Contents/MacOS/ResourceDashboard',
+                 33: '/Applications/资源看板.app/Contents/MacOS/ResourceDashboard'}
+        with patch.object(service, 'app_pids_by_bundle', return_value=[11, 22, 33]), \
+             patch.object(service, 'app_path', side_effect=paths.get), patch.object(service, 'menu_app_pids', return_value=[]):
+            self.assertEqual(service.running_menu_apps(paths[22], home=other), [22, 33])
+            self.assertEqual(service.running_menu_apps(paths[11], home=mine), [11, 33])
+
     def test_installer_waits_for_a_background_round_and_says_what_it_is(self):
         import subprocess, time
         state = service.state_root(self.home); state.mkdir(parents=True, exist_ok=True)

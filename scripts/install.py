@@ -35,7 +35,7 @@ with waiting_lock(home, 'periodic-storage'):
     # Only stop our menu process; detached builds and maintenance are left running.
     if app.exists():
         executable = str(app/'Contents/MacOS/ResourceDashboard')
-        left = stop_menu_app(executable)
+        left = stop_menu_app(executable, home=home)
         if left:
             raise SystemExit('旧的资源看板（PID {}）没有退出，已保留原 App；请退出它后重试'.format(left))
         backup = backup_path(home)
