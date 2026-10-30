@@ -11,6 +11,7 @@ import subprocess
 import time
 
 from storage import atomic_json
+import agent_plan
 import auto_tier
 import plan as space_plan
 import tasks as T
@@ -214,11 +215,14 @@ def take_over_builds(home, external_root, cfg, activity, now=None, free_bytes=No
     if auto_tier.external_access(external_root):
         return actions   # take_over already reports a refused drive
     state = load_state(home)
+    plan = agent_plan.load(home)
     free_before = round(auto_tier.shutil.disk_usage(str(home)).free / auto_tier.GIB, 2)
     try:
         for task, copy in task_builds(cfg):
             if len(actions) >= limit:
                 break
+            if agent_plan.kept(plan, copy):
+                continue   # the plan says to leave it for now
             if activity.reasons(copy) or now - space_plan.last_used(copy) < BUILD_QUIET:
                 continue   # in use, or a build just ran: next round
             dest = Path(external_root) / 'builds' / task.path.name / '--'.join(copy.relative_to(task.path).parts)

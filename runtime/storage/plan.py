@@ -14,6 +14,7 @@ import plistlib
 import time
 
 from storage import GIB, atomic_json
+import agent_plan
 import auto_tier
 import tasks as T
 
@@ -117,14 +118,15 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     now = time.time() if now is None else now
     target = int(settings.warning_free_gib * GIB)
     auto, ask, judge = [], [], []
-    tasks = [t for t in report.get('tasks', []) if not t.get('linked')]
+    rules = agent_plan.load(home)
+    tasks = [t for t in report.get('tasks', []) if not t.get('linked') and not agent_plan.kept(rules, t['path'])]
     if cfg['caches_enabled'] and external_ready:
         for cache in report.get('caches', []):
-            if cache.get('status') == 'local' and cache.get('bytes'):
+            if cache.get('status') == 'local' and cache.get('bytes') and agent_plan.action(rules, 'tool-caches') == 'move':
                 auto.append(item('把 {} 的缓存搬到外接盘'.format(cache['name']), cache['bytes'], '共享构建缓存', cache['path'], 'cache-move'))
         # Each task's own Xcode build folder goes to the drive too, behind a link (RAW-36);
         # an idle task moves whole below, its builds included.
-        for t in tasks:
+        for t in (tasks if agent_plan.action(rules, 'task-builds') == 'move' else []):
             if t.get('idle'):
                 continue
             for copy in duplicate_builds(t['path']):
@@ -135,7 +137,7 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     for entry in pending.get('items', []):
         if entry.get('state') == 'pending' and not entry.get('unreachable'):
             ask.append(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']))
-    if external_ready:
+    if external_ready and agent_plan.action(rules, 'idle-tasks') == 'move':
         for t in tasks:
             if t.get('idle') and t.get('bytes'):
                 auto.append(item('把闲置的 {} 挪到外接盘'.format(Path(t['path']).name), t['bytes'],

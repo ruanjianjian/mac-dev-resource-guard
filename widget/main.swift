@@ -24,6 +24,8 @@ struct Snapshot {
     var notice: (count: Int, critical: Bool)? = nil
     var agentReason: String? = nil
     var agentTitle = "有新占用需要判断"
+    /// One notification asked for by the background, e.g. 「资源看板的计划改了」 when the agent changed a rule.
+    var message: (title: String, body: String, tab: String)? = nil
     var at = Date()
     var errors: [String] = []
     var pressureLabel: String {
@@ -109,6 +111,12 @@ func sample() -> Snapshot {
         try? FileManager.default.removeItem(at: request)   // one notice per request (design C6)
     }
     let agent = tiers.appendingPathComponent("agent-request.json")
+    let plain = tiers.appendingPathComponent("notice-request.json")
+    let asked = readJSON(plain)
+    if let title = asked["title"] as? String, let body = asked["body"] as? String {
+        s.message = (title, body, asked["tab"] as? String ?? "cover")
+        try? FileManager.default.removeItem(at: plain)
+    }
     let handoff = readJSON(agent)
     if let reason = handoff["reason"] as? String {
         s.agentReason = reason
@@ -149,6 +157,7 @@ final class Monitor: ObservableObject {
                 self.snapshot = value; self.loading = false; self.busy = false
                 (NSApp.delegate as? AppDelegate)?.updateStatus(value)
                 if let notice = value.notice { (NSApp.delegate as? AppDelegate)?.notify(notice.count, critical: notice.critical) }
+                if let message = value.message { (NSApp.delegate as? AppDelegate)?.post(title: message.title, body: message.body, tab: message.tab) }
                 if let reason = value.agentReason {
                     (NSApp.delegate as? AppDelegate)?.post(title: value.agentTitle, body: reason + "。点一下交给 agent。", tab: "agent")
                 }
