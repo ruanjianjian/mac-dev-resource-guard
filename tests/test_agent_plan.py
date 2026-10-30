@@ -142,12 +142,15 @@ class ExecutorTest(AskFixture):
         self.assertEqual(after['sections'][0]['items'], [])
 
 
-class CommandTest(TierFixture):
-    """What the user's agent runs (SKILL.md): `resource-guard-service memory / rules / rule / keep / setting`."""
+class CommandFixture(TierFixture):
     def rgs(self, *args):
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/service.py'), *args], capture_output=True, text=True,
                              env=dict(os.environ, HOME=str(self.home)))
         return out.returncode, (json.loads(out.stdout) if out.returncode == 0 else out.stderr.strip())
+
+
+class CommandTest(CommandFixture):
+    """What the user's agent runs (SKILL.md): `resource-guard-service memory / rules / rule / keep / setting`."""
 
     def test_the_agent_reads_and_changes_the_plan_with_commands(self):
         code, lesson = self.rgs('memory', 'add', '--kind', 'lesson', '--about', 'task-builds', '--note', '每轮测试一份 Swift 包')
@@ -191,6 +194,111 @@ class CommandTest(TierFixture):
         [memory] = agent_plan.memories(self.home)
         self.assertEqual((memory['source'], memory['decision']), ('panel', 'switched'))
         self.assertIn('60 GB', memory['note'])
+
+
+
+DAY = 86400
+QUIET = dict(gap_bytes=0, free_bytes=80 * GIB, suggestions=[],
+             sections=[dict(id='auto', bytes=0), dict(id='ask', bytes=0), dict(id='judge', bytes=0)])
+
+
+class ReviewTest(TierFixture):
+    """agent-review, first-plan and plan-settle."""
+    T0 = 1_800_000_000.0
+
+    def test_the_first_review_is_owed_a_week_after_the_first_plan_and_nudged_once(self):
+        agent_plan.ensure_started(self.home, self.T0)
+        self.assertIsNone(agent_plan.review_due(self.home, self.T0 + 6 * DAY))
+        self.assertEqual(agent_plan.review_due(self.home, self.T0 + 7 * DAY + 1), 'first')
+        with patch.object(agent_plan.time, 'time', return_value=self.T0 + DAY):
+            agent_plan.remember(self.home, 'decision', 'simulator-delete', decision='ignored', note='忽略', source='confirm')
+        nudge = space_plan.agent_needed(self.home, QUIET, [], self.T0 + 7 * DAY + 1)
+        self.assertEqual(nudge['title'], '资源看板第一周复查')
+        self.assertIn('这一周记了 1 条你的决定', nudge['reason'])
+        self.assertIsNone(space_plan.agent_needed(self.home, QUIET, [], self.T0 + 8 * DAY), 'once a week')
+        agent_plan.finish_review(self.home, True, '你不删模拟器，改成只列出', self.T0 + 8 * DAY)
+        self.assertIsNone(agent_plan.review_due(self.home, self.T0 + 14 * DAY))
+        self.assertEqual(agent_plan.review_due(self.home, self.T0 + 15 * DAY + 1), 'weekly')
+        self.assertEqual(space_plan.agent_needed(self.home, QUIET, [], self.T0 + 15 * DAY + 1)['title'], '资源看板每周复查')
+
+    def test_a_review_in_the_agents_own_scheduler_gets_two_days_grace(self):
+        agent_plan.ensure_started(self.home, self.T0)
+        agent_plan.note_schedule(self.home, 'claude', self.T0)
+        self.assertIsNone(agent_plan.review_due(self.home, self.T0 + 8 * DAY))
+        self.assertEqual(agent_plan.review_due(self.home, self.T0 + 9 * DAY + 1), 'first', 'the scheduled review was missed')
+        with self.assertRaises(ValueError):
+            agent_plan.note_schedule(self.home, 'cron')
+
+    def test_the_review_packet_holds_what_happened_since_the_last_review(self):
+        agent_plan.ensure_started(self.home, self.T0)
+        first = agent_plan.review_packet(self.home)
+        self.assertTrue(first['first_review'])
+        self.assertIn('第一周结束的复查', first['steps'])
+        agent_plan.remember(self.home, 'lesson', 'task-builds', note='旧的')
+        agent_plan.finish_review(self.home, False, '没改', time.time())
+        time.sleep(0.01)
+        agent_plan.remember(self.home, 'decision', 'keep', words='这个先别动', source='chat')
+        later = agent_plan.review_packet(self.home)
+        self.assertEqual(([m['note'] or m['words'] for m in later['memories']], later['first_review']), (['这个先别动'], False))
+        with self.assertRaises(ValueError):
+            agent_plan.finish_review(self.home, False, ' ')
+
+    def review(self, at, changed=False):
+        return agent_plan.finish_review(self.home, changed, '第 {} 次'.format(len(agent_plan.reviews(self.home)) + 1), at)
+
+    def test_the_plan_settles_after_four_quiet_reviews_without_corrections(self):
+        agent_plan.ensure_started(self.home, self.T0)
+        self.review(self.T0 + 7 * DAY, changed=True)
+        for week in (2, 3, 4):
+            self.assertIsNone(self.review(self.T0 + week * 7 * DAY)['settled_at'])
+        # The user corrected the plan by hand in week 5: the four quiet weeks start again after it.
+        with patch.object(agent_plan.time, 'time', return_value=self.T0 + 34 * DAY):
+            agent_plan.remember(self.home, 'decision', 'target', decision='switched', note='用户把目标改成 60 GB', source='panel')
+        for week in (5, 6, 7):
+            self.assertIsNone(self.review(self.T0 + week * 7 * DAY)['settled_at'], week)
+        self.assertEqual(self.review(self.T0 + 8 * 7 * DAY)['settled_at'], self.T0 + 8 * 7 * DAY)
+        asked = json.loads((agent_plan.state_dir(self.home) / agent_plan.NOTICE).read_text())
+        self.assertEqual(asked['title'], '资源看板的计划定稿了')
+        self.assertIn('定稿', agent_plan.review_packet(self.home)['steps'])
+
+    def settle(self):
+        agent_plan.ensure_started(self.home, self.T0)
+        for week in (1, 2, 3, 4):
+            self.review(self.T0 + week * 7 * DAY)
+        self.assertTrue(agent_plan.load(self.home)['meta']['settled_at'])
+
+    def test_a_settled_plan_refuses_the_agent_until_reopened_with_a_reason(self):
+        self.settle()
+        for change in (lambda: agent_plan.set_rule(self.home, 'trash-empty', 'quiet', why='废纸篓你自己清'),
+                       lambda: agent_plan.check_setting(self.home, 'target', '空间够了'),
+                       lambda: agent_plan.add_keep(self.home, self.root / 'x', '先留着')):
+            with self.assertRaises(ValueError) as caught:
+                change()
+            self.assertIn('定稿', str(caught.exception))
+        with self.assertRaises(ValueError):
+            agent_plan.reopen(self.home, '')
+        agent_plan.reopen(self.home, '新出现了 Android 的 Gradle 缓存，一周涨了 15 GB')
+        agent_plan.set_rule(self.home, 'trash-empty', 'quiet', why='废纸篓你自己清')
+        self.assertEqual(agent_plan.changes(self.home)[-2]['after'], '重新打开')
+
+    def test_the_user_changing_a_settled_plan_opens_it_again(self):
+        self.settle()
+        agent_plan.set_rule(self.home, 'installer-delete', 'off', by='user')
+        self.assertIsNone(agent_plan.load(self.home)['meta']['settled_at'])
+        reopened = [c for c in agent_plan.changes(self.home) if c['after'] == '重新打开']
+        self.assertEqual((reopened[0]['by'], reopened[0]['why']), ('user', '用户自己把「下载里的大安装包」改成不管'))
+
+
+class ReviewCommandTest(CommandFixture):
+    def test_the_review_commands(self):
+        code, packet = self.rgs('review')
+        self.assertEqual((code, packet['first_review']), (0, True))
+        self.assertEqual(self.rgs('review', 'done', '--summary', '没改')[0], 2, '--changed is required')
+        code, done = self.rgs('review', 'done', '--changed', 'no', '--summary', '这周没有新情况')
+        self.assertEqual((code, done['review']['changed'], done['settled_at']), (0, False, None))
+        self.assertEqual(self.rgs('review', 'scheduled', 'codex')[1]['agent'], 'codex')
+        self.assertEqual(self.rgs('review', 'reopen', '--why', '换了外接盘')[1], {'status': 'not-settled'})
+        self.assertIn('review', space_plan.AGENT_PROMPT)
 
 
 if __name__ == '__main__':

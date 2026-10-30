@@ -23,10 +23,10 @@
 |---|---|---|
 | [resource-memory](specs/resource-memory.md) | 资源管理记忆：资源看板在本机存一份记忆。用户在看板里点的确认、拒绝，在对话里跟 agent 说的取舍，agent 学到的教训，都记成一条；Claude、Codex 读写同一份（RAW-03、RAW-04） | 已实现 |
 | [rule-plan](specs/rule-plan.md) | 计划变成规则清单：每类东西是自动挪、自动清、先问还是只提醒，写明谁定的、为什么；后台照清单执行，agent 用命令改；安全底线写在代码里，清单改不动（RAW-05） | 已实现 |
-| agent-review | agent 什么时候来：跌破危险线、某处一天涨 10 GB、出现不认识的占用时，发通知叫 agent；另外每周借 agent 自带的定时任务开一次复查（RAW-06） | 未开 spec |
+| [agent-review](specs/agent-review.md) | agent 什么时候来：跌破危险线、某处一天涨 10 GB、出现不认识的占用时，发通知叫 agent；另外每周借 agent 自带的定时任务开一次复查（RAW-06） | 已实现 |
 | [settings-locks](specs/settings-locks.md) | agent 改设置：发现用户设得不对就直接改，记下理由并通知一次；用户能把某项锁住，锁住的 agent 不碰（RAW-07） | 已实现 |
-| first-plan | 首次安装：agent 只问一句就开跑，第一版计划就是现在这套安全规则；第一周把用户的取舍都记下，第一周结束出修订版并说清改了什么（RAW-08） | 未开 spec |
-| plan-settle | 计划定稿：连续几次复查都不用改、用户的决定也都和计划一致，就定稿；之后只在出现新类型的占用、换了硬盘或外接盘、用户要求时重开（RAW-09） | 未开 spec |
+| [first-plan](specs/first-plan.md) | 首次安装：agent 只问一句就开跑，第一版计划就是现在这套安全规则；第一周把用户的取舍都记下，第一周结束出修订版并说清改了什么（RAW-08） | 已实现 |
+| [plan-settle](specs/plan-settle.md) | 计划定稿：连续几次复查都不用改、用户的决定也都和计划一致，就定稿；之后只在出现新类型的占用、换了硬盘或外接盘、用户要求时重开（RAW-09） | 已实现 |
 | plan-page | 「帮你管着」改成 agent 的计划：每条规则一行，写着谁定的、为什么，旁边一个锁；原来的手动开关收进「高级」（RAW-10） | 未开 spec |
 
 全景图随第一批 spec 一起画。

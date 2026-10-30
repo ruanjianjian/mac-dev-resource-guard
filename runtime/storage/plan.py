@@ -245,11 +245,22 @@ def agent_needed(home, plan, grown, now=None, critical_bytes=0):
                 Path(top['key'].split(':', 1)[1]).name or top['key'], top['bytes'] / GIB))
     if notice:
         state.update(day=today, at=now, reason=notice['reason'])
+    else:
+        # agent-review: when no review has happened for a week (or a scheduled one was missed), nudge once a week.
+        due = agent_plan.review_due(home, now)
+        if due and now - state.get('review_at', 0) >= agent_plan.WEEK:
+            done = agent_plan.reviews(home)
+            since = done[-1]['at'] if done else agent_plan.load(home)['meta']['started_at']
+            decided = sum(1 for m in agent_plan.memories(home) if m.get('kind') == 'decision' and m.get('at', 0) > since)
+            notice = dict(title='资源看板第一周复查' if due == 'first' else '资源看板每周复查',
+                          reason='该复查计划了：{}记了 {} 条你的决定'.format('这一周' if due == 'first' else '上次复查以来', decided))
+            state['review_at'] = now
     if state != before:
         atomic_json(path, state)
     return notice
 
 
 AGENT_PROMPT = ('用 mac-dev-resource-guard 这个 skill 帮我看一下磁盘空间：先运行 '
-                '`~/.local/bin/resource-guard-service plan --json` 读计划，按 skill 里的步骤处理'
+                '`~/.local/bin/resource-guard-service review` 看这段时间记下的决定和现在的计划，按里面的步骤复查；'
+                '再运行 `~/.local/bin/resource-guard-service plan --json` 读计划，按 skill 里的步骤处理'
                 '「等你点头」和「需要判断」两段，每一项先跟我确认再执行。')
