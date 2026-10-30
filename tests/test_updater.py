@@ -123,6 +123,13 @@ class UpdaterTest(InstalledHome):
         self.assertIn('下载失败', failed['error'])
         self.assertEqual(self.tick(now=NOW + 600 + updater.RETRY + 1)['status'], 'installing')
 
+    def test_a_home_without_the_app_never_looks_or_installs(self):
+        # 10-30: test runs in throwaway homes reached GitHub and installed real copies from there.
+        (self.home / updater.APP_INFO).unlink()
+        spawn = Spawn()
+        state = self.tick(release=Release(fail=AssertionError('looked with nothing installed')), spawn=spawn)
+        self.assertEqual((state['status'], spawn.calls), ('not-installed', []))
+
     def test_an_install_still_running_is_left_alone(self):
         spawn = Spawn()
         self.tick(spawn=spawn)

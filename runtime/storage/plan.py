@@ -23,9 +23,26 @@ AGENT_STATE = 'agent-notify.json'
 GROWTH_BYTES = 10 * GIB
 # A build copy used within this many days is never offered for deletion (user rule, 2026-10-28).
 BUILD_COPY_KEEP_DAYS = 7
+# The cache-directory standard (https://bford.info/cachedir/): SwiftPM, Cargo and others put it in their build output.
+CACHEDIR_SIGNATURE = b'Signature: 8a477f597d28d172789f06886806bc55'
+
+
 def is_xcode_build(name):
     """DerivedData under any name people and scripts give it: DerivedData-flutter, .codex-w2b-DerivedData…"""
     return 'deriveddata' in name.lower()
+
+
+def is_cache_tagged(path):
+    """Build output its own tool marked as rebuildable with CACHEDIR.TAG, e.g. `swift build --scratch-path` folders."""
+    try:
+        with open(Path(path) / 'CACHEDIR.TAG', 'rb') as tag:
+            return tag.read(len(CACHEDIR_SIGNATURE)) == CACHEDIR_SIGNATURE
+    except OSError:
+        return False
+
+
+def is_build_output(path):
+    return is_xcode_build(Path(path).name) or is_cache_tagged(path)
 
 
 def suggested_target(capacity_bytes):
@@ -44,18 +61,28 @@ def item(title, bytes_, reason, path=None, kind=None):
     return dict(title=title, bytes=int(bytes_ or 0), reason=reason, path=path, kind=kind)
 
 
-def duplicate_builds(task_path, depth=4):
-    """Xcode build folders inside one task; more than one usually means old copies are lying around."""
-    found = []
+def duplicate_builds(task_path, depth=5):
+    """Build folders inside one task (Xcode DerivedData, or output tagged CACHEDIR.TAG such as one SwiftPM
+    scratch folder per test round); more than one usually means old copies are lying around."""
+    found, repos = [], []
     base = len(Path(task_path).parts)
-    for folder, dirs, _ in os.walk(task_path, followlinks=False):
-        if len(Path(folder).parts) - base >= depth:
+    for folder, dirs, files in os.walk(task_path, followlinks=False):
+        here = Path(folder)
+        if '.git' in dirs or '.git' in files:
+            repos.append(here)
+        if len(here.parts) > base and 'CACHEDIR.TAG' in files and is_cache_tagged(here):
+            # Inside a repository a link in its place would show up in `git status` (a `.build/` rule skips links).
+            if not any(repo == here or repo in here.parents for repo in repos):
+                found.append(here)
+            dirs[:] = []
+            continue
+        if len(here.parts) - base >= depth:
             dirs[:] = []
             continue
         for name in list(dirs):
             if is_xcode_build(name):
-                if not (Path(folder) / name).is_symlink():
-                    found.append(Path(folder) / name)
+                if not (here / name).is_symlink():
+                    found.append(here / name)
                 dirs.remove(name)
             elif name in ('.git', 'node_modules', 'Pods'):
                 dirs.remove(name)
@@ -103,7 +130,7 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
             for copy in duplicate_builds(t['path']):
                 size = sizer(copy) or 0
                 if size:
-                    auto.append(item('把 {} 的 Xcode 构建产物挪到外接盘'.format(Path(t['path']).name), size,
+                    auto.append(item('把 {} 的构建产物挪到外接盘'.format(Path(t['path']).name), size,
                                      '共享构建缓存：不在构建时挪，原路径留链接', str(copy), 'build-move'))
     for entry in pending.get('items', []):
         if entry.get('state') == 'pending' and not entry.get('unreachable'):
@@ -120,7 +147,7 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
         stale = stale_copies(copies, now) if len(copies) > 1 else []
         if stale:
             oldest = time.strftime('%m-%d', time.localtime(min(last_used(c) for c in stale)))
-            judge.append(item('{} 里有 {} 份一周没用的 Xcode 构建副本'.format(Path(t['path']).name, len(stale)),
+            judge.append(item('{} 里有 {} 份一周没用的构建副本'.format(Path(t['path']).name, len(stale)),
                               sum(sizer(c) or 0 for c in stale),
                               '最早一份上次用在 {}；一周内用过的和最新的一份不列'.format(oldest), t['path'], 'duplicate-builds'))
     for category in report.get('categories', []):
@@ -179,31 +206,46 @@ def growth(home, report, now=None):
     return grown
 
 
-def agent_needed(home, plan, grown, now=None):
-    """Wake the agent when the scripts are done but the target is still missed, or something new grew fast.
+def agent_needed(home, plan, grown, now=None, critical_bytes=0):
+    """Wake the agent when the scripts are done but the target is still missed, or something new grew fast:
+    at most once a day. Dropping below the critical line is said at once, once per drop (space-target-plan AC-02),
+    unless 「等你确认」 has items, whose own notice already says so.
 
-    At most once a day. Returns the reason, or None.
+    Returns dict(title, reason), or None.
     """
     now = time.time() if now is None else now
-    auto_left = next(s for s in plan['sections'] if s['id'] == 'auto')['bytes']
-    others = sum(s['bytes'] for s in plan['sections'] if s['id'] != 'auto') + sum(i['bytes'] for i in plan['suggestions'])
-    reason = None
-    if plan['gap_bytes'] and not auto_left and (others or plan['suggestions']):
-        reason = '自动能做的都做完了，离目标还差 {:.0f} GB'.format(plan['gap_bytes'] / GIB)
-    elif grown:
-        top = max(grown, key=lambda g: g['bytes'])
-        reason = '{} 一天涨了 {:.0f} GB'.format(Path(top['key'].split(':', 1)[1]).name or top['key'], top['bytes'] / GIB)
-    if not reason:
-        return None
+    sections = {s['id']: s['bytes'] for s in plan['sections']}
+    auto_left = sections['auto']
+    others = sum(v for k, v in sections.items() if k != 'auto') + sum(i['bytes'] for i in plan['suggestions'])
     path = auto_tier.state_root(home) / AGENT_STATE
-    today = time.strftime('%Y-%m-%d', time.localtime(now))
     try:
-        if json.loads(path.read_text()).get('day') == today:
-            return None
+        state = json.loads(path.read_text())
     except (OSError, ValueError):
-        pass
-    atomic_json(path, dict(day=today, at=now, reason=reason))
-    return reason
+        state = {}
+    before = dict(state)
+    today = time.strftime('%Y-%m-%d', time.localtime(now))
+    low = bool(critical_bytes) and plan.get('free_bytes', critical_bytes) < critical_bytes
+    notice = None
+    if not low:
+        state.pop('critical_at', None)
+    elif not state.get('critical_at'):
+        state['critical_at'] = now
+        if not sections.get('ask'):
+            notice = dict(title='磁盘快满了', reason='内置盘只剩 {:.0f} GB，低于危险线 {:.0f} GB；{}'.format(
+                plan['free_bytes'] / GIB, critical_bytes / GIB,
+                '后台正在把构建产物挪到外接盘，可能还不够' if auto_left else '自动能做的都做完了'))
+    if notice is None and state.get('day') != today:
+        if plan['gap_bytes'] and not auto_left and (others or plan['suggestions']):
+            notice = dict(title='有新占用需要判断', reason='自动能做的都做完了，离目标还差 {:.0f} GB'.format(plan['gap_bytes'] / GIB))
+        elif grown:
+            top = max(grown, key=lambda g: g['bytes'])
+            notice = dict(title='有新占用需要判断', reason='{} 一天涨了 {:.0f} GB'.format(
+                Path(top['key'].split(':', 1)[1]).name or top['key'], top['bytes'] / GIB))
+    if notice:
+        state.update(day=today, at=now, reason=notice['reason'])
+    if state != before:
+        atomic_json(path, state)
+    return notice
 
 
 AGENT_PROMPT = ('用 mac-dev-resource-guard 这个 skill 帮我看一下磁盘空间：先运行 '

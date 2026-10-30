@@ -35,6 +35,7 @@ LABELS = {'memory': 'local.dev-resource-guard.memory', 'storage': 'local.dev-res
 # launchd wakes the storage job often; each part keeps its own pace inside tick_storage.
 STORAGE_WAKE_SECONDS = 300
 CACHE_INTERVAL = 12 * 3600
+BUILD_MOVES_WHEN_LOW = 10   # build folders moved to the drive per round while below the warning line
 # launchd jobs may not touch removable volumes; run through the app so macOS asks the user once for 资源看板.
 APP_EXECUTABLE = 'Applications/资源看板.app/Contents/MacOS/ResourceDashboard'
 
@@ -414,9 +415,9 @@ def refresh_plan(home, cfg, settings, now):
         report = checkup.scan(home, cfg, now=now)
     plan = current_plan(home, cfg, settings, report, now)
     space_plan.save(home, plan)
-    reason = space_plan.agent_needed(home, plan, space_plan.growth(home, report, now), now)
-    if reason:
-        atomic_json(state_root(home)/AGENT_REQUEST, dict(at=now, reason=reason, prompt=space_plan.AGENT_PROMPT))
+    notice = space_plan.agent_needed(home, plan, space_plan.growth(home, report, now), now, settings.critical_free_gib * GIB)
+    if notice:
+        atomic_json(state_root(home)/AGENT_REQUEST, dict(at=now, prompt=space_plan.AGENT_PROMPT, **notice))
         ask_tier.launch_app()
     return plan
 
@@ -496,8 +497,8 @@ def prune_output(home, path):
     if target.is_symlink() or not target.is_dir():
         raise ValueError('只能删真实的构建产物目录：' + str(target))
     target = target.resolve()
-    if target.name not in T.PRUNE_NAMES and not space_plan.is_xcode_build(target.name):
-        raise ValueError('不在可重建产物名单里（{}，或名字里带 DerivedData）：{}'.format('、'.join(T.PRUNE_NAMES), target))
+    if target.name not in T.PRUNE_NAMES and not space_plan.is_build_output(target):
+        raise ValueError('不在可重建产物名单里（{}，名字里带 DerivedData，或带 CACHEDIR.TAG 标记）：{}'.format('、'.join(T.PRUNE_NAMES), target))
     settings = configure(home)
     cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
     roots = [Path(r['path']).resolve() for r in cfg['task_roots']] + [Path(r['external']) for r in cfg['task_roots'] if r['external']]
@@ -544,7 +545,9 @@ def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
         actions = []
         if any(row['status'] == 'local' for row in toolcaches.inspect(home, cfg['external_root'], sizes=False)):
             actions += toolcaches.take_over(home, cfg['external_root'], activity)
-        actions += toolcaches.take_over_builds(home, cfg['external_root'], cfg, activity)
+        # Below the warning line the space is needed now: several quiet build folders per round instead of one.
+        low = shutil.disk_usage(str(settings.volume)).free < settings.warning_free_gib * GIB
+        actions += toolcaches.take_over_builds(home, cfg['external_root'], cfg, activity, limit=BUILD_MOVES_WHEN_LOW if low else 1)
     except Exception as error:
         actions = [dict(kind='cache-move', path=str(cfg['external_root']), bytes=0, result='failed', reason=str(error) or type(error).__name__)]
     if actions:
@@ -708,12 +711,23 @@ def menu_app_pids(executable, listing=None):
     return found
 
 
-def running_menu_apps(executable):
-    """Every running menu app: by its exact path and by its bundle id."""
-    return sorted(set(menu_app_pids(executable)) | set(app_pids_by_bundle()))
+def app_path(pid):
+    """The executable a process runs, as ps prints it (UTF-8, so CJK paths read right)."""
+    return subprocess.run(['/bin/ps', '-ww', '-o', 'comm=', '-p', str(pid)], capture_output=True, text=True,
+                          errors='surrogateescape', env=dict(os.environ, LC_ALL='en_US.UTF-8')).stdout.strip()
 
 
-def stop_menu_app(executable, wait=5.0):
+def running_menu_apps(executable, home=None):
+    """Every running menu app: by its exact path and by its bundle id. Given a home, a copy running from another
+    home is left alone: an install into a throwaway home (the test suite) once quit the user's own app."""
+    by_bundle = app_pids_by_bundle()
+    if home is not None:
+        mine = (str(Path(home)) + '/', '/Applications/')
+        by_bundle = [pid for pid in by_bundle if app_path(pid).startswith(mine)]
+    return sorted(set(menu_app_pids(executable)) | set(by_bundle))
+
+
+def stop_menu_app(executable, wait=5.0, home=None):
     """Quit the running menu app and wait for it, so `open` starts the new build instead of reusing the old one."""
     def alive(pid):
         try:
@@ -726,7 +740,7 @@ def stop_menu_app(executable, wait=5.0):
             return True
         except ProcessLookupError:
             return False
-    pids = running_menu_apps(executable)
+    pids = running_menu_apps(executable, home)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in pids:
             try:

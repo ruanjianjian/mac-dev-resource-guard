@@ -83,7 +83,7 @@ class PlanTest(TierFixture):
                                   sizer=lambda p: 8 * GIB if 'DerivedData' in Path(p).name else 1 << 20)
         sections = {s['id']: s for s in result['sections']}
         self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # the two copies idle for over a week
-        self.assertIn('2 份一周没用的 Xcode 构建副本', sections['judge']['items'][0]['title'])
+        self.assertIn('2 份一周没用的构建副本', sections['judge']['items'][0]['title'])
 
     def test_copies_used_within_a_week_are_never_offered(self):
         busy = self.busy_task_with_copies(days=(1, 3, 6))
@@ -117,8 +117,26 @@ class PlanTest(TierFixture):
         still_auto = dict(quiet, gap_bytes=GIB, sections=[dict(id='auto', bytes=GIB), dict(id='ask', bytes=GIB), dict(id='judge', bytes=0)])
         self.assertIsNone(space_plan.agent_needed(self.home, still_auto, []), 'scripts still have work to do')
         stuck = dict(quiet, gap_bytes=9 * GIB, sections=[dict(id='auto', bytes=0), dict(id='ask', bytes=GIB), dict(id='judge', bytes=0)])
-        self.assertIn('还差 9 GB', space_plan.agent_needed(self.home, stuck, []))
+        self.assertIn('还差 9 GB', space_plan.agent_needed(self.home, stuck, [])['reason'])
         self.assertIsNone(space_plan.agent_needed(self.home, stuck, []), 'at most once a day')
+
+    def test_dropping_below_the_critical_line_is_said_at_once_once_per_drop(self):
+        # 10-30: free fell from 40 to 15 GB in an afternoon and nothing was said, because 「等你确认」 was empty.
+        def plan(free, ask=0):
+            return dict(free_bytes=free, gap_bytes=40 * GIB, suggestions=[dict(bytes=30 * GIB)],
+                        sections=[dict(id='auto', bytes=0), dict(id='ask', bytes=ask), dict(id='judge', bytes=0)])
+        critical = 25 * GIB
+        self.assertIn('还差 40 GB', space_plan.agent_needed(self.home, plan(30 * GIB), [], critical_bytes=critical)['reason'])
+        low = space_plan.agent_needed(self.home, plan(15 * GIB), [], critical_bytes=critical)
+        self.assertEqual(low['title'], '磁盘快满了', 'said the same day, after the daily notice')
+        self.assertIn('只剩 15 GB，低于危险线 25 GB；自动能做的都做完了', low['reason'])
+        self.assertIsNone(space_plan.agent_needed(self.home, plan(14 * GIB), [], critical_bytes=critical), 'once per drop')
+        self.assertIsNone(space_plan.agent_needed(self.home, plan(30 * GIB), [], critical_bytes=critical))
+        self.assertEqual(space_plan.agent_needed(self.home, plan(20 * GIB), [], critical_bytes=critical)['title'], '磁盘快满了',
+                         'a new drop is said again')
+        space_plan.agent_needed(self.home, plan(30 * GIB), [], critical_bytes=critical)
+        self.assertIsNone(space_plan.agent_needed(self.home, plan(20 * GIB, ask=GIB), [], critical_bytes=critical),
+                          '「等你确认」 has its own notice for the drop')
 
     def test_fast_growth_is_noticed_against_a_daily_baseline(self):
         now = time.time()
@@ -128,7 +146,7 @@ class PlanTest(TierFixture):
         grown = space_plan.growth(self.home, later, now + 3600)
         self.assertEqual(grown[0]['bytes'], 12 * GIB)
         quiet = dict(gap_bytes=0, sections=[dict(id='auto', bytes=0), dict(id='ask', bytes=0), dict(id='judge', bytes=0)], suggestions=[])
-        self.assertIn('一天涨了 12 GB', space_plan.agent_needed(self.home, quiet, grown, now + 3600))
+        self.assertIn('一天涨了 12 GB', space_plan.agent_needed(self.home, quiet, grown, now + 3600)['reason'])
 
     def test_target_is_validated_and_written_as_one_set(self):
         home = self.home

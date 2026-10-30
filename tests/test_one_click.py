@@ -201,6 +201,28 @@ class TaskBuildTest(CacheFixture):
         self.assertEqual(os.readlink(second), str(self.managed / 'builds/20261002-b/app--DerivedData-flutter'))
         self.assertEqual(toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle()), [], 'nothing left')
 
+    def tagged(self, task, relative, signature=b'Signature: 8a477f597d28d172789f06886806bc55\n# swift build\n'):
+        folder = task / relative; (folder / 'out/Products').mkdir(parents=True)
+        (folder / 'CACHEDIR.TAG').write_bytes(signature)
+        (folder / 'out/Products/lib.o').write_bytes(b'x' * 8192)
+        old = time.time() - 3600
+        for path in (folder / 'out/Products/lib.o', folder / 'out/Products', folder / 'out', folder / 'CACHEDIR.TAG', folder):
+            os.utime(path, (old, old))
+        return folder
+
+    def test_build_output_tagged_with_cachedir_tag_moves_too(self):
+        # 10-30: one `swift build --scratch-path` folder per test round, five levels down, 26 GB in one task.
+        task = self.task('20261029-membership', 1)
+        scratch = self.tagged(task, 'build/r7-unit/swift-IMKit/build/IMKit')
+        notes = self.tagged(task, 'notes/build', signature=b'not a cache\n')
+        in_repo = self.tagged(task, 'App/Package/.build')
+        done = toolcaches.take_over_builds(self.home, self.managed, self.cfg(), idle(), limit=10)
+        self.assertEqual([a['path'] for a in done], [str(scratch)])
+        self.assertEqual(os.readlink(scratch), str(self.managed / 'builds/20261029-membership/build--r7-unit--swift-IMKit--build--IMKit'))
+        self.assertEqual((scratch / 'out/Products/lib.o').read_bytes(), b'x' * 8192)
+        self.assertFalse(notes.is_symlink(), 'a CACHEDIR.TAG without the standard signature is not trusted')
+        self.assertFalse(in_repo.is_symlink(), 'inside a repository the link would show up in git status')
+
     def test_a_build_in_progress_or_just_finished_waits(self):
         busy = self.build(self.task('20261001-a', 1))
         fresh = self.build(self.task('20261002-b', 1), minutes_ago=5)
@@ -535,6 +557,20 @@ class TickTest(CacheFixture):
         log = (self.home / '.local/state/dev-resource-guard/auto-tier-log.jsonl').read_text().splitlines()
         self.assertEqual(json.loads(log[-1])['actions'][0]['kind'], 'cache-move')
         self.assertIsNone(service.tick_caches(self.home, time.time(), launchctl=self.launchctl), 'nothing left to move')
+
+    def test_below_the_warning_line_several_build_folders_move_per_round(self):
+        import service
+        tiers_config.update(self.home, dict(caches_enabled=True, external_root=str(self.managed)))
+        limits = []
+        def usage(free):
+            return lambda path: type('Usage', (), dict(free=free, total=500 << 30, used=0))()
+        with unittest.mock.patch.object(service.Activity, 'collect', classmethod(lambda cls, root=None: Activity())), \
+             unittest.mock.patch.object(toolcaches, 'take_over_builds', lambda *args, **kwargs: limits.append(kwargs['limit']) or []):
+            with unittest.mock.patch.object(service.shutil, 'disk_usage', usage(1 << 30)):
+                service.tick_caches(self.home, time.time(), launchctl=self.launchctl)
+            with unittest.mock.patch.object(service.shutil, 'disk_usage', usage(400 << 30)):
+                service.tick_caches(self.home, time.time(), launchctl=self.launchctl)
+        self.assertEqual(limits, [service.BUILD_MOVES_WHEN_LOW, 1])
 
 
 class InstallScriptTest(unittest.TestCase):

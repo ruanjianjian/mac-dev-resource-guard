@@ -192,7 +192,7 @@ def _move_all(home, external_root, state, busy, actions, free_bytes, free_before
 
 
 def task_builds(cfg):
-    """Each task's own Xcode build folders (DerivedData under any name) still on the internal disk."""
+    """Each task's own build folders (DerivedData under any name, or CACHEDIR.TAG output) still on the internal disk."""
     found = []
     for task in T.discover(cfg):
         if task.linked or not task.reachable:

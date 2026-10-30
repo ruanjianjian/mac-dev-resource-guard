@@ -119,6 +119,10 @@ def tick(home, enabled, now=None, fetch=urllib.request.urlopen, spawn=subprocess
             return data
     if not enabled and not force:
         return dict(data, status='off')
+    if installed(home) is None:
+        # Nothing installed for this home: updates replace an install, they never make one (and a test suite's
+        # throwaway home must not reach the network and install a real copy).
+        return dict(data, status='not-installed')
     if not force and now - data.get('checked_at', 0) < DAY:
         return data
     waiting = busy_reason(home)
