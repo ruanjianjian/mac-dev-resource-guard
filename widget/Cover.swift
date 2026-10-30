@@ -41,7 +41,7 @@ extension Snapshot {
     }
 }
 
-enum CoverPage { case cover, pending, space, switches, plan, memory }
+enum CoverPage { case cover, pending, space, switches, advanced, plan, memory }
 
 /// Loads the checkup and the pending list on its own, so the cover never waits for the old panel's work.
 final class CoverStore: ObservableObject {
@@ -50,6 +50,8 @@ final class CoverStore: ObservableObject {
     @Published var pending: BackendReply?
     @Published var plan: BackendReply?
     @Published var memory: BackendReply?
+    /// 「帮你管着」 (plan-page): the plan's state, what was changed and by whom, the rest at their defaults.
+    @Published var rules: BackendReply?
     @Published var working = ""
     @Published var message = ""
     /// The confirmed items that were not deleted, each with its reason; shown until the next action.
@@ -69,7 +71,9 @@ final class CoverStore: ObservableObject {
             let pending = try? DashboardActions.call("pending-preview")
             let plan = try? DashboardActions.call("plan-preview")
             let memory = try? DashboardActions.call("memory-page")
+            let rules = try? DashboardActions.call("rules-preview")
             DispatchQueue.main.async {
+                if let rules, rules.status == "ok" { self.rules = rules }
                 if let checkup, checkup.status == "ok" { self.checkup = checkup }
                 if let pending, pending.status == "ok" { self.pending = pending }
                 if let plan, plan.status == "ok" { self.plan = plan }
@@ -91,6 +95,7 @@ final class CoverStore: ObservableObject {
                 self.message = reply?.message ?? "没连上后台，请稍后再试。"
                 if action.hasPrefix("checkup"), let reply, reply.status == "ok" { self.checkup = reply }
                 if action == "plan-target", let reply, reply.status == "ok" { self.plan = reply; self.message = "" }
+                if action == "rules-lock", let reply, reply.status == "ok" { self.rules = reply }
                 self.refresh()
                 (NSApp.delegate as? AppDelegate)?.model.refresh()
             }
@@ -197,7 +202,8 @@ struct CoverPanel: View {
             case .cover: Cover(model: model, store: store)
             case .pending: PendingPage(model: model, store: store)
             case .space: SpacePage(model: model, store: store)
-            case .switches: SwitchesPage(model: model, store: store)
+            case .switches: RulesPage(model: model, store: store)
+            case .advanced: SwitchesPage(model: model, store: store)
             case .plan: PlanPage(model: model, store: store)
             case .memory: MemoryPage(model: model, store: store)
             }
@@ -441,7 +447,10 @@ private struct StatusTag: View {
     let text: String
     static let colours: [String: (fill: UInt32, ink: UInt32, dot: UInt32)] = [
         "free": (0xDCF4E4, 0x16703C, 0x22A35A), "use": (0xE3EBFF, 0x2747A8, 0x3A63D6),
-        "link": (0xEEE5FF, 0x5534B8, 0x7650E0), "auto": (0xFFEED4, 0x9A5600, 0xE08A10)]
+        "link": (0xEEE5FF, 0x5534B8, 0x7650E0), "auto": (0xFFEED4, 0x9A5600, 0xE08A10),
+        // The plan's actions (plan-page): moved to the drive, cleaned, asked first, listed quietly, left alone.
+        "move": (0xE3EBFF, 0x2747A8, 0x3A63D6), "clean": (0xDCF4E4, 0x16703C, 0x22A35A), "ask": (0xFFEED4, 0x9A5600, 0xE08A10),
+        "quiet": (0xEEEDE8, 0x5F5E5A, 0x888780), "off": (0xF1EFE8, 0x8A877F, 0xB4B2A9), "keep": (0xF1EFE8, 0x8A877F, 0xB4B2A9)]
 
     var body: some View {
         let colour = StatusTag.colours[kind] ?? StatusTag.colours["use"]!
@@ -459,12 +468,13 @@ private struct Page<Content: View>: View {
     @ObservedObject var model: Monitor
     @ObservedObject var store: CoverStore
     let title: String
+    var back: CoverPage = .cover
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { store.page = .cover; store.message = ""; store.skipped = [] } label: {
-                Text("‹ 还剩 \(number0(model.snapshot.free)) GB").font(.system(size: 12)).foregroundColor(Ink.muted)
+            Button { store.page = back; store.message = ""; store.skipped = [] } label: {
+                Text(back == .cover ? "‹ 还剩 \(number0(model.snapshot.free)) GB" : "‹ 帮你管着").font(.system(size: 12)).foregroundColor(Ink.muted)
             }.buttonStyle(.plain)
             Text(title).font(.system(size: 16, weight: .medium)).foregroundColor(Ink.navy).padding(.top, 4).padding(.bottom, 10)
             content
@@ -723,7 +733,8 @@ private struct SwitchesPage: View {
     }
 
     var body: some View {
-        Page(model: model, store: store, title: "帮你管着") {
+        // The switches the person can still flip by hand (plan-page AC-04); the plan itself is the page before.
+        Page(model: model, store: store, title: "高级", back: .switches) {
             VStack(spacing: 0) {
                 // The one number the user sets (space-target-plan AC-01).
                 if let gb = store.targetGB {
@@ -755,6 +766,85 @@ private struct SwitchesPage: View {
         } message: {
             Text("看板做的链接会去掉，各工具从空开始重建缓存；外接盘上的缓存副本会删除；Xcode 编译缓存关闭。任务的构建产物留在外接盘，你自己做的链接不动。")
         }
+    }
+}
+
+/// 「帮你管着」 as the agent's plan (plan-page, draft B): what state the plan is in, what someone changed and why,
+/// a lock beside each; the rest at their defaults folds into one line.
+private struct RulesPage: View {
+    @ObservedObject var model: Monitor
+    @ObservedObject var store: CoverStore
+    @State private var showDefaults = ProcessInfo.processInfo.environment["RENDER_DEFAULTS"] != nil
+
+    var body: some View {
+        let rows = store.rules?.rows ?? []
+        let changed = rows.filter { $0.category == "改过的" }
+        let defaults = rows.filter { $0.category == "默认" }
+        Page(model: model, store: store, title: "帮你管着") {
+            if let state = rows.first(where: { $0.category == "计划状态" }) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(state.title).font(.system(size: 12, weight: .medium)).foregroundColor(Ink.cream)
+                    Text(state.detail).font(.system(size: 10.5)).foregroundColor(Ink.navySoft).lineLimit(1)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Ink.navy)).padding(.bottom, 4)
+            } else {
+                Text(store.rules == nil ? "正在读取…" : "").font(.system(size: 12)).foregroundColor(Ink.muted)
+            }
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(changed) { row in RuleLine(row: row) { lock(row) } }
+                    if !defaults.isEmpty {
+                        Button { withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.2)) { showDefaults.toggle() } } label: {
+                            HStack {
+                                Text("其余 \(defaults.count) 类照默认").foregroundColor(Ink.muted)
+                                Spacer()
+                                Text(showDefaults ? "收起" : "›").foregroundColor(Ink.muted)
+                            }.font(.system(size: 12)).padding(.vertical, 9).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        if showDefaults { ForEach(defaults) { row in RuleLine(row: row) { lock(row) } } }
+                    }
+                }
+            }
+            HStack {
+                Button("高级 ›") { store.page = .advanced; store.message = "" }.buttonStyle(.plain)
+                    .font(.system(size: 11)).foregroundColor(Ink.muted)
+                Spacer()
+                Button("交给 agent ›") { store.handOff() }.buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium)).foregroundColor(Ink.navy)
+            }.padding(.top, 8)
+        }
+    }
+
+    private func lock(_ row: ResourceRow) {
+        let locked = row.outcome == "锁住"
+        store.perform("rules-lock", ids: [row.id], doing: locked ? "正在解锁…" : "正在锁住…", path: locked ? "unlock" : "lock")
+    }
+}
+
+/// One rule, setting or 「先别动」: what it is, who set it and why; its action as a tag; the lock on the right edge.
+private struct RuleLine: View {
+    let row: ResourceRow
+    let lock: () -> Void
+    var body: some View {
+        let locked = row.outcome == "锁住"
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.title).font(.system(size: 12)).foregroundColor(Ink.text).lineLimit(1)
+                Text(row.reason).font(.system(size: 10.5)).foregroundColor(Ink.muted).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if let kind = row.kind, let tag = row.tag { StatusTag(kind: kind, text: tag) }
+            Button(action: lock) {
+                Image(systemName: locked ? "lock.fill" : "lock.open").font(.system(size: 11))
+                    .foregroundColor(locked ? Ink.navy : Color(hex: 0xC9C5BC)).frame(width: 16, height: 18).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!row.eligible)
+            .help(row.eligible ? (locked ? "解锁：agent 可以再调整它" : "锁住：agent 不会再改它") : "只有你能拿掉它")
+            .accessibilityLabel(locked ? "解锁" + row.title : "锁住" + row.title)
+        }
+        .padding(.vertical, 6)
+        .overlay(Rectangle().fill(Ink.rule).frame(height: 0.5), alignment: .bottom)
     }
 }
 
