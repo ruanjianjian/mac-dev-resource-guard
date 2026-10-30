@@ -119,7 +119,9 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     target = int(settings.warning_free_gib * GIB)
     auto, ask, judge = [], [], []
     rules = agent_plan.load(home)
-    tasks = [t for t in report.get('tasks', []) if not t.get('linked') and not agent_plan.kept(rules, t['path'])]
+    tasks = [t for t in report.get('tasks', []) if not t.get('linked')]
+    # 「先别动」 is checked per thing that would move: a whole task, or one build copy inside it.
+    whole = [t for t in tasks if not agent_plan.kept(rules, t['path'])]
     if cfg['caches_enabled'] and external_ready:
         for cache in report.get('caches', []):
             if cache.get('status') == 'local' and cache.get('bytes') and agent_plan.action(rules, 'tool-caches') == 'move':
@@ -130,23 +132,24 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
             if t.get('idle'):
                 continue
             for copy in duplicate_builds(t['path']):
-                size = sizer(copy) or 0
+                size = 0 if agent_plan.kept(rules, copy) else (sizer(copy) or 0)
                 if size:
                     auto.append(item('把 {} 的构建产物挪到外接盘'.format(Path(t['path']).name), size,
                                      '共享构建缓存：不在构建时挪，原路径留链接', str(copy), 'build-move'))
     for entry in pending.get('items', []):
         if entry.get('state') == 'pending' and not entry.get('unreachable'):
-            ask.append(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']))
+            ask.append(dict(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']),
+                            quiet=bool(entry.get('quiet'))))
     if external_ready and agent_plan.action(rules, 'idle-tasks') == 'move':
-        for t in tasks:
+        for t in whole:
             if t.get('idle') and t.get('bytes'):
                 auto.append(item('把闲置的 {} 挪到外接盘'.format(Path(t['path']).name), t['bytes'],
                                  '闲置满 {} 天；空间不够时整个挪过去，原路径留链接'.format(cfg['auto_idle_days']), t['path'], 'move'))
-    busy = sorted((t for t in tasks if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])
+    busy = sorted((t for t in whole if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])
     # With the drive in use every build copy is already in 「会自动做的」; deleting old ones frees no internal space.
     for t in ([] if cfg['caches_enabled'] and external_ready else busy[:5]):
         copies = duplicate_builds(t['path'])
-        stale = stale_copies(copies, now) if len(copies) > 1 else []
+        stale = [c for c in (stale_copies(copies, now) if len(copies) > 1 else []) if not agent_plan.kept(rules, c)]
         if stale:
             oldest = time.strftime('%m-%d', time.localtime(min(last_used(c) for c in stale)))
             judge.append(item('{} 里有 {} 份一周没用的构建副本'.format(Path(t['path']).name, len(stale)),
@@ -218,7 +221,10 @@ def agent_needed(home, plan, grown, now=None, critical_bytes=0):
     now = time.time() if now is None else now
     sections = {s['id']: s['bytes'] for s in plan['sections']}
     auto_left = sections['auto']
-    others = sum(v for k, v in sections.items() if k != 'auto') + sum(i['bytes'] for i in plan['suggestions'])
+    # 「只列出、不催」 items stay on the page but never nudge, in the daily notice as in the drop below the line.
+    ask = next((s for s in plan['sections'] if s['id'] == 'ask'), {})
+    loud = sum(i['bytes'] for i in ask['items'] if not i.get('quiet')) if 'items' in ask else sections.get('ask', 0)
+    others = sections.get('judge', 0) + loud + sum(i['bytes'] for i in plan['suggestions'])
     path = auto_tier.state_root(home) / AGENT_STATE
     try:
         state = json.loads(path.read_text())
@@ -232,7 +238,7 @@ def agent_needed(home, plan, grown, now=None, critical_bytes=0):
         state.pop('critical_at', None)
     elif not state.get('critical_at'):
         state['critical_at'] = now
-        if not sections.get('ask'):
+        if not loud:
             notice = dict(title='磁盘快满了', reason='内置盘只剩 {:.0f} GB，低于危险线 {:.0f} GB；{}'.format(
                 plan['free_bytes'] / GIB, critical_bytes / GIB,
                 '后台正在把构建产物挪到外接盘，可能还不够' if auto_left else '自动能做的都做完了'))

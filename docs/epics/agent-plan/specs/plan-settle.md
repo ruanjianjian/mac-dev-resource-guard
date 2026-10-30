@@ -36,7 +36,7 @@ agent 要先说明理由再打开；用户自己改了计划，计划自动重�
 | AC-01 | [核] | 最近 4 次复查都没改计划，这期间用户没手动纠正过 | 第 4 次复查记完 | 计划定稿，发通知「资源看板的计划定稿了」，写明以后什么时候才会改 | CLI后端、mac原生 | ✅ | auto: test_agent_plan.ReviewTest.test_the_plan_settles_after_four_quiet_reviews_without_corrections |
 | AC-02 | [核] | 这期间用户在看板里改过目标 | 第 4 次没改的复查记完 | 不定稿；从那次纠正之后重新数 4 次 | CLI后端 | ✅ | auto: 同 AC-01（第 5 周纠正，第 8 周才定稿） |
 | AC-03 | [核] | 计划已定稿 | agent 想改规则、改设置或加「先别动」 | 拒绝，说明只有新类型的占用、换盘或用户要求才改，并告诉它先用 `review reopen --why` 说明原因 | CLI后端 | ✅ | auto: ReviewTest.test_a_settled_plan_refuses_the_agent_until_reopened_with_a_reason |
-| AC-04 | [核] | 计划已定稿 | agent 运行 `review reopen --why "新出现了…"` | 计划重新打开，记下原因，通知用户；没写原因就拒绝 | CLI后端 | ✅ | auto: 同 AC-03 |
+| AC-04 | [核] | 计划已定稿 | agent 运行 `review reopen --why "新出现了…"` | 计划重新打开，记下原因，通知用户；没写原因就拒绝 | CLI后端 | ✅ | auto: 同 AC-03；auto: LockAndSettleFindingsTest.test_7_after_reopening_the_quiet_weeks_start_over、test_7b_a_review_that_says_no_change_while_the_plan_changed_does_not_count |
 | AC-05 | [核] | 计划已定稿 | 用户自己改了一条规则或一个设置 | 照改，计划自动重新打开，记下「用户自己改了…」 | CLI后端 | ✅ | auto: ReviewTest.test_the_user_changing_a_settled_plan_opens_it_again |
 | AC-06 | [边] | 计划已定稿 | agent 每周复查 | 复查材料写明已定稿、只看有没有新类型的占用或换盘，没有就记「没改」 | CLI后端 | ✅ | auto: ReviewTest.test_the_plan_settles_after_four_quiet_reviews_without_corrections（定稿后材料里的步骤） |
 
@@ -45,3 +45,4 @@ agent 要先说明理由再打开；用户自己改了计划，计划自动重�
 | ID | 日期 | 变更 | 类型 |
 |---|---|---|---|
 | CH-01 | 2026-10-30 | 新建（RAW-01、RAW-09）：「决定都和计划一致」落成「这期间没有手动纠正」，确认或忽略不算纠正 | [需求变更] |
+| CH-02 | 2026-10-30 | Codex 独立评审 CR-01（2026-10-30）查出，均先写测试复现再修：重新打开后只数之后的复查；复查记「没改」但期间计划其实改过的，不算安静的一次（AC-01、AC-04） | [缺陷] |

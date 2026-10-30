@@ -537,13 +537,19 @@ def setting_now(home, name, cfg=None):
     return '开' if on else '关'
 
 
+# Switches that move others with them: turning 自动清理 on or off also turns 等你确认 on or off (checkup).
+AFFECTS = {'clean': ('clean', 'ask')}
+
+
 def change_setting(home, name, value, by='agent', why='', evidence=()):
     """settings-locks: the agent (or the user through it) changes one setting; a locked one only by the user."""
     if name not in agent_plan.SETTINGS:
         raise ValueError('没有这个设置：{}；可选：{}'.format(name, '、'.join(agent_plan.SETTINGS)))
+    touched = AFFECTS.get(name, (name,))
     if by == 'agent':
-        agent_plan.check_setting(home, name, why)
-    before = setting_now(home, name)
+        for each in touched:   # every setting this one moves must be free to change, not only the one named
+            agent_plan.check_setting(home, each, why)
+    before = {each: setting_now(home, each) for each in touched}
     if name == 'target':
         set_target(home, value)
     else:
@@ -558,15 +564,18 @@ def change_setting(home, name, value, by='agent', why='', evidence=()):
             checkup.apply(home, [name], owned)
         else:
             checkup.turn_off(home, name, owned)
-    after = setting_now(home, name)
-    agent_plan.note_setting(home, name, by, why, evidence, before=before, after=after)
-    return dict(setting=name, before=before, after=after, by=by)
+    for each in touched:
+        agent_plan.note_setting(home, each, by, why, evidence, before=before[each], after=setting_now(home, each))
+    return dict(setting=name, before=before[name], after=setting_now(home, name), by=by)
 
 
 def plan_command(home, a):
     """`memory`, `rules`, `rule`, `keep`, `setting`: the plan and memory as agent capabilities (agent-plan epic)."""
     evidence = [e.strip() for e in a.evidence.split(',') if e.strip()]
     target = a.more[0] if a.more else None
+    if a.by == 'user' and not a.words.strip():
+        # --by user is the agent saying the user asked; their own words are the record of it.
+        raise ValueError('用户亲口要求的改动要带上原话：--by user --words "…"')
     if a.action == 'rules':
         return agent_plan.describe(home)
     if a.action == 'review':
@@ -590,9 +599,9 @@ def plan_command(home, a):
                                    decision=a.decision, source='chat' if a.words else 'agent')
     if a.action == 'rule':
         if target in ('lock', 'unlock'):
-            return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words or a.why)
+            return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words, by=a.by)
         params = {'stream_hours': a.stream_hours} if a.stream_hours else None
-        entry = agent_plan.set_rule(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence, params=params)
+        entry = agent_plan.set_rule(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence, params=params, words=a.words)
         if a.by == 'user':   # the user said it in so many words: one of their decisions
             agent_plan.remember(home, 'decision', a.value, decision='set', words=a.words, source='chat',
                                 note='用户要求把「{}」设成{}'.format(agent_plan.RULES[a.value]['title'], agent_plan.ACTION_WORDS[target]))
@@ -605,10 +614,10 @@ def plan_command(home, a):
                                     source='chat', note='用户说先别动：' + entry['path'])
             return entry
         if a.value == 'remove' and target:
-            return agent_plan.remove_keep(home, target, by=a.by, why=a.why)
+            return agent_plan.remove_keep(home, target, by=a.by, why=a.why or a.words)
         raise ValueError('用法：keep add <路径> --why 原因，或 keep remove <路径>')
     if target in ('lock', 'unlock'):
-        return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words or a.why)
+        return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words, by=a.by)
     if target is None:
         raise ValueError('用法：setting <名字> <新值> --why 原因，或 setting <名字> lock / unlock')
     result = change_setting(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence)
@@ -675,6 +684,11 @@ def clean_caches(home):
             manager = build()
             manager.settings.normal_days = manager.settings.pressure_days = manager.settings.critical_days = 7
             plan = manager.plan(activity=common.activity(manager.settings.lease_root))
+            rules = agent_plan.load(home)
+            for candidate in plan.get('candidates', []):
+                keep = agent_plan.kept(rules, candidate['path'])
+                if keep and candidate.get('decision') == 'eligible':
+                    candidate.update(decision='kept', reasons=['先别动：' + (keep.get('why') or '计划里写着')])
             def protected_activity():
                 activity = common.activity(manager.settings.lease_root)
                 try:
@@ -683,6 +697,9 @@ def clean_caches(home):
                     enabled = False
                 if not enabled or (state_root(home)/'storage-paused').exists():
                     activity.errors.append('automatic maintenance paused or configuration invalid')
+                if agent_plan.load(home)['version'] != rules['version']:
+                    # The plan changed while cleaning (a new 「先别动」, say): stop here, the next round plans again.
+                    activity.errors.append('plan changed during cleanup')
                 return activity
             result = manager.apply(plan, activity_factory=protected_activity, manual=True)
             results.append(dict(family=name, started=started, eligible_bytes=plan['eligible_accounting_bytes'], result=result))
@@ -961,7 +978,9 @@ def main():
     elif a.action == 'target' and a.value is None:
         result = current_target(home)
     elif a.action == 'target':
-        result = set_target(home, a.value)
+        # The same door as `setting target`: locks, a settled plan and the user's words all apply.
+        a.action, a.more, a.value = 'setting', [a.value], 'target'
+        result = plan_command(home, a)
     elif a.action == 'mole-guard':
         result = {'protected': guard_mole(home, remove=a.value == 'remove')}
     elif a.action == 'prune':

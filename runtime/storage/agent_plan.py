@@ -6,9 +6,13 @@ rules with commands, from what it remembers of the user's decisions. What no rul
 that carries the rules out: things in use and unsaved work are kept, and nothing is lost without asking
 (RAW-05). Only this Mac keeps the plan and the memory; every agent reads the same copy (RAW-03).
 """
+import contextlib
+import fcntl
+import functools
 import json
 import os
 from pathlib import Path
+import threading
 import time
 
 from storage import atomic_json
@@ -35,13 +39,13 @@ ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问'
 SETTINGS = {'target': '空间目标', 'caches': '共享构建缓存', 'clean': '自动清理', 'external': '外接盘',
             'update': '自动更新', 'ask': '等你确认'}
 KINDS = ('decision', 'lesson')
-PLAN, MEMORY, CHANGES, NOTICE = 'rules.json', 'memory.jsonl', 'plan-changes.jsonl', 'notice-request.json'
-REVIEWS = 'reviews.jsonl'
+PLAN, MEMORY, CHANGES, NOTICES, REVIEWS = 'rules.json', 'memory.jsonl', 'plan-changes.jsonl', 'notices', 'reviews.jsonl'
 WEEK = 7 * 86400
 # plan-settle (RAW-09): this many reviews in a row without a change, and no correction by the user meanwhile.
 SETTLE_REVIEWS = 4
 # The user's decisions that correct the plan, as opposed to answering what it asked.
 CORRECTIONS = ('switched', 'set', 'keep')
+META = ('started_at', 'round_at', 'settled_at', 'schedule')
 
 
 def plan_path(home):
@@ -52,36 +56,97 @@ def state_dir(home):
     return Path(home) / '.local/state/dev-resource-guard'
 
 
-def _meta():
-    return dict(set_by='default', why='', evidence=[], locked=False, at=None)
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def _locked(home):
+    """One writer at a time: the background round and the agent's commands both read, change and save the plan
+    and append memories; without this one of two overlapping changes was lost, or two memories shared an id."""
+    if getattr(_held, 'depth', 0):
+        _held.depth += 1
+        try:
+            yield
+        finally:
+            _held.depth -= 1
+        return
+    path = state_dir(home) / 'plan.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
+
+
+def _writes(function):
+    @functools.wraps(function)
+    def wrapper(home, *args, **kwargs):
+        with _locked(home):
+            return function(home, *args, **kwargs)
+    return wrapper
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _clean_meta(got):
+    """Who set something and why, keeping only values of the right type: a hand-edited file never crashes a round."""
+    entry = dict(set_by='default', why='', evidence=[], locked=False, at=None)
+    if isinstance(got, dict):
+        if isinstance(got.get('set_by'), str):
+            entry['set_by'] = got['set_by']
+        if isinstance(got.get('why'), str):
+            entry['why'] = got['why']
+        if isinstance(got.get('evidence'), list):
+            entry['evidence'] = [str(e) for e in got['evidence']]
+        if isinstance(got.get('locked'), bool):
+            entry['locked'] = got['locked']
+        if _number(got.get('at')):
+            entry['at'] = got['at']
+    return entry
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
 
 
 def load(home):
-    """The plan with every rule and setting present; a missing or damaged file means today's defaults."""
+    """The plan with every rule and setting present. A missing or unreadable file means today's defaults; wrong
+    values inside a readable one are dropped one by one, so a damaged entry never takes the rest with it."""
     try:
         raw = json.loads(plan_path(home).read_text())
-        raw = raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
         raw = {}
+    raw = _dict(raw)
     rules = {}
     for rid, spec in RULES.items():
-        entry = dict(_meta(), action=spec['default'], params=dict(spec.get('params', {})))
-        got = (raw.get('rules') or {}).get(rid)
-        if isinstance(got, dict) and got.get('action') in spec['actions']:
-            entry.update({k: got[k] for k in ('action', 'set_by', 'why', 'evidence', 'locked', 'at') if k in got})
-            entry['params'].update({k: v for k, v in (got.get('params') or {}).items() if k in entry['params']})
+        got = _dict(_dict(raw.get('rules')).get(rid))
+        entry = dict(_clean_meta(got), action=spec['default'], params=dict(spec.get('params', {})))
+        if got.get('action') in spec['actions']:
+            entry['action'] = got['action']
+        else:
+            entry.update(set_by='default', why='', evidence=[], at=None)
+        for key, value in _dict(got.get('params')).items():
+            if key in entry['params'] and _number(value) and value > 0:
+                entry['params'][key] = value
         rules[rid] = entry
-    settings = {}
-    for name in SETTINGS:
-        entry = _meta()
-        got = (raw.get('settings') or {}).get(name)
-        if isinstance(got, dict):
-            entry.update({k: got[k] for k in entry if k in got})
-        settings[name] = entry
-    keep = [k for k in raw.get('keep') or [] if isinstance(k, dict) and isinstance(k.get('path'), str) and k['path']]
-    meta = dict(started_at=None, settled_at=None, schedule=None)
-    meta.update({k: v for k, v in (raw.get('meta') or {}).items() if k in meta})
-    return dict(schema=1, version=raw.get('version', 0), rules=rules, settings=settings, keep=keep, meta=meta)
+    settings = {name: _clean_meta(_dict(raw.get('settings')).get(name)) for name in SETTINGS}
+    keep = []
+    for entry in raw.get('keep') if isinstance(raw.get('keep'), list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get('path'), str) and os.path.isabs(entry['path']):
+            keep.append(dict(_clean_meta(entry), path=entry['path']))
+    meta = dict.fromkeys(META)
+    for key, value in _dict(raw.get('meta')).items():
+        if key == 'schedule' and isinstance(value, dict) and value.get('agent') in ('claude', 'codex'):
+            meta[key] = dict(agent=value['agent'], at=value.get('at') if _number(value.get('at')) else None)
+        elif key in META and key != 'schedule' and _number(value):
+            meta[key] = value
+    version = raw.get('version') if _number(raw.get('version')) else 0
+    return dict(schema=1, version=version, rules=rules, settings=settings, keep=keep, meta=meta)
 
 
 def save(home, plan, bump=True):
@@ -106,9 +171,11 @@ def _read_lines(home, name):
     out = []
     for line in lines:
         try:
-            out.append(json.loads(line))
+            entry = json.loads(line)
         except ValueError:
             continue
+        if isinstance(entry, dict):
+            out.append(entry)
     return out
 
 
@@ -117,23 +184,45 @@ def action(plan, kind):
     return plan['rules'][kind]['action'] if kind in plan['rules'] else 'ask'
 
 
+def _forms(path):
+    path = os.path.abspath(os.path.expanduser(str(path)))
+    return {os.path.normpath(path), os.path.realpath(path)}
+
+
+def _inside(path, root):
+    return path == root or path.startswith(root.rstrip('/') + '/')
+
+
 def kept(plan, path):
-    """The 「先别动」 entry covering this path (itself or a folder above it), or None."""
+    """The 「先别动」 entry that touches this path, or None. Touching means the path is kept, lies in a kept folder,
+    or holds something kept: moving or deleting a whole folder would take a kept part of it along."""
     if not path:
         return None
-    given = {os.path.normpath(str(path)), os.path.realpath(str(path))}
+    given = _forms(path)
     for entry in plan['keep']:
-        for root in {os.path.normpath(entry['path']), os.path.realpath(entry['path'])}:
-            if any(p == root or p.startswith(root.rstrip('/') + '/') for p in given):
+        for root in _forms(entry['path']):
+            if any(_inside(p, root) or _inside(root, p) for p in given):
                 return entry
     return None
 
 
 def notice(home, title, body, tab='cover'):
-    """Ask the menu app to post one notification (it deletes the request once posted)."""
-    path = state_dir(home) / NOTICE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json(path, dict(at=time.time(), title=title, body=body, tab=tab))
+    """Queue one notification for the menu app. Each is its own file, so two changes between the app's looks are
+    both said, and the app removes only the ones it posted."""
+    folder = state_dir(home) / NOTICES
+    folder.mkdir(parents=True, exist_ok=True)
+    atomic_json(folder / '{}-{}.json'.format(time.time_ns(), os.getpid()), dict(at=time.time(), title=title, body=body, tab=tab))
+
+
+def queued_notices(home):
+    folder = state_dir(home) / NOTICES
+    out = []
+    for path in sorted(folder.glob('*.json')) if folder.is_dir() else []:
+        try:
+            out.append(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def _changed(home, by, what, key, title, before, after, why, evidence):
@@ -159,13 +248,28 @@ def _check_agent(entry, title, why, plan=None):
                          '先运行 review reopen --why "原因"'.format(time.strftime('%m-%d', time.localtime(plan['meta']['settled_at']))))
 
 
+def _check_user(words):
+    if not str(words or '').strip():
+        raise ValueError('用户亲口要求的改动要带上原话（--words "…"）')
+
+
 def _user_reopens(home, plan, why):
     """The user changing the plan themselves corrects it: a settled plan opens again (plan-settle)."""
     if plan['meta']['settled_at']:
         reopen(home, why, by='user')
 
 
-def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None):
+def rule_words(rid, entry):
+    """The action as people read it, with its setting where there is one, so a change of hours is visible too."""
+    words = ACTION_WORDS[entry['action']]
+    hours = entry['params'].get('stream_hours')
+    if rid == 'simulator-shutdown' and hours:
+        words += '（看画面或日志超过 {:g} 小时算没人用）'.format(hours)
+    return words
+
+
+@_writes
+def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None, words=''):
     if rid not in RULES:
         raise ValueError('没有这条规则：{}；可选：{}'.format(rid, '、'.join(RULES)))
     spec = RULES[rid]
@@ -174,25 +278,27 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
             spec['title'], '、'.join('{}（{}）'.format(a, ACTION_WORDS[a]) for a in spec['actions'])))
     plan = load(home)
     entry = plan['rules'][rid]
-    if by == 'agent':
-        _check_agent(entry, spec['title'], why, plan)
-    else:
-        _user_reopens(home, plan, '用户自己把「{}」改成{}'.format(spec['title'], ACTION_WORDS[new_action]))
-        plan = load(home)
-        entry = plan['rules'][rid]
     for key, value in (params or {}).items():
         if key not in entry['params']:
             raise ValueError('「{}」没有参数 {}'.format(spec['title'], key))
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not _number(value) or value <= 0:
             raise ValueError('{} 必须是正数'.format(key))
-    before = ACTION_WORDS[entry['action']]
-    entry.update(action=new_action, set_by=by, why=why, evidence=list(evidence), at=time.time())
+    if by == 'agent':
+        _check_agent(entry, spec['title'], why, plan)
+    else:
+        _check_user(words)
+        _user_reopens(home, plan, '用户自己把「{}」改成{}'.format(spec['title'], ACTION_WORDS[new_action]))
+        plan = load(home)
+        entry = plan['rules'][rid]
+    before = rule_words(rid, entry)
+    entry.update(action=new_action, set_by=by, why=why or words, evidence=list(evidence), at=time.time())
     entry['params'].update(params or {})
     save(home, plan)
-    _changed(home, by, 'rule', rid, spec['title'], before, ACTION_WORDS[new_action], why, evidence)
+    _changed(home, by, 'rule', rid, spec['title'], before, rule_words(rid, entry), why or words, evidence)
     return entry
 
 
+@_writes
 def note_setting(home, name, by, why='', evidence=(), before=None, after=None):
     """A setting just changed (by the user in 「帮你管着」 or by the agent): remember who and why."""
     if name not in SETTINGS:
@@ -220,8 +326,12 @@ def check_setting(home, name, why):
     _check_agent(plan['settings'][name], SETTINGS[name], why, plan)
 
 
-def set_lock(home, key, locked, words='', source='chat'):
-    """Only the user locks or unlocks (RAW-07); it is remembered as the user's decision."""
+@_writes
+def set_lock(home, key, locked, words='', source='chat', by='user'):
+    """Only the user locks or unlocks (RAW-07), in their own words; it is remembered as their decision."""
+    if by != 'user':
+        raise ValueError('只有用户能锁住或解锁；用户这样说了，就带上 --by user --words "原话"')
+    _check_user(words)
     plan = load(home)
     if key in plan['rules']:
         entry, title, what = plan['rules'][key], RULES[key]['title'], 'rule'
@@ -238,39 +348,49 @@ def set_lock(home, key, locked, words='', source='chat'):
     return entry
 
 
+@_writes
 def add_keep(home, path, why, by='agent', evidence=()):
     if by == 'agent' and not str(why or '').strip():
         raise ValueError('要写明为什么先别动')
     plan = load(home)
-    if by == 'agent' and plan['meta']['settled_at']:
-        _check_agent(dict(locked=False), '先别动', why, plan)
-    elif by == 'user':
-        _user_reopens(home, plan, '用户说先别动：' + str(path))
+    path = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+    same = [k for k in plan['keep'] if _forms(k['path']) & _forms(path)]
+    if by == 'agent':
+        if any(k.get('set_by') == 'user' for k in same):
+            return next(k for k in same if k.get('set_by') == 'user')   # the user's own keep stays theirs
+        if plan['meta']['settled_at']:
+            _check_agent(dict(locked=False), '先别动', why, plan)
+    else:
+        _check_user(why)
+        _user_reopens(home, plan, '用户说先别动：' + path)
         plan = load(home)
-    path = os.path.normpath(os.path.expanduser(str(path)))
-    plan['keep'] = [k for k in plan['keep'] if os.path.normpath(k['path']) != path]
-    plan['keep'].append(dict(path=path, why=why, set_by=by, evidence=list(evidence), at=time.time()))
+    plan['keep'] = [k for k in plan['keep'] if not (_forms(k['path']) & _forms(path))]
+    plan['keep'].append(dict(path=path, why=why, set_by=by, evidence=list(evidence), at=time.time(), locked=False))
     save(home, plan)
     _changed(home, by, 'keep', path, '先别动：' + Path(path).name, '无', '先别动', why, evidence)
     return plan['keep'][-1]
 
 
+@_writes
 def remove_keep(home, path, by='agent', why=''):
     plan = load(home)
-    path = os.path.normpath(os.path.expanduser(str(path)))
-    entry = next((k for k in plan['keep'] if os.path.normpath(k['path']) == path), None)
+    path = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+    entry = next((k for k in plan['keep'] if _forms(k['path']) & _forms(path)), None)
     if entry is None:
         raise ValueError('「先别动」名单里没有：' + path)
-    if by == 'agent' and entry.get('set_by') == 'user':
-        raise ValueError('这是用户说的「先别动」，agent 不能拿掉；请用户决定')
     if by == 'agent':
+        if entry.get('set_by') == 'user':
+            raise ValueError('这是用户说的「先别动」，agent 不能拿掉；请用户决定')
         _check_agent(dict(locked=False), '先别动', why or '拿掉', plan)
+    else:
+        _check_user(why)
     plan['keep'].remove(entry)
     save(home, plan)
     _changed(home, by, 'keep', path, '先别动：' + Path(path).name, '先别动', '无', why, ())
     return entry
 
 
+@_writes
 def remember(home, kind, about, note='', words='', path=None, decision=None, source='agent'):
     """One memory: a decision of the user's (with their own words when there are any) or a lesson (RAW-04)."""
     if kind not in KINDS:
@@ -290,11 +410,12 @@ def memories(home, about=None, last=None):
     return found[-last:] if last else found
 
 
+@_writes
 def ensure_started(home, now=None):
     """The first plan's start (first-plan): the first review is due a week after it."""
     plan = load(home)
     if not plan['meta']['started_at']:
-        plan['meta']['started_at'] = time.time() if now is None else now
+        plan['meta']['started_at'] = plan['meta']['round_at'] = time.time() if now is None else now
         save(home, plan, bump=False)
     return plan['meta']['started_at']
 
@@ -303,6 +424,7 @@ def reviews(home):
     return _read_lines(home, REVIEWS)
 
 
+@_writes
 def note_schedule(home, agent, now=None):
     """The user's agent put a weekly review in its own scheduler (agent-review); the dashboard's weekly nudge
     then only comes if that review is missed for more than a few days."""
@@ -317,7 +439,7 @@ def note_schedule(home, agent, now=None):
 def next_review_at(home):
     """When the next review is owed: a week after the last one (or after the first plan started)."""
     plan = load(home)
-    done = reviews(home)
+    done = [r for r in reviews(home) if _number(r.get('at'))]
     last = done[-1]['at'] if done else plan['meta']['started_at']
     return last + WEEK if last else None
 
@@ -362,6 +484,7 @@ def review_packet(home, now=None):
                 changes=[c for c in changes(home) if c.get('at', 0) > since], plan=describe(home))
 
 
+@_writes
 def finish_review(home, changed, summary, now=None):
     """One review done; settle the plan when it has stopped changing (plan-settle)."""
     if not str(summary or '').strip():
@@ -372,18 +495,24 @@ def finish_review(home, changed, summary, now=None):
     return dict(review=entry, settled_at=maybe_settle(home, now))
 
 
+@_writes
 def maybe_settle(home, now=None):
     now = time.time() if now is None else now
     plan = load(home)
     if plan['meta']['settled_at']:
         return plan['meta']['settled_at']
-    recent = reviews(home)[-SETTLE_REVIEWS:]
+    # Only this round counts: after the plan was opened again, the quiet weeks start over.
+    round_at = plan['meta']['round_at'] or 0
+    recent = [r for r in reviews(home) if _number(r.get('at')) and r['at'] > round_at][-SETTLE_REVIEWS:]
     if len(recent) < SETTLE_REVIEWS or any(r.get('changed') for r in recent):
         return None
     since = recent[0]['at']
     if any(m.get('kind') == 'decision' and m.get('decision') in CORRECTIONS and m.get('at', 0) >= since
            for m in memories(home)):
         return None   # the user still corrects the plan by hand
+    if any(c.get('what') in ('rule', 'setting', 'keep') and c.get('by') in ('agent', 'user') and c.get('at', 0) >= since
+           for c in changes(home)):
+        return None   # a review said "no change" while the plan did change
     plan['meta']['settled_at'] = now
     save(home, plan)
     _changed(home, 'review', 'plan', 'settle', '计划', '调整中', '定稿', '连续 {} 次复查没改'.format(SETTLE_REVIEWS), ())
@@ -392,6 +521,7 @@ def maybe_settle(home, now=None):
     return now
 
 
+@_writes
 def reopen(home, why, by='agent'):
     """A settled plan opens again: something new appeared, the drive changed, or the user asked."""
     if not str(why or '').strip():
@@ -400,6 +530,7 @@ def reopen(home, why, by='agent'):
     if not plan['meta']['settled_at']:
         return None
     plan['meta']['settled_at'] = None
+    plan['meta']['round_at'] = time.time()
     save(home, plan)
     return _changed(home, by, 'plan', 'settle', '计划', '定稿', '重新打开', why, ())
 
@@ -407,7 +538,7 @@ def reopen(home, why, by='agent'):
 def describe(home, cfg=None):
     """The plan as the agent and the panel read it: each rule with its words, who set it and why."""
     plan = load(home)
-    rules = [dict(id=rid, title=RULES[rid]['title'], action=e['action'], words=ACTION_WORDS[e['action']],
+    rules = [dict(id=rid, title=RULES[rid]['title'], action=e['action'], words=rule_words(rid, e),
                   choices=list(RULES[rid]['actions']), **{k: e[k] for k in ('set_by', 'why', 'evidence', 'locked', 'at', 'params')})
              for rid, e in plan['rules'].items()]
     settings = [dict(id=name, title=SETTINGS[name], **plan['settings'][name]) for name in SETTINGS]

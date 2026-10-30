@@ -161,7 +161,8 @@ class PlanTest(TierFixture):
         env = dict(os.environ, HOME=str(self.home))
         run = lambda *args: subprocess.run([sys.executable, str(ROOT / 'scripts/service.py'), 'target', *args],
                                            capture_output=True, text=True, env=env)
-        self.assertEqual(run('40').returncode, 0)
+        self.assertEqual(run('40').returncode, 2, 'a number alone is neither a reason nor the user\'s words')
+        self.assertEqual(run('40', '--by', 'user', '--words', '留 40 GB 就行').returncode, 0)
         shown = run()
         self.assertEqual(shown.returncode, 0, shown.stderr)
         body = json.loads(shown.stdout)

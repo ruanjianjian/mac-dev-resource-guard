@@ -28,10 +28,11 @@
 | AC-02 | [核] | 用户在「帮你管着」里 | 改空间目标或某个开关 | 自动记一条用户的决定，写明从什么改成什么 | CLI后端、mac原生 | ✅ | auto: test_agent_plan.CommandTest.test_a_change_in_the_panel_is_the_users（走看板后端改目标 60 GB） |
 | AC-03 | [核] | 用户在对话里说了一个取舍 | agent 运行 `resource-guard-service memory add --kind decision --words "原话"` | 记一条用户的决定，原话原样保存；agent 自己学到的用 `--kind lesson` 记教训 | CLI后端 | ✅ | auto: test_agent_plan.CommandTest.test_the_agent_reads_and_changes_the_plan_with_commands、MemoryTest.test_decisions_and_lessons_only_with_words_or_a_note |
 | AC-04 | [边] | agent 想记一条 | 种类不是「决定」或「教训」，或没写关于什么，或原话和说明都没有 | 拒绝，说明缺什么 | CLI后端 | ✅ | auto: MemoryTest.test_decisions_and_lessons_only_with_words_or_a_note |
-| AC-05 | [核] | 有记忆 | agent 运行 `resource-guard-service memory`（可按关于什么、最近几条筛） | 按时间顺序列出，每条有编号，改计划时可以引用编号作依据 | CLI后端 | ✅ | auto: 同 AC-03 |
+| AC-05 | [核] | 有记忆 | agent 运行 `resource-guard-service memory`（可按关于什么、最近几条筛） | 按时间顺序列出，每条有编号，改计划时可以引用编号作依据 | CLI后端 | ✅ | auto: 同 AC-03；auto: ReviewFindingsTest.test_4_overlapping_writers_lose_nothing_and_memories_get_their_own_ids、test_10_a_readable_but_wrong_plan_file_degrades_entry_by_entry |
 
 ## 变更记录
 
 | ID | 日期 | 变更 | 类型 |
 |---|---|---|---|
 | CH-01 | 2026-10-30 | 新建（RAW-01、RAW-03、RAW-04） | [需求变更] |
+| CH-02 | 2026-10-30 | Codex 独立评审 CR-01（2026-10-30）查出，均先写测试复现再修：后台和 agent 同时写计划、记忆时一次只让一个写，改动不丢、记忆编号不重复；记忆文件里的坏行跳过（AC-03、AC-05） | [缺陷] |
