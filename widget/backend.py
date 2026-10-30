@@ -220,9 +220,17 @@ SUGGESTION_TITLES = {'caches': '共享构建缓存', 'clean': '自动清理', 'e
 
 
 def gb(value):
+    """Sizes the way the panel says them (design 文案): 27 GB, 4.2 GB, 18 MB, 不到 1 MB — never 「0 GB」."""
     if value is None:
         return '读不到'
-    return '{:.1f} TB'.format(value / 1099511627776) if value >= 1099511627776 else '{:.0f} GB'.format(value / 1073741824)
+    gib, mib = value / 1073741824, value / 1048576
+    if gib >= 1024:
+        return '{:.1f} TB'.format(gib / 1024)
+    if gib >= 10:
+        return '{:.0f} GB'.format(gib)
+    if gib >= 1:
+        return '{:.1f} GB'.format(gib)
+    return '{:.0f} MB'.format(mib) if mib >= 1 else '不到 1 MB'
 
 
 def short(home, path):
@@ -817,7 +825,8 @@ class Adapter:
             in_use = '刚有 {} 连上，没关'.format('、'.join(result.get('attached') or []) or '开发工具')
             rows.append(dict(id=key, title=result.get('name') or udid, category='执行结果', bytes=None, eligible=False, command=None,
                              detail='', outcome='已关掉' if result.get('stopped') else '没关',
-                             reason={'simulator_in_use': in_use, 'already_shut_down': '已经关了'}.get(result.get('reason'), result.get('reason', ''))))
+                             reason={'simulator_in_use': in_use, 'already_shut_down': '已经关了',
+                                     'simulator_shut_down': '已关掉，数据都在'}.get(result.get('reason'), result.get('reason', ''))))
         done = sum(r['outcome'] == '已关掉' for r in rows)
         # The memory page shows only this line, so each one not closed is named here with its reason.
         kept = ['{}（{}）'.format(r['title'], r['reason']) for r in rows if r['outcome'] != '已关掉']
