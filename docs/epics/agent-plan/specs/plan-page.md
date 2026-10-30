@@ -35,10 +35,11 @@
 | AC-04 | [核] | 想手动开关某一项 | 点「高级 ›」 | 进原来的五行设置页（目标、共享构建缓存、自动清理、外接盘、自动更新），标题「高级」，返回到「帮你管着」 | mac原生 | ✅ | ui: one-click-evidence/plan-page/3-advanced.png |
 | AC-05 | [核] | 在计划页上 | 点某条规则或设置旁的锁 | 锁住（或解锁），记一条你的决定（来源是看板）；锁住后 agent 改不了它；「先别动」的行不能锁（本来就只有你能拿掉） | CLI后端、mac原生 | ✅ | auto: PlanPageTest.test_a_lock_clicked_in_the_panel_is_the_users_decision |
 | AC-06 | [核] | 计划已定稿 | 看计划页 | 顶部卡写「计划已定稿」和「定稿于几号 · 出现新东西时才再改」 | CLI后端、mac原生 | ✅ | auto: PlanPageTest.test_a_settled_plan_says_so |
-| AC-07 | [核] | 在计划页上 | 点「交给 agent ›」 | 和计划页原来的「交给 agent」一样：要说的话复制好、打开 agent | mac原生 | ✅ | 实现：沿用 CoverStore.handOff（agent-handoff AC-04） |
+| AC-07 | [核] | 在计划页上 | 点「交给 agent ›」 | 和计划页原来的「交给 agent」一样：agent App 打开新对话，要说的话已经填好，按回车发送（agent-handoff AC-04） | mac原生 | ✅ | 实现：沿用 CoverStore.handOff（agent-handoff AC-04） |
 
 ## 变更记录
 
 | ID | 日期 | 变更 | 类型 |
 |---|---|---|---|
 | CH-01 | 2026-10-30 | 新建（RAW-01、RAW-10、RAW-15、RAW-16），按视觉稿 B 实现 | [需求变更] |
+| CH-02 | 2026-10-30 | 「交给 agent ›」改为打开新对话、话已填好，不再复制粘贴（agent-handoff CH-04） | [需求变更] |

@@ -10,6 +10,7 @@ import sys
 import time
 import unittest
 import unittest.mock
+import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_tiers import DAY, ROOT, TierFixture, age, git
@@ -283,6 +284,22 @@ class BackendPlanTest(TierFixture):
         self.assertTrue(reply['message'].startswith('全做完能到'))
         handoff = self.backend('plan-handoff')
         self.assertIn('resource-guard-service plan --json', handoff['message'])
+
+    def test_handoff_opens_a_new_conversation_with_the_words_typed_in(self):
+        """agent-handoff AC-04: the link carries the words exactly; the App fills them in and the user only presses Return."""
+        (self.home / '.resource-dashboard-fixture').touch()
+        (self.home / 'Applications/Codex.app').mkdir(parents=True)
+        tiers_config.update(self.home, dict(agent_app='codex'))
+        handoff = self.backend('plan-handoff')
+        link = urllib.parse.urlsplit(handoff['rows'][0]['command'])
+        self.assertEqual((link.scheme, link.netloc, link.path), ('codex', 'threads', '/new'))
+        self.assertEqual(urllib.parse.parse_qs(link.query)['prompt'], [handoff['message']])
+        sys.path.insert(0, str(ROOT / 'widget'))
+        import backend
+        link = urllib.parse.urlsplit(backend.handoff_link('claude', space_plan.AGENT_PROMPT))
+        self.assertEqual((link.scheme, link.netloc, link.path), ('claude', 'code', '/new'))
+        self.assertEqual(urllib.parse.parse_qs(link.query)['q'], [space_plan.AGENT_PROMPT])
+        self.assertLess(len(space_plan.AGENT_PROMPT), 14000)    # Claude cuts the words off after about 14,000 characters
 
 
 if __name__ == '__main__':

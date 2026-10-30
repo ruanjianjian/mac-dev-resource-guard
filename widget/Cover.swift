@@ -173,15 +173,21 @@ final class CoverStore: ObservableObject {
     func gapGB(_ free: Double?) -> Double { max(0, (targetGB ?? 0) - (free ?? 0)) }
     func planRows(_ category: String) -> [ResourceRow] { plan?.rows?.filter { $0.category == category } ?? [] }
 
-    /// agent-handoff AC-04: the words for the agent go to the clipboard, and the agent App opens.
+    /// agent-handoff AC-04: a new conversation opens in the agent App with the words already typed in.
+    /// The clipboard is only the fallback when there is no agent App or it cannot take the link.
     func handOff() {
         DispatchQueue.global(qos: .utility).async {
             let reply = try? DashboardActions.call("plan-handoff")
             DispatchQueue.main.async {
                 guard let reply else { self.message = "没连上后台，请稍后再试。"; return }
+                let app = reply.rows?.first.flatMap { $0.eligible ? $0 : nil }
+                if let app, let link = app.command.flatMap(URL.init(string:)), NSWorkspace.shared.open(link) {
+                    self.message = "已在 \(app.title) 里填好要说的话，按回车发送。"
+                    return
+                }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(reply.message, forType: .string)
-                if let app = reply.rows?.first, app.eligible {
+                if let app {
                     NSWorkspace.shared.open(URL(fileURLWithPath: app.detail))
                     self.message = "要说的话已复制，在 \(app.title) 里粘贴发送即可。"
                 } else {

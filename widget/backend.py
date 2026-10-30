@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from setup_status import engine_root, tool_path, run_setup, status as setup_status, inventory
@@ -409,6 +410,15 @@ def agent_app(preferred):
     return next((a for a in found if a[0] == preferred), found[0] if found else None)
 
 
+def handoff_link(kind, words):
+    """agent-handoff AC-04: a new conversation in the agent App with the words already in the box; the user presses Return.
+
+    Both Apps only prefill these links, never send them.
+    """
+    base = {'claude': 'claude://code/new?q=', 'codex': 'codex://threads/new?prompt='}[kind]
+    return base + urllib.parse.quote(words, safe='')
+
+
 def app_version():
     """The installed app's version; 'dev' when run from the source tree."""
     info = Path(__file__).resolve().parent.parent / 'Info.plist'
@@ -711,7 +721,8 @@ class Adapter:
             name = {'claude': 'Claude', 'codex': 'ChatGPT（Codex）'}.get(app[0], '你的 agent') if app else '你的 agent'
             return dict(status='ok' if app else 'missing', message=space_plan.AGENT_PROMPT,
                         rows=[dict(id='app', title=name, detail=app[1] if app else '', category='agent', bytes=None,
-                                   eligible=bool(app), reason='', command=None, outcome=None)])
+                                   eligible=bool(app), reason='', outcome=None,
+                                   command=handoff_link(app[0], space_plan.AGENT_PROMPT) if app else None)])
         if verb == 'target':
             before = {'target': service.setting_now(self.home, 'target')}
             service.set_target(self.home, value)
