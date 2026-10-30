@@ -422,14 +422,14 @@ class LastAutoTest(TierFixture):
         now = time.time()
         auto_tier.append_log(self.home, dict(at=now - 600, actions=[dict(result='done', bytes=3 << 30), dict(result='failed', bytes=0)]))
         auto_tier.append_log(self.home, dict(at=now - 60, actions=[]))
-        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 3 GB'.format(backend.when(now - 600, now)))
+        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 3.0 GB'.format(backend.when(now - 600, now)))
         self.assertTrue(backend.when(now - 600, now).startswith(('今天', '昨天')))
         # The safe cleanup's deletions count only when they free the internal disk.
         state = self.home / '.local/state/dev-resource-guard'
         deleted = [dict(path='/Volumes/T9/dev-cache/DerivedData/X/Build/Intermediates.noindex', directory_accounting_bytes=5 << 30),
                    dict(path=str(self.home / 'slots/a/Build/Intermediates.noindex'), directory_accounting_bytes=1 << 30)]
         (state / 'automatic-storage.json').write_text(json.dumps(dict(at=now - 30, results=[dict(result=dict(deleted=deleted))])))
-        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 1 GB'.format(backend.when(now - 30, now)))
+        self.assertEqual(backend.last_auto(self.home, now), '最近一次：{} 自动腾出 1.0 GB'.format(backend.when(now - 30, now)))
 
 
 class MemoryPageTest(TierFixture):

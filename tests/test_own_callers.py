@@ -72,5 +72,14 @@ class CloseMessageTest(unittest.TestCase):
         self.assertNotIn('原因见上', reply['message'])
 
 
+
+class SizeWordsTest(unittest.TestCase):
+    def test_sizes_read_like_the_panel_never_zero_gb(self):
+        sys.path.insert(0, str(ROOT / 'widget'))
+        import backend
+        G = 1 << 30
+        self.assertEqual([backend.gb(v) for v in (int(1.2 * G), 27 * G, 18 << 20, 1000, 2048 * G, None)],
+                         ['1.2 GB', '27 GB', '18 MB', '不到 1 MB', '2.0 TB', '读不到'])
+
 if __name__ == '__main__':
     unittest.main()
