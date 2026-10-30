@@ -33,6 +33,12 @@ def simulator_inspect(run=subprocess.run, now=None):
     children = {}
     for pid, ppid, _, _ in procs:
         children.setdefault(ppid, []).append(pid)
+    # The check itself and whatever started it (the panel's backend, an agent's shell) name this simulator in their
+    # own command line; they are not a dev tool using it (10-30: 「关掉所选」 always answered 「刚有开发工具连上」).
+    mine, seen, parents = set(), os.getpid(), {pid: ppid for pid, ppid, _, _ in procs}
+    while seen and seen not in mine and seen != 1:
+        mine.add(seen)
+        seen = parents.get(seen)
     rss = {pid: kib for pid, _, kib, _ in procs}
     rows = []
     for device in devices:
@@ -44,7 +50,7 @@ def simulator_inspect(run=subprocess.run, now=None):
                 tree.add(pid)
                 todo += children.get(pid, [])
         tools = sorted({Path(cmd.split()[0]).name for pid, _, _, cmd in procs
-                        if udid and udid in cmd and pid not in tree and 'CoreSimulator' not in cmd})
+                        if udid and udid in cmd and pid not in tree and pid not in mine and 'CoreSimulator' not in cmd})
         rows.append(dict(id=udid, device_id=udid, kind='ios-sim', name=device.get('name', udid), pids=sorted(tree),
                          rss_kib=sum(rss.get(pid, 0) for pid in tree), attached=tools, eligible=False,
                          reason='simulator_in_use' if tools else 'simulator_not_attached', _observed_at=now))
@@ -58,10 +64,11 @@ def shutdown_idle_simulator(udid, run=subprocess.run):
     if row is None:
         return {'stopped': True, 'accepted': False, 'reason': 'already_shut_down'}
     if row['reason'] != 'simulator_not_attached':
-        return {'stopped': False, 'accepted': False, 'reason': 'simulator_in_use'}
+        return {'stopped': False, 'accepted': False, 'reason': 'simulator_in_use', 'name': row['name'], 'attached': row['attached']}
     out = run(['/usr/bin/xcrun', 'simctl', 'shutdown', udid], capture_output=True, text=True, timeout=60)
     if out.returncode:
-        return {'stopped': False, 'accepted': False, 'reason': (out.stderr or 'simctl shutdown failed').strip()[-200:]}
+        return {'stopped': False, 'accepted': False, 'name': row['name'],
+                'reason': (out.stderr or 'simctl shutdown failed').strip()[-200:]}
     return {'stopped': True, 'accepted': True, 'reason': 'simulator_shut_down', 'rss_kib': row['rss_kib'], 'name': row['name']}
 
 

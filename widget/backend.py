@@ -814,12 +814,15 @@ class Adapter:
             udid = key.split(':', 1)[-1]
             result = {'stopped': False, 'reason': '隔离测试不操作真实模拟器'} if self.isolated else memory_external.shutdown_idle_simulator(udid)
             freed += (result.get('rss_kib') or 0) * 1024 if result.get('accepted') else 0
+            in_use = '刚有 {} 连上，没关'.format('、'.join(result.get('attached') or []) or '开发工具')
             rows.append(dict(id=key, title=result.get('name') or udid, category='执行结果', bytes=None, eligible=False, command=None,
                              detail='', outcome='已关掉' if result.get('stopped') else '没关',
-                             reason={'simulator_in_use': '刚有开发工具连上，没关', 'already_shut_down': '已经关了'}.get(result.get('reason'), result.get('reason', ''))))
+                             reason={'simulator_in_use': in_use, 'already_shut_down': '已经关了'}.get(result.get('reason'), result.get('reason', ''))))
         done = sum(r['outcome'] == '已关掉' for r in rows)
+        # The memory page shows only this line, so each one not closed is named here with its reason.
+        kept = ['{}（{}）'.format(r['title'], r['reason']) for r in rows if r['outcome'] != '已关掉']
         return dict(status='ok', rows=rows, message='已关掉 {} 台{}'.format(done, '，腾出约 ' + gb(freed) if freed else '') + (
-            '；{} 台没关，原因见上。'.format(len(rows) - done) if done < len(rows) else '。'))
+            '；没关：' + '、'.join(kept) + '。' if kept else '。'))
 
     def run(self, action, token=None, path=None, ids=None):
         family, verb = action.split('-', 1)
