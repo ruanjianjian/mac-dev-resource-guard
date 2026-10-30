@@ -154,6 +154,19 @@ def remove_tree_at(parent_fd, name, expected=None):
     os.rmdir(name, dir_fd=parent_fd)
 
 
+def callers(pid, parents):
+    """This process and every process above it (the shell or app that started the check). Their command lines
+    carry the very ids and paths being checked, so they must not count as something using them; what they have
+    open still does."""
+    chain, seen = set(), pid
+    while seen and seen not in chain:
+        chain.add(seen)
+        seen = parents.get(seen)
+        if seen in (None, 0, 1):
+            break
+    return chain
+
+
 @dataclasses.dataclass
 class Activity:
     commands: list = dataclasses.field(default_factory=list)
@@ -169,9 +182,11 @@ class Activity:
             p = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='], capture_output=True, text=True, errors='surrogateescape', timeout=20)
             if p.returncode:
                 raise RuntimeError('ps failed')
-            for line in p.stdout.splitlines():
-                fields = line.strip().split(None, 2)
-                if len(fields) == 3 and fields[0].isdigit() and int(fields[0]) != own:
+            table = [f for f in (line.strip().split(None, 2) for line in p.stdout.splitlines())
+                     if len(f) == 3 and f[0].isdigit() and f[1].isdigit()]
+            mine = callers(own, {int(f[0]): int(f[1]) for f in table})
+            for fields in table:
+                if int(fields[0]) not in mine:
                     result.commands.append((int(fields[0]), fields[2]))
         except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
             result.errors.append(type(e).__name__ + ': process inventory unavailable')
