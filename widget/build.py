@@ -33,7 +33,7 @@ for folder in ('runtime', 'scripts', 'references', 'widget', 'docs', 'tests'):
     shutil.copytree(source.parent/folder, engine/folder, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
 shutil.copy2(source.parent/'SKILL.md', engine/'SKILL.md')
 shutil.copy2(source.parent/'README.md', engine/'README.md')
-(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'io.github.ruanjianjian.mac-dev-resource-guard.widget','CFBundleName':'资源看板','CFBundleDisplayName':'资源看板','CFBundleExecutable':'ResourceDashboard','CFBundlePackageType':'APPL','CFBundleIconFile':'AppIcon','CFBundleShortVersionString':'1.7.7','CFBundleVersion':'18','NSDownloadsFolderUsageDescription':'查找下载文件夹里久未用的大安装包；删除前会先问你。','NSRemovableVolumesUsageDescription':'把开发缓存和闲置任务目录放到你选的外接盘上。','NSAppleEventsUsageDescription':'你确认清空废纸篓时，请访达来清空。','LSMinimumSystemVersion':'13.0','LSUIElement':True,'NSHighResolutionCapable':True}))
+(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'io.github.ruanjianjian.mac-dev-resource-guard.widget','CFBundleName':'资源看板','CFBundleDisplayName':'资源看板','CFBundleExecutable':'ResourceDashboard','CFBundlePackageType':'APPL','CFBundleIconFile':'AppIcon','CFBundleShortVersionString':'1.8.0','CFBundleVersion':'19','NSDownloadsFolderUsageDescription':'查找下载文件夹里久未用的大安装包；删除前会先问你。','NSRemovableVolumesUsageDescription':'把开发缓存和闲置任务目录放到你选的外接盘上。','NSAppleEventsUsageDescription':'你确认清空废纸篓时，请访达来清空。','LSMinimumSystemVersion':'13.0','LSUIElement':True,'NSHighResolutionCapable':True}))
 # The same identity on every build, so macOS keeps the user's permissions across upgrades.
 import local_signing
 local_signing.sign(app,Path.home())
