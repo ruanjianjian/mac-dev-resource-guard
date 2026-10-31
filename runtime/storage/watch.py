@@ -190,8 +190,13 @@ def leftovers(state, found, table, kill, sleep, now, managed):
     return stopped
 
 
+FRIENDLY = {'claude': 'Claude Code', 'codex': 'Codex 后台', 'node': 'Node 程序', 'Python': 'Python 程序'}
+
+
 def short_name(command):
     """What people would call it: the App's name, or the tool's (tsc, swift-frontend…)."""
+    if 'CoreSimulator' in command or 'SimulatorRuntime' in command or 'launchd_sim' in command:
+        return 'iOS 模拟器'
     app = re.search(r'/([^/]+)\.app/Contents/', command)
     if app:
         return app.group(1)
@@ -199,7 +204,7 @@ def short_name(command):
     if tool:
         return tool.group(1)
     first = command.split()[0] if command.split() else command
-    return Path(first).name
+    return FRIENDLY.get(Path(first).name, Path(first).name)
 
 
 def top_users(table, limit=3):
