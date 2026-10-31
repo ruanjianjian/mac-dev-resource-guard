@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a local unsigned macOS app with a fixed Swift module cache."""
 import argparse
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -16,7 +17,11 @@ source=Path(__file__).resolve().parent
 cache=Path.home()/'Library/Caches/dev-resource-guard/widget-swift-modules'
 cache.mkdir(parents=True,exist_ok=True)
 (app/'Contents/MacOS').mkdir(parents=True)
-subprocess.run(['xcrun','swiftc','-O','-module-cache-path',str(cache),'-target',subprocess.check_output(['uname','-m'],text=True).strip()+'-apple-macosx13.0',*[str(p) for p in sorted(source.glob('*.swift'))],'-o',str(app/'Contents/MacOS/ResourceDashboard')],check=True)
+# The SDK must come from the same developer folder as swiftc. /usr/bin/python3 (how the installer runs) hands its
+# children SDKROOT=the Command Line Tools SDK; with Xcode's swiftc that SDK's SwiftUI macros have no plugin and the
+# build fails (10-31, Xcode 27.2 beside newer Command Line Tools). `--sdk macosx` picks the matching one.
+env={k:v for k,v in os.environ.items() if k not in ('SDKROOT','CPATH','LIBRARY_PATH')}
+subprocess.run(['xcrun','--sdk','macosx','swiftc','-O','-module-cache-path',str(cache),'-target',subprocess.check_output(['uname','-m'],text=True).strip()+'-apple-macosx13.0',*[str(p) for p in sorted(source.glob('*.swift'))],'-o',str(app/'Contents/MacOS/ResourceDashboard')],check=True,env=env)
 (app/'Contents/Resources').mkdir(parents=True)
 # 小留, drawn by the app's own code (widget/Logo.swift); a missing icon never blocks the install.
 with tempfile.TemporaryDirectory() as scratch:
