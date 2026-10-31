@@ -512,5 +512,60 @@ class EntryTest(AskFixture):
         self.assertIn('还有 1 项等你确认', last['brief'])
 
 
+
+class SlowMacTest(AskFixture):
+    """10-31 18:56: the first run the agent started by itself died on a 60-second `git log` while memory was critical."""
+    def collect(self, task, **kwargs):
+        return E.collect(self.home, self.cfg(), self.settings, 'memory', NOW, activity=Activity(), simctl=self.sims(),
+                         table={}, cwd_of=lambda p: {}, prs=lambda r: None, report={'tasks': [{'path': str(task), 'bytes': GIB}]},
+                         free=60 * GIB, **kwargs)
+
+    def test_a_repository_too_slow_to_read_reads_as_unknown_not_a_crash(self):
+        task = self.worktree_task('slow-task', 0)
+        def stuck(repo, *args, timeout=60):
+            raise subprocess.TimeoutExpired(['git'] + list(args), timeout)
+        with patch.object(E.T, 'git', side_effect=stuck):
+            material = self.collect(task)
+        [entry] = [t for t in material['tasks'] if t['path'] == str(task)]
+        [repo] = entry['repos']
+        self.assertIn('读不出状态', repo['unsaved'])     # unknown counts as unsaved: nothing is moved or deleted on it
+        self.assertIsNotNone(entry['idle_days'])         # the folder's own dates still say roughly when
+        json.dumps(material)
+
+    def test_out_of_time_the_rest_is_marked_not_looked_at(self):
+        task = self.worktree_task('late-task', 0)
+        material = self.collect(task, budget=0)
+        [entry] = [t for t in material['tasks'] if t['path'] == str(task)]
+        self.assertIn('没来得及查', entry['repos'][0]['unsaved'])
+
+    def test_no_process_list_means_no_leftovers_listed(self):
+        task = self.worktree_task('any-task', 0)
+        with patch.object(E, 'orphans', side_effect=subprocess.TimeoutExpired(['ps'], 20)):
+            material = self.collect(task)
+        self.assertEqual(material['orphans'], [])
+
+    def test_a_run_the_user_asked_for_does_not_count_toward_the_daily_limit(self):
+        state = {}
+        E.mark_fired(state, 'asked', 60 * GIB, CRITICAL, NOW)
+        self.assertEqual(state.get('starts', []), [])
+        E.mark_fired(state, 'memory', 60 * GIB, CRITICAL, NOW)
+        self.assertEqual(state['starts'], [NOW])
+
+
+class WakeOrderTest(AskFixture):
+    def test_the_emergency_check_comes_first_even_while_a_slow_wake_holds_the_lock(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        import service
+        with patch.object(service, 'emergency_tick', return_value={'reason': 'memory'}) as check, \
+                patch.object(service, 'auto_update', return_value='skipped'):
+            with service.operation_lock(self.home, 'periodic-storage'):   # a slow wake is still going
+                result = service.tick_storage(self.home, NOW)
+            self.assertEqual((result['status'], result['emergency']), ('busy', {'reason': 'memory'}))
+            check.assert_called_once()
+            (service.state_root(self.home) / 'storage-paused').touch()
+            service.tick_storage(self.home, NOW)
+            check.assert_called_once()   # paused maintenance pauses this too
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -314,11 +314,14 @@ def tick_storage(home, now=None):
     """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace, then (with the lock
     released, so the installer can take it) a once-a-day look for a new release."""
     now = time.time() if now is None else now
+    # emergency-agent: first, and outside the storage lock, so a slow wake (as on a Mac that is swapping) never
+    # holds up the one check that matters most then.
+    emergency_result = None if (state_root(home)/'storage-paused').exists() else emergency_tick(home, now)
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(operation_lock(home, 'periodic-storage'))
         except Busy:
-            return {'status': 'busy', 'results': []}   # the previous wake is still working (e.g. a long move)
+            return {'status': 'busy', 'results': [], 'emergency': emergency_result}   # the previous wake is still working
         if (state_root(home)/'storage-paused').exists():
             receipt = {'status': 'paused', 'results': []}
         else:
@@ -330,17 +333,21 @@ def tick_storage(home, now=None):
             if not (state_root(home)/'storage-paused').exists():
                 tick_caches(home, now)
                 tick_tiers(home, now)
-                receipt['emergency'] = emergency_tick(home, now)
+    receipt['emergency'] = emergency_result
     receipt['update'] = auto_update(home, now)
     return receipt
 
 
 def emergency_tick(home, now):
-    """emergency-agent: start the user's agent by itself when this Mac is about to choke. Never fails the wake."""
+    """emergency-agent: start the user's agent by itself when this Mac is about to choke. Never fails the wake.
+    Its own lock: two wakes at once never start two agents."""
     try:
         settings = configure(home)
         cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
-        return emergency.tick(home, cfg, settings, now)
+        with operation_lock(home, 'emergency'):
+            return emergency.tick(home, cfg, settings, now)
+    except Busy:
+        return None
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         atomic_json(state_root(home)/'emergency-error.json', dict(at=now, error=str(error) or type(error).__name__))
         return None
