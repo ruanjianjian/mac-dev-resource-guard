@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～22（10-31 内置盘跌到 4 GB 那次）。
+原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～24（10-31 内置盘跌到 4 GB、随后内存吃紧那次）。
 
 ## 意图
 
@@ -35,16 +35,16 @@
 
 | ID | 级 | Given | When | Then | 落点 | 状态 | 证据 |
 |---|---|---|---|---|---|---|---|
-| AC-01 | [核] | 内置盘刚跌破危险线 | 后台下一轮 | 自己启动一次 agent；同一次下跌里，再跌破 10 GB、5 GB 时各再启动一次；回到危险线以上后重新计 | CLI后端 | ⬜ | auto: test_emergency.TriggerTest.test_each_deeper_drop_starts_the_agent_once |
-| AC-02 | [核] | 内存压力到「严重」，或「警告」连续 30 分钟 | 后台下一轮 | 自己启动一次 agent；之后 6 小时内不因为内存再启动 | CLI后端 | ⬜ | auto: TriggerTest.test_memory_pressure_starts_the_agent_after_half_an_hour_of_warning |
-| AC-03 | [边] | 上一次 agent 还没结束，或 24 小时内已经启动过 4 次 | 又到告急 | 不再启动 | CLI后端 | ⬜ | auto: TriggerTest.test_no_second_run_while_one_is_going_and_four_a_day_at_most |
-| AC-04 | [核] | 告急 | 启动 agent | 用 `agent-app` 记下的那个；没记就先 Claude、后 Codex。只用能在后台跑的：Claude 要 Claude Code 登录过，Codex 要已登录，Codex 的这次对话在 Codex 里看得到。都跑不了就退回成「交给 agent」的通知 | CLI后端 | ⬜ | auto: RunnerTest.test_the_recorded_agent_first_then_the_other_then_the_notice、RunnerTest.test_claude_runs_with_only_the_emergency_commands、RunnerTest.test_codex_starts_a_visible_thread_in_the_run_folder；ui: Codex 桌面 #codex-desktop 能看到「资源看板告急处理」对话（见变更记录 CH-01 的实测） |
-| AC-05 | [核] | agent 被叫来 | 运行 `rgs emergency show` | 拿到告急材料：<br>• 为什么叫它，硬盘和内存的现状；<br>• 最大的几样东西和证据：模拟器（多大、多久没开、开着没、哪个任务的）、任务目录（多大、改动推没推、PR 合没合、谁开着它）、没人管的残留后台（放了多久、占多少内存、开在哪）；<br>• 用户以前的决定和教训、现在的规则；<br>• 要做的步骤 | CLI后端 | ⬜ | auto: MaterialTest.test_the_material_holds_the_evidence_and_the_users_choices |
-| AC-06 | [核] | agent 判断某个残留后台没人管，或某个任务该挪到外接盘 | `rgs emergency stop <pid> --why` 或 `rgs emergency move <路径> --why` | agent 结束后，后台先复核再做：<br>• 残留后台：还是同一个进程、父进程已退出、放了 24 小时以上、这段时间几乎没用 CPU，才连同子进程一起关掉；<br>• 任务：没人在用、改动都推了、外接盘插着且够大，才挪过去，不受「闲置满 3 天」限制；<br>不满足就跳过，并写明原因 | CLI后端 | ⬜ | auto: ApplyTest.test_an_orphan_is_stopped_only_if_it_is_still_the_same_idle_orphan、ApplyTest.test_a_task_moves_without_the_idle_days_but_never_with_unsaved_work |
-| AC-07 | [核] | agent 判断某个模拟器或任务该删 | `rgs emergency ask <id> --why` | agent 结束后放进「等你确认」，理由写「agent：…」。再发一条通知「agent 处理了告急」，写明做了什么、还有几项等你确认、约多少 GB；点开就是「等你确认」 | CLI后端、mac原生 | ⬜ | auto: ApplyTest.test_asks_land_in_the_pending_list_with_one_notice、ApplyTest.test_agent_asks_survive_the_next_refresh |
-| AC-08 | [核] | 用户确认了 agent 列的一项 | 执行前复核 | 只按安全底线复核：没人在用、没被保护、改动都推了，模拟器已关机。不套「关机满 7 天」「闲置满 7 天」。任务里不在代码仓库里的文件（笔记、截图、日志）挪到外接盘的「收尾的任务」里；外接盘没插就跳过，不删 | CLI后端 | ⬜ | auto: ConfirmTest.test_a_confirmed_agent_ask_is_rechecked_against_the_floor_only、ConfirmTest.test_notes_beside_the_code_go_to_the_drive_not_the_bin |
-| AC-09 | [核] | 用户以前确认或忽略过 agent 列的项，或在对话里说过偏好 | 下次告急 | 这些决定都在告急材料里；agent 照它们出单 | CLI后端 | ⬜ | auto: MaterialTest.test_the_material_holds_the_evidence_and_the_users_choices |
-| AC-10 | [边] | agent 处理完，或 30 分钟还没结束 | `rgs emergency done --summary`，或到时间 | 记下这次告急的结论；到时间就停掉这次运行，agent 已经记下的决定照样处理 | CLI后端 | ⬜ | auto: RunnerTest.test_a_run_that_overstays_is_stopped_and_its_decisions_still_apply |
+| AC-01 | [核] | 内置盘刚跌破危险线 | 后台下一轮 | 自己启动一次 agent；同一次下跌里，再跌破 10 GB、5 GB 时各再启动一次；回到危险线以上后重新计 | CLI后端 | ✅ | auto: test_emergency.TriggerTest.test_each_deeper_drop_starts_the_agent_once |
+| AC-02 | [核] | 内存压力到「严重」，或「警告」连续 30 分钟 | 后台下一轮 | 自己启动一次 agent；之后 6 小时内不因为内存再启动 | CLI后端 | ✅ | auto: TriggerTest.test_memory_pressure_starts_the_agent_after_half_an_hour_of_warning |
+| AC-03 | [边] | 上一次 agent 还没结束，或 24 小时内已经启动过 4 次 | 又到告急 | 不再启动 | CLI后端 | ✅ | auto: TriggerTest.test_no_second_run_while_one_is_going_and_four_a_day_at_most |
+| AC-04 | [核] | 告急 | 启动 agent | 用 `agent-app` 记下的那个；没记就先 Claude、后 Codex。只用能在后台跑的：Claude 要 Claude Code 登录过，Codex 要已登录，Codex 的这次对话在 Codex 里看得到。都跑不了就退回成「交给 agent」的通知 | CLI后端 | ✅ | auto: RunnerTest.test_the_recorded_agent_first_then_the_other_then_the_notice、RunnerTest.test_claude_runs_with_only_the_emergency_commands、RunnerTest.test_codex_starts_a_visible_thread_in_the_run_folder；实测（10-31 17:39，本机）：Codex 跑完一轮，Codex 的会话索引里这条对话名叫「资源看板告急处理」、来源标记为 user，与桌面里看得到的 Companion 对话相同（桌面侧栏在后台未刷新，没把 Codex 拉到前台）；Claude 这台没登录过 Claude Code，按规则改用 Codex |
+| AC-05 | [核] | agent 被叫来 | 运行 `rgs emergency show` | 拿到告急材料：<br>• 为什么叫它，硬盘和内存的现状；<br>• 最大的几样东西和证据：模拟器（多大、多久没开、开着没、哪个任务的）、任务目录（多大、改动推没推、PR 合没合、谁开着它）、没人管的残留后台（放了多久、占多少内存、开在哪）；<br>• 用户以前的决定和教训、现在的规则；<br>• 要做的步骤 | CLI后端 | ✅ | auto: MaterialTest.test_the_material_holds_the_evidence_and_the_users_choices；实测：材料几秒内存下，列出 9 个残留后台、9 个内置盘上的任务、21 台模拟器 |
+| AC-06 | [核] | agent 判断某个残留后台没人管，或某个任务该挪到外接盘 | `rgs emergency stop <pid> --why` 或 `rgs emergency move <路径> --why` | agent 结束后，后台先复核再做：<br>• 残留后台：还是同一个进程、父进程已退出、不是 launchd 管着的服务、放了 24 小时以上、这段时间几乎没用 CPU，才连同子进程一起关掉；<br>• 任务：没人在用、改动都推了、外接盘插着且够大，才挪过去，不受「闲置满 3 天」限制；<br>不满足就跳过，并写明原因 | CLI后端 | ✅ | auto: ApplyTest.test_an_orphan_is_stopped_only_if_it_is_still_the_same_idle_orphan、ApplyTest.test_a_task_moves_without_the_idle_days_but_never_with_unsaved_work；实测（10-31 17:40）：agent 列了 3 个 10-29 的 Codex 后台，后台复核后关掉，`ps` 核实已不在 |
+| AC-07 | [核] | agent 判断某个模拟器或任务该删 | `rgs emergency ask <id> --why` | agent 结束后放进「等你确认」，理由写「agent：…」。再发一条通知「agent 处理了告急」，写明做了什么、还有几项等你确认、约多少 GB；点开就是「等你确认」 | CLI后端、mac原生 | ✅ | auto: ApplyTest.test_asks_land_in_the_pending_list_with_one_notice、ApplyTest.test_agent_asks_survive_the_next_refresh |
+| AC-08 | [核] | 用户确认了 agent 列的一项 | 执行前复核 | 只按安全底线复核：没人在用、没被保护、改动都推了，模拟器已关机。不套「关机满 7 天」「闲置满 7 天」。任务里不在代码仓库里的文件（笔记、截图、日志）挪到外接盘的「收尾的任务」里；外接盘没插就跳过，不删 | CLI后端 | ✅ | auto: ConfirmTest.test_a_confirmed_agent_ask_is_rechecked_against_the_floor_only、ConfirmTest.test_notes_beside_the_code_go_to_the_drive_not_the_bin |
+| AC-09 | [核] | 用户以前确认或忽略过 agent 列的项，或在对话里说过偏好 | 下次告急 | 这些决定都在告急材料里；agent 照它们出单 | CLI后端 | ✅ | auto: MaterialTest.test_the_material_holds_the_evidence_and_the_users_choices；实测：agent 引用了用户说过的「一块清理了吧」（m7）才关 10-29 的后台，开着的模拟器一台没列 |
+| AC-10 | [边] | agent 处理完，或 30 分钟还没结束 | `rgs emergency done --summary`，或到时间 | 记下这次告急的结论；到时间就停掉这次运行，agent 已经记下的决定照样处理 | CLI后端 | ✅ | auto: RunnerTest.test_a_run_that_overstays_is_stopped_and_its_decisions_still_apply、RunnerTest.test_a_run_that_breaks_clears_itself_and_hands_over |
 
 ## 变更记录
 
@@ -52,3 +52,4 @@
 |---|---|---|---|
 | CH-01 | 2026-10-31 | 新建（RAW-18～22）。推翻 10-30 决策卡 A01「后台不无人值守地跑 agent」：告急时自己启动，平时照旧 | [需求变更] |
 | CH-02 | 2026-10-31 | 实现时查明两件事：<br>• Claude 桌面 App 的登录不给后台的 Claude Code 用（后台跑会提示「Not logged in」），桌面的定时任务也只能由 agent 自己建，所以 Claude 要用户在终端登录一次；<br>• Codex 在沙盒里跑时只能往这次运行的目录写，所以 agent 的命令只记下决定，真正的动作由后台在 agent 结束后做（AC-06、AC-07） | [实现引入] |
+| CH-03 | 2026-10-31 | 本机真跑时发现并修好（RAW-23、RAW-24：Claude 卡，用户说「关掉」两个截屏流）：<br>• 材料里外接盘路径不是文字，第一轮写文件时崩了；现在只存文字，跑崩时立刻清掉这一轮、退回「交给 agent」的通知（AC-10）；<br>• 逐个 du 任务目录要 10 分钟，改用最近一次体检的大小，各仓库并行查（AC-05）；<br>• 父进程已退出、开了一两天的 `baguette stream` 截屏流也算残留后台；<br>• test-journal 的归档服务父进程也是 launchd，差点被当成残留，现在 launchd 管着的服务一律不算（AC-06） | [实现引入] |
