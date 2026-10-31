@@ -10,10 +10,13 @@ import time
 
 from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
+import auto_tier
 import spaces
 import tasks as T
 
 PENDING, REQUEST, ASK_STATE = 'pending.json', 'notify-request.json', 'ask-state.json'
+AGENT_ASK_DAYS = 3          # emergency-agent: an ask of the agent's nobody answered leaves the list after this
+CLOSED = 'closed-tasks'     # on the drive: what was left beside the code of a task closed at the agent's ask
 LOSES = {
     'simulator-delete': '上面装的 App 和登录状态',
     'simulator-shutdown': '当前画面和 App 运行状态',
@@ -271,10 +274,20 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
             continue
         state = old['state'] if old and old['state'] == 'failed' else 'pending'
         items[key] = dict(found, state=state, result=old.get('result') if old else None, updated=now)
+    listed = None
     for key in list(items):
         if key in fresh or items[key]['state'] == 'running':
             continue
         item = items[key]
+        if item.get('by') == 'agent' and now - item.get('at', now) < AGENT_ASK_DAYS * 86400:
+            # emergency-agent AC-07: the agent's own asks stay until answered, gone, or a few days old.
+            if listed is None:
+                listed = device_ids(simctl)
+            if item['kind'].startswith('simulator') and listed is not None and key.split(':', 1)[1] not in listed:
+                del items[key]
+            elif item['kind'] == 'task-delete' and not Path(key.split(':', 1)[1]).exists():
+                del items[key]
+            continue
         path = Path(key.split(':', 1)[1])
         # A moved task whose drive is unplugged stays listed but cannot run (ask AC-09).
         if item['kind'] == 'task-delete' and path.is_symlink() and not path.resolve().is_dir():
@@ -286,6 +299,65 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
     save(home, ASK_STATE, memory)
     save(home, PENDING, pending)
     return pending
+
+
+def device_ids(simctl):
+    try:
+        listing = json.loads(simctl(['list', 'devices', '--json']))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return None
+    return {d['udid'] for devices in listing.get('devices', {}).values() for d in devices}
+
+
+def agent_floor(home, cfg, item, activity, pins, simctl):
+    """emergency-agent AC-08: an ask of the agent's is rechecked against the safety floor only, not the rules'
+    waiting days. Returns (fresh fields, None) when it may go ahead, or (None, why not)."""
+    kind, target = item['kind'], item['id'].split(':', 1)[1]
+    if kind.startswith('simulator'):
+        try:
+            listing = json.loads(simctl(['list', 'devices', '--json']))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            return None, '这会儿读不到模拟器列表'
+        device = next((d for devices in listing.get('devices', {}).values() for d in devices if d['udid'] == target), None)
+        if device is None:
+            return None, '这台模拟器已经不在了'
+        if attached(target, activity):
+            return None, '有开发工具正连着它'
+        data = device.get('dataPath')
+        if data and T.pin_reason(pins, T.Task(Path(data), Path(data), Path(data))):
+            return None, '已被标记保护'
+        if kind == 'simulator-delete' and device.get('state') != 'Shutdown':
+            return None, '它开着，先关机才能删'
+        if kind == 'simulator-shutdown' and device.get('state') != 'Booted':
+            return None, '它已经关机了'
+        return dict(bytes=device.get('dataPathSize') or item['bytes'], reason=item['reason']), None
+    task = next((t for t in T.discover(cfg) if str(t.path) == target), None)
+    if task is None or not task.reachable:
+        return None, '任务目录不在了，或外接盘没插'
+    reasons = T.in_use(activity, task) + ([T.pin_reason(pins, task)] if T.pin_reason(pins, task) else [])
+    if reasons:
+        return None, '；'.join(sorted(set(reasons))[:3])
+    skipped = T.skip_names(cfg)
+    repos = T.repositories(task.real, skipped)
+    if not repos:
+        return None, '没有代码仓库'
+    for repo in repos:
+        change = T.git_changes(repo)
+        if change:
+            return None, '{}：{}'.format(repo.name, change)
+        if (repo / '.git').is_dir():
+            listed = T.git(repo, 'worktree', 'list', '--porcelain')
+            if listed.returncode or listed.stdout.count('worktree ') > 1:
+                return None, '{} 还有别的工作区依赖它'.format(repo.name)
+    archive = None
+    if T.loose_files(task, skipped):
+        external = cfg.get('external_root')
+        if not (external and auto_tier.volume_ready(external)):
+            return None, '里面有笔记、截图这些不在代码仓库里的文件，外接盘没插，先不删'
+        archive = Path(external) / CLOSED / task.path.name
+        if archive.exists():
+            return None, '外接盘的「收尾的任务」里已有同名目录'
+    return dict(bytes=T.size(task.real) or item['bytes'], reason=item['reason'], archive=str(archive) if archive else None), None
 
 
 def dashboard_running(ps_output):
@@ -327,8 +399,9 @@ def maybe_notify(home, pending, free_bytes, critical_bytes, now=None, launch=lau
     return reason
 
 
-def remove_task(path, cfg):
-    """Unregister its git worktrees from their main repositories, then delete what is left."""
+def remove_task(path, cfg, archive=None):
+    """Unregister its git worktrees from their main repositories, then delete what is left. With `archive`
+    (emergency-agent AC-08), what is left (notes, shots, logs) goes there instead of being deleted."""
     path = Path(path)
     real = path.resolve()
     for repo in T.repositories(real, T.skip_names(cfg)):
@@ -340,11 +413,17 @@ def remove_task(path, cfg):
             if registered is None:
                 raise RuntimeError('找不到 {} 的工作区登记'.format(repo.name))
             result = T.git(main, 'worktree', 'remove', registered)
+            if result.returncode and 'submodule' in (result.stderr or '') and T.git_changes(repo) is None:
+                # git will not remove a worktree that has submodules unless forced; this one is clean and pushed.
+                result = T.git(main, 'worktree', 'remove', '--force', registered)
             if result.returncode:
                 raise RuntimeError((result.stderr or result.stdout).strip())
     if path.is_symlink():
         os.unlink(path)
-    if real.exists():
+    if real.exists() and archive:
+        Path(archive).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(real), str(archive))
+    elif real.exists():
         T.remove_tree(real)
 
 
@@ -382,6 +461,12 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
         if item['state'] not in ('pending', 'failed', 'ignored'):
             results.append(dict(id=key, title=item['title'], outcome='已跳过', reason='已在处理'))
             continue
+        if item.get('by') == 'agent' and key not in fresh:
+            checked, why_not = agent_floor(home, cfg, item, activity, pins, simctl)
+            if why_not:
+                results.append(dict(id=key, title=item['title'], outcome='已跳过', reason=why_not))
+                continue
+            fresh[key] = dict(item, **checked)
         if key not in fresh:
             # Rechecked just now: in use again, changed, or already gone. It leaves the list.
             gone.add(key)
@@ -407,7 +492,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 else:
                     path.unlink()
             else:
-                remove_task(target, cfg)
+                remove_task(target, cfg, archive=fresh[key].get('archive'))
             item.update(state='done', result=None, updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='已完成', reason=item['reason'], bytes=item['bytes']))
             remember_choice(home, item, 'confirmed')

@@ -24,6 +24,7 @@ import agent_plan
 import ask_tier
 import auto_tier
 import common
+import emergency
 import tiers_config
 import toolcaches
 import checkup
@@ -329,8 +330,47 @@ def tick_storage(home, now=None):
             if not (state_root(home)/'storage-paused').exists():
                 tick_caches(home, now)
                 tick_tiers(home, now)
+                receipt['emergency'] = emergency_tick(home, now)
     receipt['update'] = auto_update(home, now)
     return receipt
+
+
+def emergency_tick(home, now):
+    """emergency-agent: start the user's agent by itself when this Mac is about to choke. Never fails the wake."""
+    try:
+        settings = configure(home)
+        cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+        return emergency.tick(home, cfg, settings, now)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        atomic_json(state_root(home)/'emergency-error.json', dict(at=now, error=str(error) or type(error).__name__))
+        return None
+
+
+def emergency_command(home, a):
+    """`emergency show|stop|move|ask|lesson|done` are the agent's, inside a run; `run` is the background's;
+    `now`, `status`, `on`, `off` are for people (and their agent in a chat)."""
+    what = a.value
+    target = a.more[0] if a.more else None
+    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done'):
+        folder = emergency.run_folder()
+        if what == 'show':
+            return emergency.material(folder)
+        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary)
+    if what == 'status':
+        state = emergency.load_state(home)
+        return dict(on=tiers_config.load(home).get('emergency_agent', True), running=emergency.running(state, time.time()),
+                    last=state.get('last'), starts_today=len([t for t in state.get('starts', []) if time.time() - t < 86400]))
+    if what in ('on', 'off'):
+        return {'emergency_agent': tiers_config.set_flag(home, 'emergency_agent', what == 'on')['emergency_agent']}
+    settings = configure(home)
+    cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    if what == 'now':
+        return emergency.tick(home, cfg, settings, asked=True) or {'status': 'busy', 'message': '上一次告急处理还没结束'}
+    if what == 'run':
+        if target not in ('claude', 'codex') or not a.path:
+            raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked --path <这次的目录>')
+        return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
+    raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / on / off')
 
 
 def auto_update(home, now=None, force=False, **hooks):
@@ -418,6 +458,8 @@ def refresh_plan(home, cfg, settings, now):
     plan = current_plan(home, cfg, settings, report, now)
     space_plan.save(home, plan)
     notice = space_plan.agent_needed(home, plan, space_plan.growth(home, report, now), now, settings.critical_free_gib * GIB)
+    if notice and notice['title'] == '磁盘快满了' and emergency.can_start(home, cfg):
+        notice = None   # emergency-agent: the agent comes by itself, and says what it did
     if notice:
         atomic_json(state_root(home)/AGENT_REQUEST, dict(at=now, prompt=space_plan.AGENT_PROMPT, **notice))
         ask_tier.launch_app()
@@ -952,7 +994,7 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
-                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review'])
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
     p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
@@ -964,10 +1006,13 @@ def main():
     p.add_argument('--note', default=''); p.add_argument('--decision'); p.add_argument('--last', type=int)
     p.add_argument('--stream-hours', type=float, help='rule simulator-shutdown: hours after which a screen or log stream no longer counts as use')
     p.add_argument('--changed', choices=['yes', 'no'], help='review done: did this review change the plan')
-    p.add_argument('--summary', default='', help='review done: the conclusion, also told to the user')
+    p.add_argument('--summary', default='', help='review done / emergency done: the conclusion, also told to the user')
+    p.add_argument('--reason', choices=['disk', 'memory', 'asked'], help='emergency run: why the agent was started')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):
         result = plan_command(home, a)
+    elif a.action == 'emergency':
+        result = emergency_command(home, a)
     elif a.action in ('plan', 'agent-app'):
         settings = configure(home)
         owned = [settings.cache_roots[0], settings.state_root, state_root(home)]

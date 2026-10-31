@@ -254,5 +254,6 @@ xcrun swiftc -parse-as-library widget/Logo.swift scripts/render_brand.swift -o /
 | 2026-10-29 | 封面左下角改成「帮你管着 ›」半透明卡片，一看就知道能点 | RAW-53～55，视觉稿选 B（menubar-cover CH-11） |
 | 2026-10-30 | 「帮你管着」改成 agent 的计划页：状态卡 + 只列改过的 + 锁，开关收进「高级」 | 资源管理 agent RAW-10、RAW-16，视觉稿选 B（plan-page） |
 | 2026-10-30 | 看过五版新 logo（精修、大头、留白环、计划本、一笔画），保留现在的小留，不改 | RAW-84、RAW-87 |
+| 2026-10-31 | 告急时 agent 自己启动（推翻 A01 的「后台不跑 agent」，平时照旧）；目标改成「这台 Mac 不卡」，计划是起点不是边界；agent 只记决定，后台复核底线后再做 | 资源管理 agent RAW-18～22（emergency-agent） |
 
 原话都记在 [raw-input](epics/one-click-setup/raw-input.md) 里。
