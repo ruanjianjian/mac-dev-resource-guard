@@ -30,8 +30,10 @@ DEFAULTS = {
     'auto_update': True,
     # emergency-agent: start the user's agent by itself when the disk drops below the danger line or memory is tight.
     'emergency_agent': True,
+    # proactive-watch: every minute, stop leftovers and queue heavy jobs as soon as memory gets tight.
+    'proactive_watch': True,
 }
-FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache', 'auto_update', 'emergency_agent')
+FLAGS = ('auto_enabled', 'ask_enabled', 'caches_enabled', 'xcode_compile_cache', 'auto_update', 'emergency_agent', 'proactive_watch')
 
 
 class ConfigError(ValueError):

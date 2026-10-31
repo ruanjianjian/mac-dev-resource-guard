@@ -619,7 +619,7 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
             matched = next((r for r in external if r.get('pid') == row.get('pid')), None)
             if matched:
                 row['policy'] = '可安全回收' if matched['eligible'] else '保留：' + reason_label(matched.get('reason'))
-        if mode == "tick" and not paused and alert_due(state, effective_pressure, now):
+        if mode == "tick" and not paused and not watch_speaks(now) and alert_due(state, effective_pressure, now):
             minutes = max(1, round((now - state["incident_started"]) / 60))
             title = ('内存很紧' if effective_pressure == 4 else '内存紧张') + '，已持续 {} 分钟'.format(minutes)
             ok = notify(notification_message(rows, actions, state.get('external_pending', {}),
@@ -763,6 +763,38 @@ def reason_label(value):
     }.get(value, value or '状态不明，保留')
 
 
+def watch_speaks(now):
+    """proactive-watch sends the one notice per squeeze; this job stays quiet only while the watch is really at work
+    (it wrote its state in the last five minutes), so a stopped or missing watch never leaves the user unwarned."""
+    if os.environ.get("DEV_MEMORY_STATE_DIR"):
+        return False   # an isolated test of this job keeps its own alerts
+    try:
+        cfg = json.loads((Path.home() / ".config/dev-resource-guard/auto-cleanup.json").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    try:
+        fresh = now - (Path.home() / ".local/state/dev-resource-guard/watch.json").stat().st_mtime < 300
+    except OSError:
+        fresh = False
+    return cfg.get("proactive_watch", True) is not False and fresh
+
+
+def proactive_watch():
+    """proactive-watch: first thing each minute, before the slower checks below, which give up when lookups time
+    out on a Mac that is swapping (10-31). Its failures are logged and never stop this job."""
+    if os.environ.get("DEV_MEMORY_STATE_DIR"):
+        return   # an isolated test of this job: the real watch is not part of it
+    try:
+        storage = Path(__file__).resolve().parents[2] / "storage"
+        if str(storage) not in sys.path:
+            sys.path.insert(0, str(storage))
+        import watch
+        watch.tick(Path.home(), emergency_tick=watch.emergency_after)
+    except Exception as exc:
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            log_event({"type": "watch_error", "error": type(exc).__name__, "detail": str(exc)[:200]})
+
+
 def main():
     ap = argparse.ArgumentParser(description="本机内存守护；保留工作任务，只回收明确托管的闲置资源")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -799,6 +831,8 @@ def main():
                     f.readline()
                 print(f.read().decode("utf-8", "replace"), end="")
         return 0
+    if args.mode == "tick":
+        proactive_watch()
     result = run_cycle(args.mode, getattr(args, 'selected_ids', None), args.owned_only)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

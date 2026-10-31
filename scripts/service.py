@@ -26,6 +26,7 @@ import auto_tier
 import common
 import emergency
 import tiers_config
+import watch
 import toolcaches
 import checkup
 import mole
@@ -314,11 +315,14 @@ def tick_storage(home, now=None):
     """Each wake: 1.3 cache cleanup when 12 hours are due, then the tiers at their own pace, then (with the lock
     released, so the installer can take it) a once-a-day look for a new release."""
     now = time.time() if now is None else now
+    # emergency-agent: first, and outside the storage lock, so a slow wake (as on a Mac that is swapping) never
+    # holds up the one check that matters most then.
+    emergency_result = None if (state_root(home)/'storage-paused').exists() else emergency_tick(home, now)
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(operation_lock(home, 'periodic-storage'))
         except Busy:
-            return {'status': 'busy', 'results': []}   # the previous wake is still working (e.g. a long move)
+            return {'status': 'busy', 'results': [], 'emergency': emergency_result}   # the previous wake is still working
         if (state_root(home)/'storage-paused').exists():
             receipt = {'status': 'paused', 'results': []}
         else:
@@ -330,17 +334,21 @@ def tick_storage(home, now=None):
             if not (state_root(home)/'storage-paused').exists():
                 tick_caches(home, now)
                 tick_tiers(home, now)
-                receipt['emergency'] = emergency_tick(home, now)
+    receipt['emergency'] = emergency_result
     receipt['update'] = auto_update(home, now)
     return receipt
 
 
 def emergency_tick(home, now):
-    """emergency-agent: start the user's agent by itself when this Mac is about to choke. Never fails the wake."""
+    """emergency-agent: start the user's agent by itself when this Mac is about to choke. Never fails the wake.
+    Its own lock: two wakes at once never start two agents."""
     try:
         settings = configure(home)
         cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
-        return emergency.tick(home, cfg, settings, now)
+        with operation_lock(home, 'emergency'):
+            return emergency.tick(home, cfg, settings, now)
+    except Busy:
+        return None
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         atomic_json(state_root(home)/'emergency-error.json', dict(at=now, error=str(error) or type(error).__name__))
         return None
@@ -377,6 +385,17 @@ def emergency_command(home, a):
             raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked --path <这次的目录>')
         return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
     raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / open / login / on / off')
+
+
+def watch_command(home, what):
+    """proactive-watch AC-07: `watch status|on|off`. Off lets every queued job go at once."""
+    if what in ('on', 'off'):
+        tiers_config.set_flag(home, 'proactive_watch', what == 'on')
+        if what == 'off':
+            watch.tick(home)
+    elif what not in (None, 'status'):
+        raise ValueError('watch 后面接 status / on / off')
+    return watch.status(home)
 
 
 def auto_update(home, now=None, force=False, **hooks):
@@ -1000,7 +1019,7 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
-                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency'])
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency', 'watch'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
     p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
@@ -1019,6 +1038,8 @@ def main():
         result = plan_command(home, a)
     elif a.action == 'emergency':
         result = emergency_command(home, a)
+    elif a.action == 'watch':
+        result = watch_command(home, a.value)
     elif a.action in ('plan', 'agent-app'):
         settings = configure(home)
         owned = [settings.cache_roots[0], settings.state_root, state_root(home)]

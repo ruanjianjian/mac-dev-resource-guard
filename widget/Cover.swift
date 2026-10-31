@@ -257,10 +257,12 @@ private struct EmergencyPill: View {
         .contentShape(Capsule())
     }
 
-    private func clock(_ at: Double) -> String {
-        let format = DateFormatter(); format.dateFormat = "HH:mm"
-        return format.string(from: Date(timeIntervalSince1970: at))
-    }
+    private func clock(_ at: Double) -> String { clockText(at) }
+}
+
+func clockText(_ at: Double) -> String {
+    let format = DateFormatter(); format.dateFormat = "HH:mm"
+    return format.string(from: Date(timeIntervalSince1970: at))
 }
 
 private struct Cover: View {
@@ -273,7 +275,7 @@ private struct Cover: View {
         let soft = tight ? Ink.warmSoft : Ink.navySoft
         let shift: CGFloat = s.memoryLevel > 0 ? 24 : 0
         // With both the memory line on top and the agent line below, the ring gives up a little room.
-        let ring: CGFloat = shift > 0 && s.emergency != nil && model.work == nil ? 92 : 104
+        let ring: CGFloat = shift > 0 && (s.emergency != nil || s.watch != nil) && model.work == nil ? 92 : 104
         ZStack(alignment: .topLeading) {
             (tight ? Ink.warm : Ink.navy)
             VStack(alignment: .leading, spacing: 2) {
@@ -312,6 +314,14 @@ private struct Cover: View {
             if let work = model.work {
                 WorkLine(work: work, free: s.free, drive: store.drive, colour: Ink.cream)
                     .frame(maxWidth: .infinity).padding(.top, 236 + shift)
+            } else if let seen = s.watch, !(s.emergency?.running ?? false) {
+                // proactive-watch AC-06: what it did by itself lately; the agent at work comes first.
+                Button { store.page = .memory } label: {
+                    Text("\(clockText(seen.at)) \(seen.words) ›").font(.system(size: 11, weight: .medium)).foregroundColor(Ink.cream)
+                        .lineLimit(1).padding(.horizontal, 12).padding(.vertical, 4).frame(maxWidth: 260)
+                        .background(Capsule().stroke(Ink.cream.opacity(0.75), lineWidth: 1)).contentShape(Capsule())
+                }.buttonStyle(.plain).help("资源看板最近自己动手做的事；点开看内存")
+                    .frame(maxWidth: .infinity).padding(.top, 232 + shift - (104 - ring))
             } else if let line = s.emergency {
                 // One line fits between the ring and the card; what the agent did is in the tooltip and its notice.
                 Button { store.openEmergency() } label: { EmergencyPill(line: line, note: store.emergencyNote) }

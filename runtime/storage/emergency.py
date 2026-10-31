@@ -33,10 +33,12 @@ STATE, RUNS, MATERIAL, DECISIONS, RESULT = 'emergency.json', 'emergency', 'mater
 SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
-WARN_MINUTES = 30             # memory pressure 「警告」 this long counts as a squeeze (AC-02)
+WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
 MEMORY_QUIET_HOURS = 6
 DAY_LIMIT = 4                 # runs in any 24 hours (AC-03)
 RUN_MINUTES = 30              # a run that takes longer is stopped (AC-10)
+GIT_SECONDS = 15              # one git call while gathering the material; slower reads as unknown
+COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
 ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete')
@@ -142,12 +144,27 @@ def due(state, free, critical, pressure, now):
     return reason
 
 
+def undo_fired(state):
+    """A run that broke or never got going did nothing: it costs neither the quiet hours nor a start of the day
+    (proactive-watch AC-05; on 10-31 a run that died at once kept the agent away for six hours)."""
+    run = state.get('run') or {}
+    for key, value in (run.get('prev') or {}).items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+    if run.get('prev') is not None:
+        state['starts'] = [t for t in state.get('starts', []) if t != run.get('started')]
+
+
 def mark_fired(state, reason, free, critical, now):
+    """Only runs the background started count toward the daily limit; a run the user asked for does not."""
     if reason == 'disk':
         state['disk_fired'] = disk_level(free, critical)
     elif reason == 'memory':
         state['memory_fired_at'] = now
-    state['starts'] = state.get('starts', []) + [now]
+    if reason in ('disk', 'memory'):
+        state['starts'] = state.get('starts', []) + [now]
 
 
 def why_words(reason, free, critical, pressure):
@@ -419,6 +436,13 @@ def orphans(task_roots, table=None, cwd_of=cwds, own=None, managed=None):
     return sorted(found, key=lambda o: -o['rss_mb'])
 
 
+def leftovers(roots, table, cwd_of, managed):
+    try:
+        return orphans(roots, table, cwd_of, own=[os.getpid()], managed=managed)
+    except (OSError, subprocess.SubprocessError):
+        return []   # ps or lsof too slow right now: no leftovers listed this time, never a crash
+
+
 def _task_of(path, task_roots):
     for root in task_roots:
         root = str(root).rstrip('/') + '/'
@@ -442,11 +466,33 @@ def gh_binary():
     return None
 
 
+def git(repo, *args):
+    """git that never stops the material: a slow or broken repository just reads as unknown. On 10-31 the first run
+    the agent started by itself died on a 60-second `git log` while memory was critical."""
+    try:
+        return T.git(repo, *args, timeout=GIT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return subprocess.CompletedProcess(args, 124, '', '')
+
+
+def unsaved_work(repo):
+    """Like tasks.git_changes, with the short timeout; what cannot be read counts as unsaved work."""
+    status = git(repo, 'status', '--porcelain')
+    if status.returncode:
+        return '读不出状态（太慢或出错），当作有没保存的改动'
+    if status.stdout.strip():
+        return '有未提交改动'
+    ahead = git(repo, 'rev-list', '--count', 'HEAD', '--not', '--remotes')
+    if ahead.returncode or not ahead.stdout.strip().isdigit():
+        return '读不出状态（太慢或出错），当作有没保存的改动'
+    return '有未推送的提交' if int(ahead.stdout.strip()) else None
+
+
 def pull_request(repo, gh=None, run=subprocess.run):
     """'#12 MERGED', 'no PR', or None when GitHub cannot say."""
     gh = gh or gh_binary()
-    branch = T.git(repo, 'branch', '--show-current').stdout.strip()
-    url = T.git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+    branch = git(repo, 'branch', '--show-current').stdout.strip()
+    url = git(repo, 'remote', 'get-url', 'origin').stdout.strip()
     name = re.sub(r'\.git$', '', re.sub(r'^.*github\.com[:/]', '', url)) if 'github.com' in url else None
     if not (gh and branch and name):
         return None
@@ -478,15 +524,17 @@ def udids_named(task, skipped):
     return found
 
 
-def touched(task, repos):
+def touched(task, repos, deadline=None):
     """When a task was last worked on, cheaply: its last commit, its git index, its top-level entries.
     A walk of the whole tree took minutes on a Mac that was already swapping (10-31)."""
     times = []
     for repo in repos:
-        out = T.git(repo, 'log', '-1', '--format=%ct')
+        if deadline is not None and time.monotonic() > deadline:
+            break   # out of time: the top-level entries still say roughly when
+        out = git(repo, 'log', '-1', '--format=%ct')
         if out.returncode == 0 and out.stdout.strip().isdigit():
             times.append(int(out.stdout.strip()))
-        index = T.git(repo, 'rev-parse', '--git-path', 'index').stdout.strip()
+        index = git(repo, 'rev-parse', '--git-path', 'index').stdout.strip()
         if index:
             try:
                 times.append((repo / index if not Path(index).is_absolute() else Path(index)).stat().st_mtime)
@@ -499,13 +547,16 @@ def touched(task, repos):
     return max(times) if times else None
 
 
-def repo_facts(task, repo, prs):
-    return dict(name=str(repo.relative_to(task.real)), branch=T.git(repo, 'branch', '--show-current').stdout.strip() or None,
-                unsaved=T.git_changes(repo), pr=prs(repo))
+def repo_facts(task, repo, prs, deadline=None):
+    name = str(repo.relative_to(task.real))
+    if deadline is not None and time.monotonic() > deadline:
+        return dict(name=name, branch=None, unsaved='没来得及查，当作有没保存的改动', pr=None)
+    return dict(name=name, branch=git(repo, 'branch', '--show-current').stdout.strip() or None,
+                unsaved=unsaved_work(repo), pr=prs(repo))
 
 
 def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_tier.default_simctl, table=None,
-            cwd_of=cwds, prs=pull_request, sizer=None, free=None, report=None, managed=None):
+            cwd_of=cwds, prs=pull_request, sizer=None, free=None, report=None, managed=None, budget=COLLECT_SECONDS):
     """The 告急材料: what is wrong, the biggest things with their evidence, and what the user chose before.
     Sizes come from the last checkup (at most 6 hours old) instead of a fresh du of every task."""
     now = time.time() if now is None else now
@@ -530,15 +581,20 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
             tasks_found.append(dict(path=str(task.path), on_drive=True, gib=None, repos=[]))
             continue
         work.append((task, T.repositories(task.real, skipped)))
+    deadline = time.monotonic() + budget
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        facts = {(str(task.path), str(repo)): pool.submit(repo_facts, task, repo, prs) for task, repos in work for repo in repos}
+        facts = {(str(task.path), str(repo)): pool.submit(repo_facts, task, repo, prs, deadline) for task, repos in work for repo in repos}
         for task, repos in work:
-            latest = touched(task, repos)
-            tasks_found.append(dict(path=str(task.path), on_drive=False, gib=round((sizer(task.real, task.path) or 0) / GIB, 1),
-                                    idle_days=None if latest is None else round((now - latest) / T.DAY, 1),
-                                    held_by=holders(activity, task), protected=T.pin_reason(pins, task),
-                                    notes=T.loose_files(task, skipped)[:8],
-                                    repos=[facts[(str(task.path), str(repo))].result() for repo in repos]))
+            try:
+                latest = touched(task, repos, deadline)
+                tasks_found.append(dict(path=str(task.path), on_drive=False, gib=round((sizer(task.real, task.path) or 0) / GIB, 1),
+                                        idle_days=None if latest is None else round((now - latest) / T.DAY, 1),
+                                        held_by=holders(activity, task), protected=T.pin_reason(pins, task),
+                                        notes=T.loose_files(task, skipped)[:8],
+                                        repos=[facts[(str(task.path), str(repo))].result() for repo in repos]))
+            except Exception as error:   # one task that cannot be read never costs the whole run
+                tasks_found.append(dict(path=str(task.path), on_drive=False, gib=None, repos=[],
+                                        unreadable=str(error)[:200] or type(error).__name__))
     sims = []
     try:
         listing = json.loads(simctl(['list', 'devices', '--json']))
@@ -560,7 +616,7 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
                   external=str(cfg['external_root']) if cfg['external_root'] else None,
                   external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
         memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
-        orphans=orphans(roots, table, cwd_of, own=[os.getpid()], managed=set() if table is not None and managed is None else managed),
+        orphans=leftovers(roots, table, cwd_of, set() if table is not None and managed is None else managed),
         simulators=sorted(sims, key=lambda s: -s['gib']),
         tasks=sorted(tasks_found, key=lambda t: -(t['gib'] or 0))[:25],
         waiting=[dict(id=i['id'], title=i['title'], state=i['state']) for i in pending['items']],
@@ -783,6 +839,7 @@ def run(home, cfg, settings, reason, folder, runner, now=None, **hooks):
     except Exception as error:
         words = str(error) or type(error).__name__
         state = load_state(home)
+        undo_fired(state)
         state.pop('run', None)
         state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent='crashed', error=words[:300])
         save_state(home, state)
@@ -823,6 +880,8 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
                     dict(at=time.time(), title={'disk': '磁盘快满了', 'memory': '内存吃紧'}.get(reason, '资源看板告急处理'),
                          reason='agent 没能自己启动', prompt=space_plan.AGENT_PROMPT))
     state = load_state(home)
+    if agent_result.get('status') == 'error':
+        undo_fired(state)
     state.pop('run', None)
     state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent=agent_result.get('status'),
                          runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk)
@@ -871,6 +930,7 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     if reason is None:
         save_state(home, state)
         return None
+    prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired')}
     mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
     if not ready:
@@ -892,7 +952,7 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     folder = new_folder(home, now)
     prune_runs(home)
     pid = starter(reason, folder, ready[0])
-    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0])
+    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev)
     save_state(home, state)
     return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
 
