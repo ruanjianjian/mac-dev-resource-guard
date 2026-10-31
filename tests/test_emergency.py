@@ -33,12 +33,12 @@ class TriggerTest(unittest.TestCase):
         self.assertEqual(fired, [(40, None), (23, 'disk'), (22, None), (9, 'disk'), (8, None), (4, 'disk'), (3, None),
                                  (30, None), (20, 'disk')])
 
-    def test_memory_pressure_starts_the_agent_after_half_an_hour_of_warning(self):
+    def test_memory_pressure_starts_the_agent_after_a_quarter_hour_of_warning(self):
         state, free = {}, 100 * GIB
         self.assertIsNone(E.due(state, free, CRITICAL, 2, NOW))
-        self.assertIsNone(E.due(state, free, CRITICAL, 2, NOW + 29 * 60))
-        self.assertEqual(E.due(state, free, CRITICAL, 2, NOW + 31 * 60), 'memory')
-        E.mark_fired(state, 'memory', free, CRITICAL, NOW + 31 * 60)
+        self.assertIsNone(E.due(state, free, CRITICAL, 2, NOW + 14 * 60))   # the watch's own work comes first
+        self.assertEqual(E.due(state, free, CRITICAL, 2, NOW + 16 * 60), 'memory')
+        E.mark_fired(state, 'memory', free, CRITICAL, NOW + 16 * 60)
         self.assertIsNone(E.due(state, free, CRITICAL, 4, NOW + 2 * 3600))        # quiet for 6 hours
         self.assertIsNone(E.due(state, free, CRITICAL, 1, NOW + 3 * 3600))        # pressure gone: the half hour restarts
         self.assertNotIn('warn_since', state)

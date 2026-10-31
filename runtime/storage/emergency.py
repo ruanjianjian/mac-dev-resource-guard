@@ -33,7 +33,7 @@ STATE, RUNS, MATERIAL, DECISIONS, RESULT = 'emergency.json', 'emergency', 'mater
 SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
-WARN_MINUTES = 30             # memory pressure 「警告」 this long counts as a squeeze (AC-02)
+WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
 MEMORY_QUIET_HOURS = 6
 DAY_LIMIT = 4                 # runs in any 24 hours (AC-03)
 RUN_MINUTES = 30              # a run that takes longer is stopped (AC-10)
@@ -142,6 +142,19 @@ def due(state, free, critical, pressure, now):
     if len(starts) >= DAY_LIMIT:
         return None
     return reason
+
+
+def undo_fired(state):
+    """A run that broke or never got going did nothing: it costs neither the quiet hours nor a start of the day
+    (proactive-watch AC-05; on 10-31 a run that died at once kept the agent away for six hours)."""
+    run = state.get('run') or {}
+    for key, value in (run.get('prev') or {}).items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+    if run.get('prev') is not None:
+        state['starts'] = [t for t in state.get('starts', []) if t != run.get('started')]
 
 
 def mark_fired(state, reason, free, critical, now):
@@ -826,6 +839,7 @@ def run(home, cfg, settings, reason, folder, runner, now=None, **hooks):
     except Exception as error:
         words = str(error) or type(error).__name__
         state = load_state(home)
+        undo_fired(state)
         state.pop('run', None)
         state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent='crashed', error=words[:300])
         save_state(home, state)
@@ -866,6 +880,8 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
                     dict(at=time.time(), title={'disk': '磁盘快满了', 'memory': '内存吃紧'}.get(reason, '资源看板告急处理'),
                          reason='agent 没能自己启动', prompt=space_plan.AGENT_PROMPT))
     state = load_state(home)
+    if agent_result.get('status') == 'error':
+        undo_fired(state)
     state.pop('run', None)
     state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent=agent_result.get('status'),
                          runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk)
@@ -914,6 +930,7 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     if reason is None:
         save_state(home, state)
         return None
+    prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired')}
     mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
     if not ready:
@@ -935,7 +952,7 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     folder = new_folder(home, now)
     prune_runs(home)
     pid = starter(reason, folder, ready[0])
-    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0])
+    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev)
     save_state(home, state)
     return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
 

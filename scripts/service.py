@@ -26,6 +26,7 @@ import auto_tier
 import common
 import emergency
 import tiers_config
+import watch
 import toolcaches
 import checkup
 import mole
@@ -384,6 +385,17 @@ def emergency_command(home, a):
             raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked --path <这次的目录>')
         return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
     raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / open / login / on / off')
+
+
+def watch_command(home, what):
+    """proactive-watch AC-07: `watch status|on|off`. Off lets every queued job go at once."""
+    if what in ('on', 'off'):
+        tiers_config.set_flag(home, 'proactive_watch', what == 'on')
+        if what == 'off':
+            watch.tick(home)
+    elif what not in (None, 'status'):
+        raise ValueError('watch 后面接 status / on / off')
+    return watch.status(home)
 
 
 def auto_update(home, now=None, force=False, **hooks):
@@ -1007,7 +1019,7 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
-                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency'])
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency', 'watch'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
     p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
@@ -1026,6 +1038,8 @@ def main():
         result = plan_command(home, a)
     elif a.action == 'emergency':
         result = emergency_command(home, a)
+    elif a.action == 'watch':
+        result = watch_command(home, a.value)
     elif a.action in ('plan', 'agent-app'):
         settings = configure(home)
         owned = [settings.cache_roots[0], settings.state_root, state_root(home)]

@@ -28,6 +28,8 @@ struct Snapshot {
     var messages: [(title: String, body: String, tab: String)] = []
     /// emergency-agent AC-11: the agent the background started by itself, going on now or done within a day.
     var emergency: EmergencyLine? = nil
+    /// proactive-watch AC-06: what the background did on its own within the last two hours.
+    var watch: WatchLine? = nil
     var at = Date()
     var errors: [String] = []
     var pressureLabel: String {
@@ -56,6 +58,26 @@ func emergencyLine(_ state: [String: Any], now: Double = Date().timeIntervalSinc
                              asks: (last["asks"] as? NSNumber)?.intValue ?? 0)
     }
     return nil
+}
+
+struct WatchLine: Equatable {
+    let at: Double
+    let stopped: Int
+    let paused: Int
+    var words: String {
+        var parts: [String] = []
+        if stopped > 0 { parts.append("关了 \(stopped) 个残留后台") }
+        if paused > 0 { parts.append("让 \(paused) 个重活排队") }
+        return parts.joined(separator: "、")
+    }
+}
+
+/// The last thing the per-minute watch did by itself (watch.json `acted`), if within two hours.
+func watchLine(_ state: [String: Any], now: Double = Date().timeIntervalSince1970) -> WatchLine? {
+    guard let acted = (state["acted"] as? [[String: Any]])?.last, let at = (acted["at"] as? NSNumber)?.doubleValue,
+          now - at < 7200 else { return nil }
+    let line = WatchLine(at: at, stopped: (acted["stopped"] as? NSNumber)?.intValue ?? 0, paused: (acted["paused"] as? NSNumber)?.intValue ?? 0)
+    return line.words.isEmpty ? nil : line
 }
 
 func readJSON(_ path: URL) -> [String: Any] {
@@ -130,6 +152,7 @@ func sample() -> Snapshot {
     let tiers = stateHome().appendingPathComponent(".local/state/dev-resource-guard")
     s.pending = pendingCount(readJSON(tiers.appendingPathComponent("pending.json")))
     s.emergency = emergencyLine(readJSON(tiers.appendingPathComponent("emergency.json")))
+    s.watch = watchLine(readJSON(tiers.appendingPathComponent("watch.json")))
     let request = tiers.appendingPathComponent("notify-request.json")
     let notice = readJSON(request)
     if let count = notice["count"] as? Int {
@@ -463,6 +486,10 @@ func renderCover(_ tab: String, to out: String) throws {
         model.snapshot.emergency = EmergencyLine(running: parts[0] == "running", agent: name, at: Date().timeIntervalSince1970 - 1200,
                                                  brief: parts.count > 2 ? parts[2] : "", asks: parts.count > 3 ? Int(parts[3]) ?? 0 : 0)
     }
+    // RENDER_WATCH=<stopped>:<paused> pins what the watch did twenty minutes ago.
+    if let parts = env["RENDER_WATCH"]?.split(separator: ":").compactMap({ Int($0) }), parts.count == 2 {
+        model.snapshot.watch = WatchLine(at: Date().timeIntervalSince1970 - 1200, stopped: parts[0], paused: parts[1])
+    }
     // Last, just before drawing: work starts a 2-second resample, which would replace the pinned numbers with this Mac's.
     if let parts = env["RENDER_WORK"]?.split(separator: ":").map(String.init), parts.count == 4 {
         model.work = Work(kind: parts[0], title: parts[1], bytes: Int64(parts[2]) ?? 0, freeBefore: Double(parts[3]))
@@ -527,6 +554,9 @@ if CommandLine.arguments.contains("--run-tick") {
     require(done == EmergencyLine(running: false, agent: "Claude", at: now - 600, brief: "关了 3 个残留后台", asks: 2))
     require(emergencyLine(["last": ["at": now - 600, "runner": "codex", "talk": false]], now: now) == nil)   // nothing to open
     require(emergencyLine(["last": ["at": now - 90000, "runner": "codex", "talk": true]], now: now) == nil)  // older than a day
+    require(watchLine([:], now: now) == nil)
+    require(watchLine(["acted": [["at": now - 600, "stopped": 2, "paused": 3]]], now: now)?.words == "关了 2 个残留后台、让 3 个重活排队")
+    require(watchLine(["acted": [["at": now - 9000, "stopped": 2, "paused": 0]]], now: now) == nil)   // older than two hours
     require(PanelPlacement.selfTest())
     require(Logo.selfTest())
     require(UpdateNotice.selfTest())
@@ -535,7 +565,7 @@ if CommandLine.arguments.contains("--run-tick") {
     for args in [["app", "--test-home"], ["app", "--test-home", "--other"], ["app", "--test-home", ""]] {
         do { _ = try testHomeArgument(args); require(false) } catch { }
     }
-    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, emergency line, free-space colour levels, panel placement across displays, motion, logo, update notice")
+    print("PASS: pressure states, missing values, units, read-only sampling, preview gating, shortcut conflict fallback, isolated-home argument rejection, pending count and row decoding, emergency line, watch line, free-space colour levels, panel placement across displays, motion, logo, update notice")
 } else if let index = CommandLine.arguments.firstIndex(of: "--render-icon"), index + 1 < CommandLine.arguments.count {
     // The build packs this folder into AppIcon.icns, so the icon is drawn from the same code as the menu-bar mark.
     do { try Logo.writeIconset(to: URL(fileURLWithPath: CommandLine.arguments[index + 1])) }
