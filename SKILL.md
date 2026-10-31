@@ -26,9 +26,10 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 4. 安装输出提示 macOS 会问「资源看板」能否访问外接盘时，转告用户点「允许」（资源看板用本机固定签名，点过一次以后升级不再问）。以后要改目标或单独开关某一项，用户在面板「帮你管着」里点，或告诉你（`rgs setting target 90 --by user --words "用户原话"`）。
 5. 用户不用外接盘、又要求全程后台时：同意后照样带 `RESOURCE_GUARD_ENABLE=yes` 安装，再 `python3 ~/Applications/资源看板.app/Contents/Resources/backend.py checkup-off --ids external`。不打开面板、不重启现有终端或 IDE。
 6. 自动清理固定为 `auto_scope=managed-caches`：只删至少 7 天没用的编译中间缓存，不自动删任务、构建产物或模拟器。开了外接盘、空间低于提醒线时，后台会把闲置满 3 天、改动都已提交并推送的任务整个挪过去（不删，原路径留链接）。关闭自动清理的选择会保留，不要手动改规则。
-7. **第一版计划就是现在这套安全规则，装好就开跑**（不再追问偏好）。告诉用户：「一周后我会复查一次，按你这一周的选择出修订版。」
-8. **把每周复查挂到你自己的定时任务上**（有这个能力时）：Claude 桌面用它的定时任务，Codex 用它的自动化，每周一上午一次，提示词用 `rgs review` 输出里的 `steps`（开头加一句「用 mac-dev-resource-guard 这个 skill」）。建好后运行 `rgs review scheduled claude`（或 `codex`）。没有这个能力也没关系：资源看板会每周发一条「该复查了」的通知，用户点一下就交给你。
-9. 按第 2 节出计划、处理。
+7. **让告急时你能自己来**：运行 `rgs emergency status`，看 `ready`。`ready` 为真就不用管；写着 `claude-login` 时，告诉用户「告急时要我自己来，还差一步：登录一次 Claude Code」，用户同意就运行 `rgs emergency login`（会打开终端，用户在浏览器里授权一次），你不能替用户登录。
+8. **第一版计划就是现在这套安全规则，装好就开跑**（不再追问偏好）。告诉用户：「一周后我会复查一次，按你这一周的选择出修订版。」
+9. **把每周复查挂到你自己的定时任务上**（有这个能力时）：Claude 桌面用它的定时任务，Codex 用它的自动化，每周一上午一次，提示词用 `rgs review` 输出里的 `steps`（开头加一句「用 mac-dev-resource-guard 这个 skill」）。建好后运行 `rgs review scheduled claude`（或 `codex`）。没有这个能力也没关系：资源看板会每周发一条「该复查了」的通知，用户点一下就交给你。
+10. 按第 2 节出计划、处理。
 
 ## 2. 出计划、处理
 
@@ -83,8 +84,8 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 用户点通知交给你时（没能自己启动，或者是「有新占用需要判断」），照第 2 节处理，并说明这次多出来的是什么。
 
 - 用户在对话里说了告急时的偏好（例如「开着但 3 小时没人连的，不要关机」），马上记一条：`rgs memory add --kind decision --about emergency --words "原话" --note "告急时不关开着的模拟器"`。
-- 用户不想让你告急时自己来：`rgs emergency off`（`on` 打开）。最近一次怎么样：`rgs emergency status`。
-- Claude Code 要在终端登录过，后台才能自己跑（桌面 App 的登录不给后台用）。没登录时资源看板改用 Codex；两个都不行，就退回成通知。想让 Claude 自己来，请用户在终端运行一次 `claude` 并登录，你不能替用户登录。
+- 用户不想让你告急时自己来：`rgs emergency off`（`on` 打开）。最近一次怎么样：`rgs emergency status`。用户想看你上次是怎么处理的：`rgs emergency open`（Codex 在它的 App 里打开那段对话，Claude 在终端里接着聊），封面那一行和通知也能直接点开。
+- Claude Code 要在终端登录过，后台才能自己跑（桌面 App 的登录不给后台用）。没登录时资源看板改用 Codex；两个都不行，就退回成通知，并一天一次提醒用户登录。想让 Claude 自己来，用户同意后运行 `rgs emergency login`，你不能替用户登录。
 
 ## 4. 通用清理：借力 Mole
 

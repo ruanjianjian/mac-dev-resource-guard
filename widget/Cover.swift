@@ -173,6 +173,29 @@ final class CoverStore: ObservableObject {
     func gapGB(_ free: Double?) -> Double { max(0, (targetGB ?? 0) - (free ?? 0)) }
     func planRows(_ category: String) -> [ResourceRow] { plan?.rows?.filter { $0.category == category } ?? [] }
 
+    /// emergency-agent AC-11: what to say on the agent line when its conversation could not be opened.
+    @Published var emergencyNote = ""
+
+    /// emergency-agent AC-11: the conversation of the agent that handled the emergency: Codex in its App, Claude in Terminal.
+    func openEmergency() {
+        emergencyNote = ""
+        DispatchQueue.global(qos: .utility).async {
+            let reply = try? DashboardActions.call("emergency-open")
+            DispatchQueue.main.async {
+                guard let reply else { self.emergencyNote = "没连上后台，请稍后再试"; return }
+                if reply.status != "ok" { self.emergencyNote = reply.message }
+            }
+        }
+    }
+
+    /// emergency-agent AC-12: the one sign-in to Claude Code, in Terminal, so the agent can come by itself.
+    func signIn() {
+        DispatchQueue.global(qos: .utility).async {
+            let reply = try? DashboardActions.call("emergency-login")
+            DispatchQueue.main.async { self.message = reply?.message ?? "没连上后台，请稍后再试。" }
+        }
+    }
+
     /// agent-handoff AC-04: a new conversation opens in the agent App with the words already typed in.
     /// The clipboard is only the fallback when there is no agent App or it cannot take the link.
     func handOff() {
@@ -218,6 +241,28 @@ struct CoverPanel: View {
     }
 }
 
+/// emergency-agent AC-11: the agent that came by itself, live or done; tap to open its conversation.
+private struct EmergencyPill: View {
+    let line: EmergencyLine
+    let note: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if line.running && note.isEmpty { Circle().fill(Color(hex: 0x7FD3A8)).frame(width: 6, height: 6) }
+            Text(!note.isEmpty ? note : line.running ? "\(line.agent) 正在处理告急 ›" : "\(line.agent) \(clock(line.at)) 处理过告急 ›")
+                .font(.system(size: 11, weight: .medium)).foregroundColor(Ink.cream).lineLimit(1).truncationMode(.tail)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 4).frame(maxWidth: 260)
+        .background(Capsule().stroke(Ink.cream.opacity(0.75), lineWidth: 1))
+        .contentShape(Capsule())
+    }
+
+    private func clock(_ at: Double) -> String {
+        let format = DateFormatter(); format.dateFormat = "HH:mm"
+        return format.string(from: Date(timeIntervalSince1970: at))
+    }
+}
+
 private struct Cover: View {
     @ObservedObject var model: Monitor
     @ObservedObject var store: CoverStore
@@ -227,6 +272,8 @@ private struct Cover: View {
         let tight = s.freeLevel > 0
         let soft = tight ? Ink.warmSoft : Ink.navySoft
         let shift: CGFloat = s.memoryLevel > 0 ? 24 : 0
+        // With both the memory line on top and the agent line below, the ring gives up a little room.
+        let ring: CGFloat = shift > 0 && s.emergency != nil && model.work == nil ? 92 : 104
         ZStack(alignment: .topLeading) {
             (tight ? Ink.warm : Ink.navy)
             VStack(alignment: .leading, spacing: 2) {
@@ -259,12 +306,17 @@ private struct Cover: View {
                     Circle().trim(from: 0, to: s.usedFraction).stroke(Ink.cream, lineWidth: 30).rotationEffect(.degrees(-90))
                         .animation(Motion.reduced ? nil : .easeOut(duration: 0.8), value: s.usedFraction)
                     if model.work != nil && !Motion.reduced { SweepArc(lineWidth: 30) }
-                }.frame(width: 104, height: 104).padding(15).contentShape(Rectangle())
+                }.frame(width: ring, height: ring).padding(15).contentShape(Rectangle())
             }.buttonStyle(.plain).help("空间去哪了")
                 .frame(maxWidth: .infinity).padding(.top, 92 + shift)
             if let work = model.work {
                 WorkLine(work: work, free: s.free, drive: store.drive, colour: Ink.cream)
                     .frame(maxWidth: .infinity).padding(.top, 236 + shift)
+            } else if let line = s.emergency {
+                // One line fits between the ring and the card; what the agent did is in the tooltip and its notice.
+                Button { store.openEmergency() } label: { EmergencyPill(line: line, note: store.emergencyNote) }
+                    .buttonStyle(.plain).help(line.running ? "看 agent 正在做什么" : (line.brief.isEmpty ? "打开 agent 处理这次告急的对话" : line.brief))
+                    .frame(maxWidth: .infinity).padding(.top, 232 + shift - (104 - ring))
             }
             VStack { Spacer(); HStack(alignment: .bottom) {
                 Button { store.page = .switches } label: {
