@@ -61,11 +61,12 @@ class PlanTest(TierFixture):
 
     def test_three_sections_and_how_far_they_reach(self):
         busy = self.busy_task_with_copies()
+        cache = self.home / '.npm'; cache.mkdir()
         report = self.report(
             [dict(path=str(self.root / '20261001-idle'), linked=False, bytes=12 * GIB, idle=True),
              dict(path=str(busy), linked=False, bytes=40 * GIB, idle=False),
              dict(path=str(self.root / '20261002-moved'), linked=True, bytes=None, idle=False)],
-            [dict(status='local', bytes=2 * GIB, name='npm', path='/x/.npm')])
+            [dict(status='local', bytes=2 * GIB, name='npm', path=str(cache))])
         pending = dict(items=[dict(id='simulator-delete:A', kind='simulator-delete', title='iPhone', bytes=GIB, reason='12 天没开', state='pending'),
                               dict(id='x', kind='task-delete', title='done', bytes=5 * GIB, reason='', state='ignored')])
         cfg = self.cfg(caches_enabled=True)
@@ -85,6 +86,53 @@ class PlanTest(TierFixture):
         sections = {s['id']: s for s in result['sections']}
         self.assertEqual(sections['judge']['bytes'], 16 * GIB)           # the two copies idle for over a week
         self.assertIn('2 份一周没用的构建副本', sections['judge']['items'][0]['title'])
+
+    def test_migrated_cache_is_not_added_to_free_space_again(self):
+        cache = self.home / '.npm'; cache.mkdir()
+        other = self.home / '.pub-cache'; other.mkdir()
+        report = self.report([], [dict(status='local', bytes=size, name=path.name, path=str(path))
+                                 for path, size in [(cache, 8 * GIB), (other, 2 * GIB)]])
+        cfg = self.cfg(caches_enabled=True)
+        measure = unittest.mock.Mock(side_effect=AssertionError('do not rescan cache contents'))
+        before = space_plan.build(self.home, cfg, self.settings, report, {}, 20 * GIB, True, sizer=measure)
+        destination = self.home / 'drive/npm'; destination.parent.mkdir()
+        cache.rename(destination)
+        cache.symlink_to(destination, target_is_directory=True)
+        # Reuse the exact old checkup while disk_usage already reflects the released 8 GiB.
+        after = space_plan.build(self.home, cfg, self.settings, report, {}, 28 * GIB, True, sizer=measure)
+        auto = after['sections'][0]
+        self.assertEqual([i['path'] for i in auto['items']], [str(other)])
+        self.assertEqual(auto['bytes'], 2 * GIB)
+        self.assertEqual(after['reach_bytes'], before['reach_bytes'])
+        self.assertEqual(after['shortfall_bytes'], 20 * GIB)
+        self.assertEqual(after['gap_bytes'], 22 * GIB)
+        self.assertEqual(report['caches'][0]['status'], 'local', 'the stored checkup stays untouched')
+        measure.assert_not_called()
+
+    def test_stale_cache_paths_cannot_inflate_the_plan(self):
+        parent = self.home / 'go'; parent.mkdir()
+        destination = self.home / 'drive/go'; destination.mkdir(parents=True)
+        (destination / 'pkg/mod').mkdir(parents=True)
+        parent.rmdir(); parent.symlink_to(destination, target_is_directory=True)
+        broken = self.home / '.npm'; broken.symlink_to(self.home / 'absent-drive/npm')
+        regular = self.home / '.pub-cache'; regular.write_text('not a cache directory')
+        paths = [self.home / 'missing', broken, parent / 'pkg/mod', regular]
+        report = self.report([], [dict(status='local', bytes=8 * GIB, name=p.name, path=str(p)) for p in paths])
+        result = space_plan.build(self.home, self.cfg(caches_enabled=True), self.settings, report, {}, 20 * GIB, True)
+        self.assertEqual(result['sections'][0]['items'], [])
+        self.assertEqual(result['reach_bytes'], 20 * GIB)
+        self.assertEqual(result['shortfall_bytes'], 30 * GIB)
+
+    def test_unreadable_or_other_device_cache_is_not_counted(self):
+        cache = self.home / '.npm'; cache.mkdir()
+        report = self.report([], [dict(status='local', bytes=8 * GIB, name='npm', path=str(cache))])
+        cfg = self.cfg(caches_enabled=True)
+        other_device = unittest.mock.Mock(st_mode=cache.stat().st_mode, st_dev=self.home.stat().st_dev + 1)
+        for error, result in [(PermissionError('denied'), None), (None, other_device)]:
+            with self.subTest(error=error), patch.object(Path, 'lstat', side_effect=error, return_value=result):
+                plan = space_plan.build(self.home, cfg, self.settings, report, {}, 20 * GIB, True)
+                self.assertEqual(plan['sections'][0]['bytes'], 0)
+                self.assertEqual(plan['reach_bytes'], 20 * GIB)
 
     def test_copies_used_within_a_week_are_never_offered(self):
         busy = self.busy_task_with_copies(days=(1, 3, 6))

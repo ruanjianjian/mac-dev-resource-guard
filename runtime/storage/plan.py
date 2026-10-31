@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import stat
 import time
 
 from storage import GIB, atomic_json
@@ -113,6 +114,26 @@ def stale_copies(copies, now):
     return [c for c in ordered[1:] if now - last_used(c) >= BUILD_COPY_KEEP_DAYS * 86400]
 
 
+def cache_still_local(home, path):
+    """Recheck stale checkup rows without following links or scanning cache contents."""
+    try:
+        home, path = Path(home), Path(path)
+        parts = path.relative_to(home).parts
+        if not parts or '..' in parts:
+            return False
+        device = home.stat().st_dev
+        current = home
+        for part in parts:
+            current = current / part
+            info = current.lstat()
+            # Check parents first: even an existing child may now live behind a migrated parent.
+            if not stat.S_ISDIR(info.st_mode) or info.st_dev != device:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def build(home, cfg, settings, report, pending, free_bytes, external_ready, sizer=T.size, now=None):
     """The plan from what the last checkup measured; cheap enough to run every tick."""
     now = time.time() if now is None else now
@@ -124,7 +145,9 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
     whole = [t for t in tasks if not agent_plan.kept(rules, t['path'])]
     if cfg['caches_enabled'] and external_ready:
         for cache in report.get('caches', []):
-            if cache.get('status') == 'local' and cache.get('bytes') and agent_plan.action(rules, 'tool-caches') == 'move':
+            if (cache.get('status') == 'local' and cache.get('bytes')
+                    and agent_plan.action(rules, 'tool-caches') == 'move'
+                    and cache_still_local(home, cache['path'])):
                 auto.append(item('把 {} 的缓存搬到外接盘'.format(cache['name']), cache['bytes'], '共享构建缓存', cache['path'], 'cache-move'))
         # Each task's own Xcode build folder goes to the drive too, behind a link (RAW-36);
         # an idle task moves whole below, its builds included.
