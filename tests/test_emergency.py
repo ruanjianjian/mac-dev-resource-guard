@@ -250,13 +250,16 @@ class MaterialTest(AskFixture):
             800: dict(pid=800, ppid=1, age=3600, cpu=1.0, rss=50 * 2 ** 20, lstart='x', command='codex app-server'),
             900: dict(pid=900, ppid=1, age=47 * 3600, cpu=2000.0, rss=1000 * 2 ** 20, lstart='y',
                       command='baguette stream --udid 101B3970 --fps 1 --scale 4'),
+            987: dict(pid=987, ppid=1, age=139 * 3600, cpu=900.0, rss=2 ** 20, lstart='z',
+                      command='python3 /Users/x/.claude/skills/test-journal/scripts/archive_queue.py --watch'),
         }
-        cwd = {500: str(task / 'main'), 600: '/', 700: str(task), 800: str(task), 900: '/'}
+        cwd = {500: str(task / 'main'), 600: '/', 700: str(task), 800: str(task), 900: '/', 987: str(task)}
         activity = Activity(open_paths=[(500, str(task / 'main'))], commands=[(500, 'node /x/app-server-broker.mjs serve')])
         drive = self.home / 'drive'; drive.mkdir()
         material = E.collect(self.home, self.cfg(external_root=str(drive)), self.settings, 'disk', NOW, activity=activity,
                              simctl=simctl, table=table, cwd_of=lambda pids: {p: cwd[p] for p in pids if p in cwd},
-                             prs=lambda repo: '#12 MERGED', report={'tasks': [{'path': str(task), 'bytes': 3 * GIB}]}, free=4 * GIB)
+                             prs=lambda repo: '#12 MERGED', report={'tasks': [{'path': str(task), 'bytes': 3 * GIB}]}, free=4 * GIB,
+                             managed={987})   # a launchd job: a service someone set up, not a leftover
         json.dumps(material)   # 10-31: a drive path in the material broke the first real run
         self.assertEqual(material['disk']['external'], str(drive))
         self.assertIn('只剩 4.0 GB', material['why'])
@@ -288,9 +291,10 @@ class ApplyTest(AskFixture):
         self.assertEqual(E.stop_orphan(entry, {}, kill), '已经不在了')
         self.assertIn('别的程序', E.stop_orphan(entry, self.table(lstart='Fri Oct 30 09:00:00 2026'), kill))
         self.assertIn('有人接管', E.stop_orphan(entry, self.table(ppid=4321), kill))
-        self.assertIn('还在干活', E.stop_orphan(entry, self.table(cpu=60.0), kill))
+        self.assertIn('还在干活', E.stop_orphan(entry, self.table(cpu=60.0), kill, managed=set()))
+        self.assertIn('launchd', E.stop_orphan(entry, self.table(), kill, managed={999991}))
         self.assertEqual(kills, [])
-        self.assertIsNone(E.stop_orphan(entry, self.table(), kill, sleep=lambda s: None))
+        self.assertIsNone(E.stop_orphan(entry, self.table(), kill, sleep=lambda s: None, managed=set()))
         self.assertEqual(kills, [(999992, signal.SIGTERM), (999991, signal.SIGTERM)])   # children first
 
     def test_a_task_moves_without_the_idle_days_but_never_with_unsaved_work(self):

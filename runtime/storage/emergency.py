@@ -38,8 +38,8 @@ ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
 ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete')
 # Background helpers agents leave behind: app-server brokers, MCP servers, REPLs, log tails and searches.
-AGENT_HINTS = ('app-server-broker', 'codex app-server', 'mcp-server', 'mcp_server', 'node_repl', '/.codex/',
-               '/.claude/', 'tail -n +1 -F', 'ugrep ', 'baguette stream', 'log stream')
+AGENT_HINTS = ('app-server-broker', 'codex app-server', 'mcp-server', 'mcp_server', 'node_repl',
+               'tail -n +1 -F', 'ugrep ', 'baguette stream', 'log stream')
 # Never an orphan to stop, whatever its parent: this tool itself, and the user's databases, containers and
 # debuggers (SKILL.md 内存: no killing of those).
 NEVER = ('resource-guard', 'ResourceDashboard', 'dev-memory', 'postgres', 'mongod', 'redis-server', 'mysqld',
@@ -357,11 +357,24 @@ def cwds(pids, run=subprocess.run):
     return found
 
 
-def orphans(task_roots, table=None, cwd_of=cwds, own=None):
-    """Process trees whose parent is gone (re-parented to launchd), up a day or more, that an agent left behind:
-    a known agent helper, or one working inside a task folder."""
+def launchd_jobs(run=subprocess.run):
+    """Pids of the user's launchd jobs. They also have launchd as their parent, but someone set them up to keep
+    running (10-31: test-journal's archive worker looked like a leftover)."""
+    try:
+        out = run(['/bin/launchctl', 'list'], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {int(line.split()[0]) for line in out.splitlines() if line.split() and line.split()[0].isdigit()}
+
+
+def orphans(task_roots, table=None, cwd_of=cwds, own=None, managed=None):
+    """Process trees whose parent is gone (re-parented to launchd, but not one of its jobs), up a day or more,
+    that an agent left behind: a known agent helper, or one working inside a task folder."""
     table = process_table() if table is None else table
-    own = set(own or ())
+    managed = launchd_jobs() if managed is None else managed
+    if managed is None:
+        return []   # cannot tell a leftover from a service: list none
+    own = set(own or ()) | set(managed)
     roots = [r for r in table.values() if r['ppid'] == 1 and r['age'] >= ORPHAN_HOURS * 3600 and r['pid'] not in own
              and not any(word in r['command'] for word in NEVER)]
     where = cwd_of([r['pid'] for r in roots])
@@ -465,7 +478,7 @@ def repo_facts(task, repo, prs):
 
 
 def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_tier.default_simctl, table=None,
-            cwd_of=cwds, prs=pull_request, sizer=None, free=None, report=None):
+            cwd_of=cwds, prs=pull_request, sizer=None, free=None, report=None, managed=None):
     """The 告急材料: what is wrong, the biggest things with their evidence, and what the user chose before.
     Sizes come from the last checkup (at most 6 hours old) instead of a fresh du of every task."""
     now = time.time() if now is None else now
@@ -520,7 +533,7 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
                   external=str(cfg['external_root']) if cfg['external_root'] else None,
                   external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
         memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
-        orphans=orphans(roots, table, cwd_of, own=[os.getpid()]),
+        orphans=orphans(roots, table, cwd_of, own=[os.getpid()], managed=set() if table is not None and managed is None else managed),
         simulators=sorted(sims, key=lambda s: -s['gib']),
         tasks=sorted(tasks_found, key=lambda t: -(t['gib'] or 0))[:25],
         waiting=[dict(id=i['id'], title=i['title'], state=i['state']) for i in pending['items']],
@@ -607,7 +620,7 @@ def decisions(folder):
 
 # ---- after the agent: recheck the floor, then do it (AC-06~08, AC-10) -----------------------------------------
 
-def stop_orphan(entry, table=None, kill=os.kill, sleep=time.sleep):
+def stop_orphan(entry, table=None, kill=os.kill, sleep=time.sleep, managed=None):
     """Stop it only if it is still the same orphan, a day or more old, and idle since the agent looked."""
     table = process_table() if table is None else table
     row = table.get(entry['pid'])
@@ -617,6 +630,9 @@ def stop_orphan(entry, table=None, kill=os.kill, sleep=time.sleep):
         return '进程号已被别的程序用了，没动'
     if row['ppid'] != 1 or row['age'] < ORPHAN_HOURS * 3600:
         return '已经有人接管它了，没动'
+    jobs = launchd_jobs() if managed is None else managed
+    if jobs is None or entry['pid'] in jobs:
+        return '它是 launchd 管着的服务，没动'
     tree = descendants(table, entry['pid'])
     cpu = sum(table[p]['cpu'] for p in tree if p in table)
     if cpu - entry.get('cpu_seconds', cpu) > ORPHAN_CPU_SECONDS:
