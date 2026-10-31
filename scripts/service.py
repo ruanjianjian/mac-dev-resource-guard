@@ -358,8 +358,14 @@ def emergency_command(home, a):
         return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary)
     if what == 'status':
         state = emergency.load_state(home)
-        return dict(on=tiers_config.load(home).get('emergency_agent', True), running=emergency.running(state, time.time()),
-                    last=state.get('last'), starts_today=len([t for t in state.get('starts', []) if time.time() - t < 86400]))
+        cfg = tiers_config.load(home)
+        return dict(on=cfg.get('emergency_agent', True), ready=emergency.readiness(home, cfg), running=emergency.running(state, time.time()),
+                    last=state.get('last'), missed=state.get('missed'),
+                    starts_today=len([t for t in state.get('starts', []) if time.time() - t < 86400]))
+    if what == 'open':
+        return emergency.open_session(home)
+    if what == 'login':
+        return emergency.login(home)
     if what in ('on', 'off'):
         return {'emergency_agent': tiers_config.set_flag(home, 'emergency_agent', what == 'on')['emergency_agent']}
     settings = configure(home)
@@ -370,7 +376,7 @@ def emergency_command(home, a):
         if target not in ('claude', 'codex') or not a.path:
             raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked --path <这次的目录>')
         return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
-    raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / on / off')
+    raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / open / login / on / off')
 
 
 def auto_update(home, now=None, force=False, **hooks):

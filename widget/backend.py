@@ -707,6 +707,15 @@ class Adapter:
         return dict(status='ok', message=message, rows=rows, eligibleBytes=freed,
                     created=report.get('at'))
 
+    def emergency(self, verb):
+        """emergency-agent AC-11/12: open the agent's conversation, or the one sign-in Claude Code needs."""
+        tier_modules()
+        import emergency
+        if self.isolated:   # a fixture never opens a real App or Terminal
+            return dict(status='ok', message='（隔离测试）会打开 agent 的对话' if verb == 'open' else '（隔离测试）会打开登录', rows=[])
+        reply = emergency.open_session(self.home) if verb == 'open' else emergency.login(self.home)
+        return dict(status=reply['status'], message=reply['message'], rows=[])
+
     def plan(self, verb, value):
         """space-target-plan and agent-handoff: the user's target, the three-part plan, handing work to the agent."""
         _, auto_tier, tiers_config = tier_modules()
@@ -852,6 +861,8 @@ class Adapter:
             return self.memory_close([i for i in (ids or '').split(',') if i])
         if family == 'plan':
             return self.plan(verb, path)
+        if family == 'emergency':
+            return self.emergency(verb)
         if family == 'rules':
             return self.rules(verb, [i for i in (ids or '').split(',') if i], path)
         if family == 'checkup' and verb in ('preview', 'scan', 'firstrun', 'status'):
@@ -918,7 +929,8 @@ def main():
                                           'setup-auto-enable', 'setup-auto-disable', 'setup-ask-enable', 'setup-ask-disable',
                                           'pending-preview', 'pending-clean', 'pending-ignore', 'auto-preview',
                                           'checkup-preview', 'checkup-scan', 'checkup-apply', 'checkup-off', 'checkup-firstrun',
-                                          'checkup-status', 'plan-preview', 'plan-target', 'plan-handoff', 'rules-preview', 'rules-lock'])
+                                          'checkup-status', 'plan-preview', 'plan-target', 'plan-handoff', 'rules-preview', 'rules-lock',
+                                          'emergency-open', 'emergency-login'])
     parser.add_argument('--token')
     parser.add_argument('--path')
     parser.add_argument('--ids', help='Comma-separated pending ids the user ticked')

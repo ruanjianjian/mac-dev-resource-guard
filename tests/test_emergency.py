@@ -72,7 +72,9 @@ class FakeRun:
             return subprocess.CompletedProcess(args, 0, '{}\n'.format(self.pressure), '')
         if 'vm.swapusage' in args:
             return subprocess.CompletedProcess(args, 0, 'total = 2048.00M  used = 1024.00M  free = 1024.00M', '')
-        return subprocess.CompletedProcess(args, 0 if self.keychain else 44, b'', b'')
+        if args[1:4] == ['auth', 'status', '--json']:   # Claude Code says whether it is signed in
+            return subprocess.CompletedProcess(args, 0 if self.keychain else 1, json.dumps({'loggedIn': self.keychain}), '')
+        return subprocess.CompletedProcess(args, 0, '', '')
 
 
 class RunnerTest(AskFixture):
@@ -109,6 +111,9 @@ class RunnerTest(AskFixture):
         allowed = command[command.index('--allowedTools') + 1:command.index('--max-turns')]
         self.assertEqual(allowed, ['Bash({} emergency:*)'.format(E.RGS), 'Read', 'Skill'])
         self.assertEqual(seen['cwd'], str(self.folder))
+        session = json.loads((self.folder / E.SESSION).read_text())   # chosen up front: openable afterwards (AC-11)
+        self.assertEqual(command[command.index('--session-id') + 1], session['session'])
+        self.assertEqual((session['agent'], session['cwd']), ('claude', str(self.folder)))
 
     def test_codex_starts_a_visible_thread_in_the_run_folder(self):
         sent = []
@@ -148,6 +153,7 @@ class RunnerTest(AskFixture):
 
         result = E.run_codex(self.home, self.folder, 'emergency show 那句', {}, 60, popen=Process)
         self.assertEqual(result, dict(agent='codex', status='done', thread='t1', turn='completed'))
+        self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 't1')
         start = next(m for m in sent if m.get('method') == 'thread/start')['params']
         self.assertEqual(start, dict(cwd=str(self.folder), approvalPolicy='never', sandbox='workspace-write',
                                      ephemeral=False, threadSource='user'))
@@ -157,6 +163,43 @@ class RunnerTest(AskFixture):
         self.assertEqual(turn['input'][0]['text'], 'emergency show 那句')
         refused = next(m for m in sent if m.get('id') == 99)
         self.assertIn('error', refused)   # the server's question is never approved
+
+    def test_an_older_codex_without_thread_source_still_runs(self):
+        starts = []
+
+        class Pipe:
+            def __init__(self):
+                self.queue = []
+            def write(self, text):
+                message = json.loads(text)
+                if message.get('method') == 'thread/start':
+                    starts.append(message['params'])
+                    reply = ({'id': message['id'], 'error': {'message': 'unknown field threadSource'}} if 'threadSource' in message['params']
+                             else {'id': message['id'], 'result': {'thread': {'id': 't2'}}})
+                    self.queue.append(reply)
+                elif message.get('method') == 'turn/start':
+                    self.queue.append({'method': 'turn/completed', 'params': {'threadId': 't2', 'turn': {'status': 'completed'}}})
+                elif 'id' in message:
+                    self.queue.append({'id': message['id'], 'result': {}})
+            def flush(self):
+                pass
+
+        class Process:
+            pid = None
+            def __init__(self, command, **kwargs):
+                self.stdin = Pipe(); self.stdout = self
+            def __iter__(self):
+                return self
+            def __next__(self):
+                if not self.stdin.queue:
+                    raise StopIteration
+                return json.dumps(self.stdin.queue.pop(0)) + '\n'
+            def wait(self, timeout=None):
+                return 0
+
+        result = E.run_codex(self.home, self.folder, 'p', {}, 60, popen=Process)
+        self.assertEqual((result['status'], result['thread']), ('done', 't2'))
+        self.assertEqual(['threadSource' in p for p in starts], [True, False])
 
     def test_a_run_that_overstays_is_stopped_and_its_decisions_still_apply(self):
         class Slow:
@@ -403,6 +446,70 @@ class CommandTest(AskFixture):
             E.decide(folder, 'done')
         E.decide(folder, 'lesson', note='Codex 的 app-server 会在任务目录里留一天以上')
         self.assertEqual([d['action'] for d in E.decisions(folder)], ['lesson'])
+
+
+
+class EntryTest(AskFixture):
+    """AC-11/12: the panel opens the agent's conversation; Claude needs one sign-in, offered once a day."""
+    def setUp(self):
+        super().setUp()
+        self.opened = []
+        self.run = lambda args, **kwargs: self.opened.append(args) or subprocess.CompletedProcess(args, 0, '', '')
+        which = patch.object(E.shutil, 'which', return_value=None); which.start(); self.addCleanup(which.stop)
+        launch = patch.object(ask_tier, 'launch_app'); launch.start(); self.addCleanup(launch.stop)
+
+    def finished(self, **session):
+        folder = E.new_folder(self.home, NOW)
+        E.note_session(folder, **session)
+        E.save_state(self.home, {'last': {'at': NOW, 'folder': str(folder), 'agent': 'done', 'talk': True}})
+        return folder
+
+    def test_codex_opens_in_its_app_and_claude_continues_in_terminal(self):
+        self.assertEqual(E.open_session(self.home, NOW, run=self.run)['status'], 'none')
+        self.finished(agent='codex', thread='t9')
+        self.assertEqual(E.open_session(self.home, NOW, run=self.run)['status'], 'ok')
+        self.assertEqual(self.opened[-1], ['/usr/bin/open', 'codex://threads/t9'])
+        folder = self.finished(agent='claude', session='s-1', binary='/apps/claude code/claude', cwd='/runs/a b')
+        self.assertEqual(E.open_session(self.home, NOW, run=self.run)['status'], 'ok')
+        self.assertEqual(self.opened[-1][:3], ['/usr/bin/open', '-a', 'Terminal'])
+        script = Path(self.opened[-1][3]).read_text()
+        self.assertIn("cd '/runs/a b'", script)
+        self.assertIn("exec '/apps/claude code/claude' --resume s-1", script)
+        self.assertTrue(os.access(self.opened[-1][3], os.X_OK))
+        E.save_state(self.home, dict(E.load_state(self.home), run={'pid': os.getpid(), 'started': NOW, 'folder': str(folder)}))
+        self.assertEqual(E.open_session(self.home, NOW + 60, run=self.run)['status'], 'busy')   # Claude still at it
+
+    def test_one_sign_in_to_claude_code_is_offered_once_a_day(self):
+        executable(self.home / 'Library/Application Support/Claude/claude-code/2.1.309/abc/claude.app/Contents/MacOS/claude')
+        cfg = self.cfg()
+        self.assertEqual(E.readiness(self.home, cfg, env={}, run=FakeRun())['missing'], 'claude-login')
+        self.assertTrue(E.readiness(self.home, cfg, env={}, run=FakeRun(keychain=True))['ready'])
+        reply = E.login(self.home, run=self.run)
+        self.assertEqual(reply['status'], 'ok')
+        self.assertIn('auth login', Path(self.opened[-1][3]).read_text())
+        for minutes in (0, 10):
+            E.tick(self.home, cfg, self.settings, NOW + minutes * 60, run=FakeRun(), env={}, starter=None, free=(20 - minutes) * GIB)
+        hints = [n for n in agent_plan.queued_notices(self.home) if n['tab'] == 'login']
+        self.assertEqual(len(hints), 1)
+        self.assertIn('登录一次 Claude Code', hints[0]['body'])
+        self.assertEqual(E.load_state(self.home)['missed']['missing'], 'claude-login')
+
+    def test_the_notice_opens_the_conversation_and_offers_the_list(self):
+        folder = E.new_folder(self.home, NOW)
+        material = E.collect(self.home, self.cfg(), self.settings, 'disk', NOW, activity=Activity(), simctl=self.sims(),
+                             table={}, cwd_of=lambda p: {}, prs=lambda r: None, report={'tasks': []}, free=8 * GIB)
+        (folder / E.MATERIAL).write_text(json.dumps(material))
+        E.decide(folder, 'ask', 'simulator-delete:OLD', why='关机 10 天')
+        def codex(home, folder, *a, **k):
+            E.note_session(folder, agent='codex', thread='t3')
+            return dict(agent='codex', status='done', thread='t3')
+        with patch.object(E, 'run_codex', side_effect=codex):
+            E.run(self.home, self.cfg(), self.settings, 'disk', folder, 'codex', now=NOW)
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual(notice['tab'], 'emergency-ask')
+        last = E.load_state(self.home)['last']
+        self.assertEqual((last['runner'], last['asks'], last['talk']), ('codex', 1, True))
+        self.assertIn('还有 1 项等你确认', last['brief'])
 
 
 if __name__ == '__main__':

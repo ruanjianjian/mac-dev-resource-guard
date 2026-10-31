@@ -12,12 +12,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
@@ -28,6 +30,7 @@ import plan as space_plan
 import tasks as T
 
 STATE, RUNS, MATERIAL, DECISIONS, RESULT = 'emergency.json', 'emergency', 'material.json', 'decisions.jsonl', 'result.json'
+SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
 WARN_MINUTES = 30             # memory pressure 「警告」 this long counts as a squeeze (AC-02)
@@ -168,26 +171,36 @@ def claude_binary(home):
     for path in found:
         if path and Path(path).is_file() and os.access(path, os.X_OK):
             return Path(path)
-    bundled = sorted((home / 'Library/Application Support/Claude/claude-code').glob('*/*/claude.app/Contents/MacOS/claude'),
-                     key=_version_key)
+    # The Claude desktop App ships Claude Code: …/claude-code/<version>/<build>/claude.app/Contents/MacOS/claude
+    # (older builds: …/claude-code/<version>/claude). People who only use the desktop App have it too.
+    root = home / 'Library/Application Support/Claude/claude-code'
+    bundled = sorted(root.glob('*/*/claude.app/Contents/MacOS/claude'), key=_version_key)
+    bundled = bundled or sorted(root.glob('*/claude'), key=lambda p: [int(x) if x.isdigit() else 0 for x in p.parent.name.split('.')])
     return bundled[-1] if bundled else None
 
 
 def claude_logged_in(home, env=None, run=subprocess.run):
-    """The desktop App keeps its login to itself; the background needs Claude Code's own (CH-02)."""
+    """The desktop App keeps its login to itself; the background needs Claude Code's own (CH-02).
+    Claude Code says so itself (`auth status`); the key and token variables count as well."""
     env = os.environ if env is None else env
-    if env.get('CLAUDE_CODE_OAUTH_TOKEN') or env.get('ANTHROPIC_API_KEY') or (Path(home) / '.claude/.credentials.json').is_file():
+    if env.get('CLAUDE_CODE_OAUTH_TOKEN') or env.get('ANTHROPIC_API_KEY'):
         return True
-    try:   # without -w nothing secret is read, so macOS asks no question
-        return run(['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials'],
-                   capture_output=True, timeout=10).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    binary = claude_binary(home)
+    if binary is None:
+        return False
+    try:
+        out = run([str(binary), 'auth', 'status', '--json'], capture_output=True, text=True, timeout=30)
+        return bool(json.loads(out.stdout or '{}').get('loggedIn'))
+    except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
 
 def codex_binary(home):
-    for path in (shutil.which('codex'), Path(home) / '.local/bin/codex',
+    # The Codex App (named ChatGPT.app on some Macs) ships the codex command; others install it on their own.
+    for path in (shutil.which('codex'), Path(home) / '.local/bin/codex', Path('/opt/homebrew/bin/codex'),
+                 Path('/usr/local/bin/codex'),
                  Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'),
+                 Path('/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex'),
                  Path('/Applications/Codex.app/Contents/Resources/codex')):
         if path and Path(path).is_file() and os.access(path, os.X_OK):
             return Path(path)
@@ -211,9 +224,17 @@ def runners(home, preferred, env=None, run=subprocess.run):
     return ready
 
 
+def note_session(folder, **session):
+    atomic_json(Path(folder) / SESSION, dict(at=time.time(), **session))
+
+
 def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen):
-    """Claude Code headless, allowed only the emergency commands and reading (AC-04)."""
-    command = [str(claude_binary(home)), '-p', prompt, '--output-format', 'json', '--permission-mode', 'dontAsk',
+    """Claude Code headless, allowed only the emergency commands and reading (AC-04). Its session id is chosen
+    up front, so the panel can open the conversation in Terminal afterwards (AC-11)."""
+    session = str(uuid.uuid4())
+    binary = claude_binary(home)
+    note_session(folder, agent='claude', session=session, binary=str(binary), cwd=str(folder))
+    command = [str(binary), '-p', prompt, '--session-id', session, '--output-format', 'json', '--permission-mode', 'dontAsk',
                '--allowedTools', 'Bash({} emergency:*)'.format(RGS), 'Read', 'Skill', '--max-turns', '60']
     process = popen(command, cwd=str(folder), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, start_new_session=True)
@@ -269,12 +290,18 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen):
                                         capabilities=dict(experimentalApi=False)))
         wait(lambda m: m.get('id') == asked)
         send('initialized', {}, notify=True)
-        asked = send('thread/start', dict(cwd=str(folder), approvalPolicy='never', sandbox='workspace-write',
-                                          ephemeral=False, threadSource='user'))
+        params = dict(cwd=str(folder), approvalPolicy='never', sandbox='workspace-write', ephemeral=False, threadSource='user')
+        asked = send('thread/start', params)
         started = wait(lambda m: m.get('id') == asked)
+        if 'error' in started:
+            # threadSource is what puts the thread in the Codex App's list; a Codex too old to know it still runs.
+            params.pop('threadSource')
+            asked = send('thread/start', params)
+            started = wait(lambda m: m.get('id') == asked)
         if 'error' in started:
             return dict(agent='codex', status='error', reply=str(started['error'])[:2000])
         thread = started['result']['thread']['id']
+        note_session(folder, agent='codex', thread=thread)
         send('thread/name/set', dict(threadId=thread, name='资源看板告急处理'))
         asked = send('turn/start', dict(threadId=thread, input=[dict(type='text', text=prompt, text_elements=[])]))
         done = wait(lambda m: m.get('method') == 'turn/completed' and (m.get('params') or {}).get('threadId') == thread)
@@ -786,7 +813,11 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
         result = applier(home, cfg, settings, folder, now=time.time())
     atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, **result))
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
-    agent_plan.notice(home, title, notice_words(result, agent_result), tab='pending' if result['asks'] else 'cover')
+    brief = notice_words(result, agent_result)
+    # AC-11: with a conversation to open, the notice opens it (and offers 「去确认」 when something waits).
+    talk = (folder / SESSION).is_file()
+    tab = ('emergency-ask' if result['asks'] else 'emergency') if talk else ('pending' if result['asks'] else 'cover')
+    agent_plan.notice(home, title, brief, tab=tab)
     if agent_result.get('status') == 'error':
         atomic_json(state_root(home) / 'agent-request.json',
                     dict(at=time.time(), title={'disk': '磁盘快满了', 'memory': '内存吃紧'}.get(reason, '资源看板告急处理'),
@@ -794,7 +825,7 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     state = load_state(home)
     state.pop('run', None)
     state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent=agent_result.get('status'),
-                         summary=result['summary'])
+                         runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk)
     save_state(home, state)
     ask_tier.launch_app()
     return dict(agent=agent_result, **result)
@@ -843,12 +874,19 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
     if not ready:
-        # Nobody can start by itself: hand it to the user instead (the disk drop already has its own notice).
+        # Nobody can start by itself: hand it to the user instead (the disk drop already has its own notice),
+        # and say once a day what is missing, e.g. one sign-in to Claude Code (AC-12).
         if reason == 'memory':
             atomic_json(state_root(home) / 'agent-request.json', dict(at=now, title='内存吃紧', prompt=space_plan.AGENT_PROMPT,
                                                                       reason=why_words(reason, free, critical, pressure)))
-            ask_tier.launch_app()
-        state['last'] = dict(at=now, reason=reason, agent='none')
+        missing = readiness(home, cfg, env, run)
+        today = time.strftime('%Y-%m-%d', time.localtime(now))
+        if missing['missing'] == 'claude-login' and state.get('login_hint_day') != today:
+            state['login_hint_day'] = today
+            agent_plan.notice(home, '告急了，agent 没法自己来', '还差一步：登录一次 Claude Code，以后告急它就能自己来。点一下去登录。',
+                              tab='login')
+        ask_tier.launch_app()
+        state['missed'] = dict(at=now, reason=reason, missing=missing['missing'])
         save_state(home, state)
         return dict(reason=reason, agent=None)
     folder = new_folder(home, now)
@@ -862,4 +900,66 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
 def can_start(home, cfg, env=None, run=subprocess.run):
     """Whether a disk drop will bring the agent by itself, so the 「交给 agent」 notice is not needed."""
     return cfg.get('emergency_agent', True) and bool(runners(home, cfg['agent_app'], env, run))
+
+
+def readiness(home, cfg, env=None, run=subprocess.run):
+    """Whether this Mac's agent can start by itself, and if not, the one thing missing (AC-12)."""
+    ready = runners(home, cfg['agent_app'], env, run)
+    if ready:
+        return dict(ready=True, agent=ready[0], missing=None, words='告急时 {} 会自己来'.format({'claude': 'Claude', 'codex': 'Codex'}[ready[0]]))
+    if claude_binary(home):
+        return dict(ready=False, agent='claude', missing='claude-login', words='还差一步：登录一次 Claude Code（`emergency login`）')
+    if codex_binary(home):
+        return dict(ready=False, agent='codex', missing='codex-login', words='还差一步：在 Codex 里登录一次')
+    return dict(ready=False, agent=None, missing='agent', words='这台 Mac 上没找到 Claude 桌面 App 或 Codex')
+
+
+def command_file(path, lines):
+    """A .command file Terminal opens and runs: no Automation permission to ask for."""
+    Path(path).write_text('#!/bin/sh\n' + '\n'.join(lines) + '\n')
+    Path(path).chmod(0o755)
+    return Path(path)
+
+
+def open_session(home, now=None, run=subprocess.run):
+    """AC-11: open the conversation of the run going on, or of the last one: Codex in its App, Claude in Terminal."""
+    now = time.time() if now is None else now
+    state = load_state(home)
+    current = state.get('run') if running(state, now) else None
+    folder = (current or state.get('last') or {}).get('folder')
+    try:
+        session = json.loads((Path(folder) / SESSION).read_text()) if folder else None
+    except (OSError, ValueError):
+        session = None
+    if session is None and folder:   # runs from before session.json: the thread is in the result
+        try:
+            agent = json.loads((Path(folder) / RESULT).read_text()).get('agent') or {}
+            session = dict(agent='codex', thread=agent['thread']) if agent.get('thread') else None
+        except (OSError, ValueError):
+            session = None
+    if session is None:
+        return dict(status='none', message='这一轮还没开始对话，过一会儿再点' if current else '还没有 agent 处理过告急')
+    if session['agent'] == 'codex':
+        run(['/usr/bin/open', 'codex://threads/' + session['thread']], capture_output=True, timeout=30)
+        return dict(status='ok', agent='codex', message='已在 Codex 里打开这次的对话')
+    if current:
+        return dict(status='busy', agent='claude', message='Claude 正在后台处理，处理完再点就能在终端里接着聊')
+    script = command_file(Path(folder) / 'continue.command',
+                          ['cd {} || exit 1'.format(shlex.quote(session['cwd'])),
+                           'exec {} --resume {}'.format(shlex.quote(session['binary']), shlex.quote(session['session']))])
+    run(['/usr/bin/open', '-a', 'Terminal', str(script)], capture_output=True, timeout=30)
+    return dict(status='ok', agent='claude', message='已在终端里接着这次的对话')
+
+
+def login(home, run=subprocess.run):
+    """AC-12: one sign-in to Claude Code in Terminal (the browser does the rest), so emergencies need nobody."""
+    binary = claude_binary(home)
+    if binary is None:
+        return dict(status='missing', message='没找到 Claude Code：装好 Claude 桌面 App 后再试')
+    state_root(home).mkdir(parents=True, exist_ok=True)
+    script = command_file(state_root(home) / 'claude-login.command',
+                          ['echo "登录一次 Claude Code，资源看板告急时就能自己叫它来。浏览器里授权完，这个窗口可以关掉。"',
+                           'exec {} auth login'.format(shlex.quote(str(binary)))])
+    run(['/usr/bin/open', '-a', 'Terminal', str(script)], capture_output=True, timeout=30)
+    return dict(status='ok', message='已打开终端：在浏览器里授权一次就好')
 
