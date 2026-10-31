@@ -29,6 +29,8 @@ KEEP_SECONDS = 3600
 WARN_MINUTES = 3              # 「警告」 this many minutes in a row is a squeeze (AC-01)
 SWAP_SHARE, SWAP_CLIMB_GIB, SWAP_WINDOW = 0.6, 2.0, 600
 NORMAL_TO_RELEASE = 2         # minutes of normal pressure before every queued job goes again (AC-03)
+CALM_TO_END = 10              # minutes of no squeeze before a squeeze counts as over (pressure flickers: 4 notices in 6 minutes on 10-31)
+NOTICE_GAP = 30 * 60          # at most one notice in this long
 PAUSE_LIMIT = 20 * 60         # nobody waits longer than this
 HEAVY_BYTES = GIB // 2        # what is still in memory; a job the Mac already swapped out shows less
 HELPER_IDLE_HOURS = 6         # an agent helper this long without CPU is abandoned; waiting on a model uses next to none
@@ -121,8 +123,9 @@ def release(state, table, kill, now, everything=False):
         let_go.append(nxt)
         state['leader'] = dict(pid=nxt['pid'], lstart=nxt['lstart'])
     state['paused'] = kept
-    if not kept and (leader is None or alive_same(table, leader) is None):
-        state.pop('leader', None)
+    current = state.get('leader')
+    if not kept and (current is None or alive_same(table, current) is None):
+        state.pop('leader', None)   # the job that was let go last stays the one running, so it is not paused again
     state['freed'] = [f for f in state.get('freed', []) if alive_same(table, f)]
     return let_go
 
@@ -306,13 +309,18 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         if result['stopped'] or result['paused']:
             acted = dict(at=now, stopped=len(result['stopped']), paused=len(result['paused']))
             state['acted'] = (state.get('acted', []) + [acted])[-20:]
+        quiet = now - state.get('noticed_at', 0) >= NOTICE_GAP
         if not state.get('episode'):
             state['episode'] = dict(since=now, why=why)
-            body = words(result['stopped'], result['paused'], top_users(table, sizes=sizes), big_sessions(home, now))
-            notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
-        elif result['stopped'] or result['paused']:
+            if quiet:
+                body = words(result['stopped'], result['paused'], top_users(table, sizes=sizes), big_sessions(home, now))
+                notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
+                state['noticed_at'] = now
+        elif (result['stopped'] or result['paused']) and quiet:
             notice(home, '内存还紧，又处理了一些', words(result['stopped'], result['paused'], [], []), tab='memory')
-    elif why is None:
+            state['noticed_at'] = now
+        state['episode']['last_tight'] = now
+    elif why is None and state.get('episode') and now - state['episode'].get('last_tight', state['episode']['since']) >= CALM_TO_END * 60:
         state.pop('episode', None)
     save(home, state)
     if emergency_tick is not None:

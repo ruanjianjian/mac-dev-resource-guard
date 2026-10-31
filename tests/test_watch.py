@@ -124,6 +124,7 @@ class QueueTest(WatchFixture):
         self.assertEqual(self.kills, [])
         self.tick(NOW + 120, Readings(pressure=2), self.checks(alive=(2, 3, 4)))           # the first is done
         self.assertEqual(self.kills, [(2, signal.SIGCONT)])
+        self.assertEqual(W.load(self.home)['leader']['pid'], 2)                            # the one let go is now the runner
         self.kills.clear()
         for minute in (3, 4, 5):                                                           # calm for two minutes
             self.tick(NOW + minute * 60, Readings(pressure=1), self.checks(alive=(2, 3, 4)))
@@ -189,8 +190,12 @@ class NoticeTest(WatchFixture):
         self.assertIn('内存在变紧', title)
         self.assertIn('Claude 7.0 GB', body)
         self.assertIn('Claude 有个会话已经 301 MB', body)
-        self.tick(NOW + 120, Readings(pressure=1), table)                                   # over
-        self.tick(NOW + 180, Readings(pressure=4), table)                                   # a new squeeze: a new notice
+        self.tick(NOW + 120, Readings(pressure=1), table)                                   # a flicker, not the end
+        self.tick(NOW + 180, Readings(pressure=4), table)
+        self.assertEqual(len(self.notices), 1)
+        for minute in range(4, 16):                                                          # ten calm minutes: over
+            self.tick(NOW + minute * 60, Readings(pressure=1), table)
+        self.tick(NOW + 31 * 60, Readings(pressure=4), table)                                # a new squeeze, half an hour on
         self.assertEqual(len(self.notices), 2)
 
 
