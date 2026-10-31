@@ -6,6 +6,7 @@ again at each deeper step) or memory stays under pressure, the background starts
 reads the evidence and writes down decisions only; after it ends, the background rechecks each one against the
 safety floor and does it (CH-02): Codex runs in a sandbox that can only write into the run's own folder.
 """
+import concurrent.futures
 import fcntl
 import json
 import os
@@ -22,6 +23,7 @@ from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
 import ask_tier
 import auto_tier
+import checkup
 import plan as space_plan
 import tasks as T
 
@@ -37,7 +39,7 @@ ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the 
 ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete')
 # Background helpers agents leave behind: app-server brokers, MCP servers, REPLs, log tails and searches.
 AGENT_HINTS = ('app-server-broker', 'codex app-server', 'mcp-server', 'mcp_server', 'node_repl', '/.codex/',
-               '/.claude/', 'tail -n +1 -F', 'ugrep ')
+               '/.claude/', 'tail -n +1 -F', 'ugrep ', 'baguette stream', 'log stream')
 # Never an orphan to stop, whatever its parent: this tool itself, and the user's databases, containers and
 # debuggers (SKILL.md 内存: no killing of those).
 NEVER = ('resource-guard', 'ResourceDashboard', 'dev-memory', 'postgres', 'mongod', 'redis-server', 'mysqld',
@@ -436,33 +438,67 @@ def udids_named(task, skipped):
     return found
 
 
+def touched(task, repos):
+    """When a task was last worked on, cheaply: its last commit, its git index, its top-level entries.
+    A walk of the whole tree took minutes on a Mac that was already swapping (10-31)."""
+    times = []
+    for repo in repos:
+        out = T.git(repo, 'log', '-1', '--format=%ct')
+        if out.returncode == 0 and out.stdout.strip().isdigit():
+            times.append(int(out.stdout.strip()))
+        index = T.git(repo, 'rev-parse', '--git-path', 'index').stdout.strip()
+        if index:
+            try:
+                times.append((repo / index if not Path(index).is_absolute() else Path(index)).stat().st_mtime)
+            except OSError:
+                pass
+    try:
+        times += [p.lstat().st_mtime for p in task.real.iterdir()]
+    except OSError:
+        pass
+    return max(times) if times else None
+
+
+def repo_facts(task, repo, prs):
+    return dict(name=str(repo.relative_to(task.real)), branch=T.git(repo, 'branch', '--show-current').stdout.strip() or None,
+                unsaved=T.git_changes(repo), pr=prs(repo))
+
+
 def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_tier.default_simctl, table=None,
-            cwd_of=cwds, prs=pull_request, sizer=T.size, free=None):
-    """The 告急材料: what is wrong, the biggest things with their evidence, and what the user chose before."""
+            cwd_of=cwds, prs=pull_request, sizer=None, free=None, report=None):
+    """The 告急材料: what is wrong, the biggest things with their evidence, and what the user chose before.
+    Sizes come from the last checkup (at most 6 hours old) instead of a fresh du of every task."""
     now = time.time() if now is None else now
     activity = activity if activity is not None else Activity.collect(settings.lease_root)
     free = shutil.disk_usage(str(settings.volume)).free if free is None else free
     pins, _ = StorageManager(settings)._pins(now)
     skipped = T.skip_names(cfg)
-    tasks_found, named = [], {}
+    if sizer is None:
+        report = checkup.load_report(home) if report is None else report
+        known = {t['path']: t.get('bytes') for t in (report or {}).get('tasks', [])}
+        sizer = lambda real, path=None: known.get(str(path)) if str(path) in known else T.size(real)
+    else:
+        given = sizer
+        sizer = lambda real, path=None: given(real)
+    tasks_found, named, work = [], {}, []
     for task in T.discover(cfg):
         if not task.reachable:
             continue
         for udid in udids_named(task, skipped):
             named.setdefault(udid, []).append(task.path.name)
-        repos = []
-        for repo in T.repositories(task.real, skipped):
-            repos.append(dict(name=str(repo.relative_to(task.real)), branch=T.git(repo, 'branch', '--show-current').stdout.strip() or None,
-                              unsaved=T.git_changes(repo), pr=prs(repo)))
-        try:
-            latest = T.latest_write(task.real, skipped)
-        except T.Unreadable:
-            latest = None
-        tasks_found.append(dict(path=str(task.path), on_drive=task.linked,
-                                gib=None if task.linked else round((sizer(task.real) or 0) / GIB, 1),
-                                idle_days=None if latest is None else round((now - latest) / T.DAY, 1),
-                                held_by=holders(activity, task),
-                                protected=T.pin_reason(pins, task), notes=T.loose_files(task, skipped)[:8], repos=repos))
+        if task.linked:   # already on the drive: it frees nothing on the internal disk
+            tasks_found.append(dict(path=str(task.path), on_drive=True, gib=None, repos=[]))
+            continue
+        work.append((task, T.repositories(task.real, skipped)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        facts = {(str(task.path), str(repo)): pool.submit(repo_facts, task, repo, prs) for task, repos in work for repo in repos}
+        for task, repos in work:
+            latest = touched(task, repos)
+            tasks_found.append(dict(path=str(task.path), on_drive=False, gib=round((sizer(task.real, task.path) or 0) / GIB, 1),
+                                    idle_days=None if latest is None else round((now - latest) / T.DAY, 1),
+                                    held_by=holders(activity, task), protected=T.pin_reason(pins, task),
+                                    notes=T.loose_files(task, skipped)[:8],
+                                    repos=[facts[(str(task.path), str(repo))].result() for repo in repos]))
     sims = []
     try:
         listing = json.loads(simctl(['list', 'devices', '--json']))
@@ -481,7 +517,8 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         schema=1, at=now, reason=reason, rgs=str(RGS),
         why=why_words(reason, free, settings.critical_free_gib * GIB, memory_pressure()),
         disk=dict(free_gib=round(free / GIB, 1), target_gib=settings.target_free_gib, danger_gib=settings.critical_free_gib,
-                  external=cfg['external_root'], external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
+                  external=str(cfg['external_root']) if cfg['external_root'] else None,
+                  external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
         memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
         orphans=orphans(roots, table, cwd_of, own=[os.getpid()]),
         simulators=sorted(sims, key=lambda s: -s['gib']),
@@ -695,8 +732,26 @@ def notice_words(result, agent_result):
     return body[:240]
 
 
-def run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess.Popen, applier=apply, collector=collect):
-    """One emergency run: hand the agent its material, let it decide, then do what passes the floor (AC-04~10)."""
+def run(home, cfg, settings, reason, folder, runner, now=None, **hooks):
+    """One emergency run. If it breaks (10-31: the material would not save), the run is cleared at once instead of
+    blocking the next one for half an hour, and the user gets the 「交给 agent」 notice."""
+    try:
+        return _run(home, cfg, settings, reason, folder, runner, now, **hooks)
+    except Exception as error:
+        words = str(error) or type(error).__name__
+        state = load_state(home)
+        state.pop('run', None)
+        state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent='crashed', error=words[:300])
+        save_state(home, state)
+        atomic_json(Path(folder) / RESULT, dict(at=time.time(), reason=reason, error=words[:2000]))
+        atomic_json(state_root(home) / 'agent-request.json',
+                    dict(at=time.time(), title={'disk': '磁盘快满了', 'memory': '内存吃紧'}.get(reason, '资源看板告急处理'),
+                         reason='告急处理没跑起来', prompt=space_plan.AGENT_PROMPT))
+        raise
+
+
+def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess.Popen, applier=apply, collector=collect):
+    """Hand the agent its material, let it decide, then do what passes the floor (AC-04~10)."""
     now = time.time() if now is None else now
     folder = Path(folder)
     if not (folder / MATERIAL).is_file():

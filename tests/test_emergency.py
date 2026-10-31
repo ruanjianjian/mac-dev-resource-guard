@@ -185,6 +185,18 @@ class RunnerTest(AskFixture):
         self.assertEqual(notice['tab'], 'pending')
         self.assertNotIn('run', E.load_state(self.home))
 
+    def test_a_run_that_breaks_clears_itself_and_hands_over(self):
+        folder = E.new_folder(self.home, NOW)
+        E.save_state(self.home, {'run': {'pid': os.getpid(), 'started': time.time()}})
+        broken = lambda *a, **k: (_ for _ in ()).throw(TypeError('Object of type PosixPath is not JSON serializable'))
+        with self.assertRaises(TypeError):
+            E.run(self.home, self.cfg(), self.settings, 'memory', folder, 'codex', collector=broken)
+        state = E.load_state(self.home)
+        self.assertNotIn('run', state)
+        self.assertEqual(state['last']['agent'], 'crashed')
+        request = json.loads((E.state_root(self.home) / 'agent-request.json').read_text())
+        self.assertEqual(request['title'], '内存吃紧')
+
 
 class TickTest(AskFixture):
     def setUp(self):
@@ -236,14 +248,21 @@ class MaterialTest(AskFixture):
             600: dict(pid=600, ppid=1, age=old, cpu=1.0, rss=50 * 2 ** 20, lstart='x', command='/Applications/Notes.app/Contents/MacOS/Notes'),
             700: dict(pid=700, ppid=1, age=old, cpu=1.0, rss=50 * 2 ** 20, lstart='x', command='postgres -D data'),
             800: dict(pid=800, ppid=1, age=3600, cpu=1.0, rss=50 * 2 ** 20, lstart='x', command='codex app-server'),
+            900: dict(pid=900, ppid=1, age=47 * 3600, cpu=2000.0, rss=1000 * 2 ** 20, lstart='y',
+                      command='baguette stream --udid 101B3970 --fps 1 --scale 4'),
         }
-        cwd = {500: str(task / 'main'), 600: '/', 700: str(task), 800: str(task)}
+        cwd = {500: str(task / 'main'), 600: '/', 700: str(task), 800: str(task), 900: '/'}
         activity = Activity(open_paths=[(500, str(task / 'main'))], commands=[(500, 'node /x/app-server-broker.mjs serve')])
-        material = E.collect(self.home, self.cfg(), self.settings, 'disk', NOW, activity=activity, simctl=simctl, table=table,
-                             cwd_of=lambda pids: {p: cwd[p] for p in pids if p in cwd}, prs=lambda repo: '#12 MERGED',
-                             sizer=lambda p: 3 * GIB, free=4 * GIB)
+        drive = self.home / 'drive'; drive.mkdir()
+        material = E.collect(self.home, self.cfg(external_root=str(drive)), self.settings, 'disk', NOW, activity=activity,
+                             simctl=simctl, table=table, cwd_of=lambda pids: {p: cwd[p] for p in pids if p in cwd},
+                             prs=lambda repo: '#12 MERGED', report={'tasks': [{'path': str(task), 'bytes': 3 * GIB}]}, free=4 * GIB)
+        json.dumps(material)   # 10-31: a drive path in the material broke the first real run
+        self.assertEqual(material['disk']['external'], str(drive))
         self.assertIn('只剩 4.0 GB', material['why'])
-        [orphan] = material['orphans']   # not the Notes App, not the database, not the one an hour old
+        # not the Notes App, not the database, not the one an hour old; the day-old screen stream nobody watches is
+        [stream, orphan] = material['orphans']
+        self.assertEqual((stream['pid'], stream['task']), (900, None))
         self.assertEqual((orphan['pid'], orphan['processes'], orphan['rss_mb'], orphan['task']), (500, 2, 300, str(task)))
         [entry] = material['tasks']
         self.assertEqual(entry['repos'][0]['pr'], '#12 MERGED')
