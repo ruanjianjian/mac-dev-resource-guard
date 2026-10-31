@@ -619,7 +619,7 @@ def run_cycle(mode, selected_ids=None, owned_only=False):
             matched = next((r for r in external if r.get('pid') == row.get('pid')), None)
             if matched:
                 row['policy'] = '可安全回收' if matched['eligible'] else '保留：' + reason_label(matched.get('reason'))
-        if mode == "tick" and not paused and not watch_speaks() and alert_due(state, effective_pressure, now):
+        if mode == "tick" and not paused and not watch_speaks(now) and alert_due(state, effective_pressure, now):
             minutes = max(1, round((now - state["incident_started"]) / 60))
             title = ('内存很紧' if effective_pressure == 4 else '内存紧张') + '，已持续 {} 分钟'.format(minutes)
             ok = notify(notification_message(rows, actions, state.get('external_pending', {}),
@@ -763,15 +763,20 @@ def reason_label(value):
     }.get(value, value or '状态不明，保留')
 
 
-def watch_speaks():
-    """proactive-watch sends the one notice per squeeze; this job stays quiet then (both spoke within minutes on 10-31)."""
+def watch_speaks(now):
+    """proactive-watch sends the one notice per squeeze; this job stays quiet only while the watch is really at work
+    (it wrote its state in the last five minutes), so a stopped or missing watch never leaves the user unwarned."""
     if os.environ.get("DEV_MEMORY_STATE_DIR"):
         return False   # an isolated test of this job keeps its own alerts
     try:
         cfg = json.loads((Path.home() / ".config/dev-resource-guard/auto-cleanup.json").read_text())
     except (OSError, ValueError):
         cfg = {}
-    return cfg.get("proactive_watch", True) is not False and (Path(__file__).resolve().parents[2] / "storage/watch.py").exists()
+    try:
+        fresh = now - (Path.home() / ".local/state/dev-resource-guard/watch.json").stat().st_mtime < 300
+    except OSError:
+        fresh = False
+    return cfg.get("proactive_watch", True) is not False and fresh
 
 
 def proactive_watch():
