@@ -149,6 +149,20 @@ class QueueTest(WatchFixture):
         self.assertEqual(result, dict(on=False))
         self.assertEqual(sorted(pid for pid, sig in self.kills if sig == signal.SIGCONT), [2, 3, 4])
 
+    def test_jobs_mostly_swapped_out_still_count_by_what_they_really_hold(self):
+        table = {pid: row(pid, 'node /w{}/node_modules/.bin/tsc --noEmit'.format(pid), ppid=pid + 10, hours=0.1, cpu=100.0 - pid, gib=0.18)
+                 for pid in (1, 2, 3)}
+        table.update({pid + 10: row(pid + 10, 'npm run typecheck', ppid=99, hours=0.1) for pid in (1, 2, 3)})
+        readings = Readings(pressure=4)
+
+        def run(args, **kwargs):
+            if args[0] == '/usr/bin/top':
+                return subprocess.CompletedProcess(args, 0, 'PID    MEM\n1      3040M\n2      3023M+\n3      2.9G\n', '')
+            return readings(args, **kwargs)
+        result = self.tick(NOW, run, table)
+        self.assertEqual(sorted(p['pid'] for p in result['paused']), [2, 3])     # ps shows 0.18 GB each; top 3 GB
+        self.assertIn('tsc 8.8 GB', self.notices[0][1])
+
     def test_apps_databases_and_light_jobs_are_never_queued(self):
         table = {1: row(1, '/Applications/Claude.app/Contents/MacOS/Claude', hours=1, cpu=900.0, gib=6.0),
                  2: row(2, 'mongod --dbpath x', hours=1, cpu=800.0, gib=3.0),

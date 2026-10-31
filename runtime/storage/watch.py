@@ -127,17 +127,37 @@ def release(state, table, kill, now, everything=False):
     return let_go
 
 
-def heavy_jobs(table, own=()):
-    rows = [r for r in table.values() if r['rss'] >= HEAVY_BYTES and HEAVY.search(r['command'])
+def footprints(run=subprocess.run, limit=80):
+    """What each process really holds, swapped and compressed memory included ({pid: bytes}), as `top` counts it.
+    `ps` only sees what is still in RAM: on 10-31 five 3 GB type checks each showed under 300 MB there."""
+    try:
+        out = run(['/usr/bin/top', '-l', '1', '-o', 'mem', '-n', str(limit), '-stats', 'pid,mem'],
+                  capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    found, unit = {}, {'K': 2 ** 10, 'M': 2 ** 20, 'G': 2 ** 30, 'B': 1}
+    for line in out.splitlines():
+        match = re.match(r'\s*(\d+)\s+([\d.]+)([KMGB])[+-]?\s*$', line)
+        if match:
+            found[int(match.group(1))] = int(float(match.group(2)) * unit[match.group(3)])
+    return found
+
+
+def held(row, sizes):
+    return max(row['rss'], (sizes or {}).get(row['pid'], 0))
+
+
+def heavy_jobs(table, own=(), sizes=None):
+    rows = [dict(r, rss=held(r, sizes)) for r in table.values() if held(r, sizes) >= HEAVY_BYTES and HEAVY.search(r['command'])
             and r['pid'] not in own and not any(word in r['command'] for word in E.NEVER) and '.app/Contents/MacOS/' not in r['command']]
     return sorted(rows, key=lambda r: -r['cpu'])
 
 
-def queue(state, table, kill, now, own=()):
+def queue(state, table, kill, now, own=(), sizes=None):
     """Keep the job furthest along running, pause the rest (AC-03). Returns what was paused."""
     paused_pids = {p['pid'] for p in state.get('paused', [])}
     freed = {(f['pid'], f['lstart']) for f in state.get('freed', [])}
-    running = [r for r in heavy_jobs(table, own) if r['pid'] not in paused_pids]
+    running = [r for r in heavy_jobs(table, own, sizes) if r['pid'] not in paused_pids]
     if len(running) < 2:
         return []
     # The ones already let go come first: they keep running; only the others can wait.
@@ -207,11 +227,11 @@ def short_name(command):
     return FRIENDLY.get(Path(first).name, Path(first).name)
 
 
-def top_users(table, limit=3):
+def top_users(table, limit=3, sizes=None):
     groups = {}
     for row in table.values():
         name = short_name(row['command'])
-        groups[name] = groups.get(name, 0) + row['rss']
+        groups[name] = groups.get(name, 0) + held(row, sizes)
     return [dict(name=n, gib=round(b / GIB, 1)) for n, b in sorted(groups.items(), key=lambda kv: -kv[1])[:limit] if b >= GIB / 4]
 
 
@@ -281,13 +301,14 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
             observe(state, found, now)
     if why and table is not None:
         result['stopped'] = leftovers(state, found, table, kill, sleep, now, managed) if found else []
-        result['paused'] = queue(state, table, kill, now, own=[os.getpid()])
+        sizes = footprints(run)
+        result['paused'] = queue(state, table, kill, now, own=[os.getpid()], sizes=sizes)
         if result['stopped'] or result['paused']:
             acted = dict(at=now, stopped=len(result['stopped']), paused=len(result['paused']))
             state['acted'] = (state.get('acted', []) + [acted])[-20:]
         if not state.get('episode'):
             state['episode'] = dict(since=now, why=why)
-            body = words(result['stopped'], result['paused'], top_users(table), big_sessions(home, now))
+            body = words(result['stopped'], result['paused'], top_users(table, sizes=sizes), big_sessions(home, now))
             notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
         elif result['stopped'] or result['paused']:
             notice(home, '内存还紧，又处理了一些', words(result['stopped'], result['paused'], [], []), tab='memory')
