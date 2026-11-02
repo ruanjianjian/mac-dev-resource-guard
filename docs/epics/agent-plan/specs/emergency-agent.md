@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～24（10-31 内置盘跌到 4 GB、随后内存吃紧那次）；入口和「别人装上就能用」依据 RAW-26～28。
+原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～24（10-31 内置盘跌到 4 GB、随后内存吃紧那次）；入口和「别人装上就能用」依据 RAW-26～28；整个资源管理一个对话依据 RAW-38。
 
 ## 意图
 
@@ -19,7 +19,8 @@
   - 不丢东西的，直接交给后台去做：关掉没人管的残留后台、把闲置任务挪到外接盘；
   - 会丢东西的，列成一张紧急清理单放进「等你确认」，用户点一次头。
 - **越用越懂用户**：用户在紧急清理单上点的确认和忽略，都记成用户的决定。下次告急时，agent 照这些偏好出单（RAW-20：「开着但 3 小时没人连的，不要关机。其他的都可以。」）。
-- **一点就到 agent 的对话**（RAW-26、RAW-27）：封面、通知都能直接打开处理这次告急的那段对话。
+- **整个资源管理一个对话**（RAW-38）：每次告急都接着同一段对话叫 agent，不再每次新开一个。前面做过什么、用户回过什么、学到了什么，agent 都在上文里看得到。
+- **一点就到 agent 的对话**（RAW-26、RAW-27）：封面、通知都能直接打开这段对话。
 - **别人装上就能用**（RAW-28）：不依赖这台 Mac 的特殊设置。只用 Claude 的人还差一步「登录一次 Claude Code」，资源看板在第一次告急时提醒、点一下就去登录；新装时 agent 也会顺带办好。
 
 ## 非目标
@@ -40,7 +41,7 @@
 | AC-01 | [核] | 内置盘刚跌破危险线 | 后台下一轮 | 自己启动一次 agent；同一次下跌里，再跌破 10 GB、5 GB 时各再启动一次；回到危险线以上后重新计 | CLI后端 | ✅ | auto: test_emergency.TriggerTest.test_each_deeper_drop_starts_the_agent_once |
 | AC-02 | [核] | 内存压力到「严重」，或「警告」连续 15 分钟（每分钟的「主动盯着」先处理过还紧） | 后台下一轮 | 自己启动一次 agent；之后 6 小时内不因为内存再启动 | CLI后端 | ✅ | auto: TriggerTest.test_memory_pressure_starts_the_agent_after_a_quarter_hour_of_warning |
 | AC-03 | [边] | 上一次 agent 还没结束，或 24 小时内后台已经自己启动过 4 次（用户要求的那几次不算） | 又到告急 | 不再启动；后台这一轮再慢（比如内存吃紧时整理要好几分钟），也先做告急判断，不排在整理后面 | CLI后端 | ✅ | auto: TriggerTest.test_no_second_run_while_one_is_going_and_four_a_day_at_most、SlowMacTest.test_a_run_the_user_asked_for_does_not_count_toward_the_daily_limit、WakeOrderTest.test_the_emergency_check_comes_first_even_while_a_slow_wake_holds_the_lock |
-| AC-04 | [核] | 告急 | 启动 agent | 用 `agent-app` 记下的那个；没记就先 Claude、后 Codex。只用能在后台跑的：Claude 要 Claude Code 登录过，Codex 要已登录，Codex 的这次对话在 Codex 里看得到。都跑不了就退回成「交给 agent」的通知 | CLI后端 | ✅ | auto: RunnerTest.test_the_recorded_agent_first_then_the_other_then_the_notice、RunnerTest.test_claude_runs_with_only_the_emergency_commands、RunnerTest.test_codex_starts_a_visible_thread_in_the_run_folder；实测（10-31 17:39，本机）：Codex 跑完一轮，Codex 的会话索引里这条对话名叫「资源看板告急处理」、来源标记为 user，与桌面里看得到的 Companion 对话相同（桌面侧栏在后台未刷新，没把 Codex 拉到前台）；Claude 这台没登录过 Claude Code，按规则改用 Codex |
+| AC-04 | [核] | 告急 | 启动 agent | 用 `agent-app` 记下的那个；没记就先 Claude、后 Codex。只用能在后台跑的：Claude 要 Claude Code 登录过，Codex 要已登录，Codex 的对话在 Codex 里看得到（接着哪段对话见 AC-13）。都跑不了就退回成「交给 agent」的通知 | CLI后端 | ✅ | auto: RunnerTest.test_the_recorded_agent_first_then_the_other_then_the_notice、RunnerTest.test_claude_runs_with_only_the_emergency_commands、RunnerTest.test_codex_starts_a_visible_thread_in_the_run_folder；实测（10-31 17:39，本机）：Codex 跑完一轮，Codex 的会话索引里这条对话名叫「资源看板告急处理」、来源标记为 user，与桌面里看得到的 Companion 对话相同（桌面侧栏在后台未刷新，没把 Codex 拉到前台）；Claude 这台没登录过 Claude Code，按规则改用 Codex |
 | AC-05 | [核] | agent 被叫来 | 运行 `rgs emergency show` | 拿到告急材料：<br>• 为什么叫它，硬盘和内存的现状；<br>• 最大的几样东西和证据：模拟器（多大、多久没开、开着没、哪个任务的）、任务目录（多大、改动推没推、PR 合没合、谁开着它）、没人管的残留后台（放了多久、占多少内存、开在哪）；<br>• 用户以前的决定和教训、现在的规则；<br>• 要做的步骤 | CLI后端 | ✅ | auto: MaterialTest.test_the_material_holds_the_evidence_and_the_users_choices、SlowMacTest 三条（查不动的仓库记成「读不出、当作有没保存的改动」，过了 3 分钟剩下的标「没来得及查」，进程列表读不出就不列残留后台）；实测：材料几秒内存下，列出 9 个残留后台、9 个内置盘上的任务、21 台模拟器 |
 | AC-06 | [核] | agent 判断某个残留后台没人管，或某个任务该挪到外接盘 | `rgs emergency stop <pid> --why` 或 `rgs emergency move <路径> --why` | agent 结束后，后台先复核再做：<br>• 残留后台：还是同一个进程、父进程已退出、不是 launchd 管着的服务、放了 24 小时以上、这段时间几乎没用 CPU，才连同子进程一起关掉；<br>• 任务：没人在用、改动都推了、外接盘插着且够大，才挪过去，不受「闲置满 3 天」限制；<br>不满足就跳过，并写明原因 | CLI后端 | ✅ | auto: ApplyTest.test_an_orphan_is_stopped_only_if_it_is_still_the_same_idle_orphan、ApplyTest.test_a_task_moves_without_the_idle_days_but_never_with_unsaved_work；实测（10-31 17:40）：agent 列了 3 个 10-29 的 Codex 后台，后台复核后关掉，`ps` 核实已不在 |
 | AC-07 | [核] | agent 判断某个模拟器或任务该删 | `rgs emergency ask <id> --why` | agent 结束后放进「等你确认」，理由写「agent：…」。再发一条通知「agent 处理了告急」，写明做了什么、还有几项等你确认、约多少 GB；点开就是「等你确认」 | CLI后端、mac原生 | ✅ | auto: ApplyTest.test_asks_land_in_the_pending_list_with_one_notice、ApplyTest.test_agent_asks_survive_the_next_refresh |
@@ -49,6 +50,7 @@
 | AC-11 | [核] | agent 正在处理，或 24 小时内处理过一次告急 | 用户看封面，或收到「agent 处理了告急」通知 | • 封面圆环下面一行：「Codex 正在处理告急 ›」或「Codex 17:40 处理过告急 ›」，鼠标停上去看它做了什么；后台正在搬东西时先显示进度；<br>• 点这一行、点通知本身或通知上的「看对话」：Codex 在它的 App 里打开这段对话，Claude 在终端里接着这段对话（还在后台跑时先说一声，跑完再点）；<br>• 有东西等你确认时，通知上多一个「去确认」，点开就是「等你确认」 | CLI后端、mac原生 | ✅ | auto: test_emergency.EntryTest.test_codex_opens_in_its_app_and_claude_continues_in_terminal、EntryTest.test_the_notice_opens_the_conversation_and_offers_the_list、RunnerTest 两条会话号用例；App 自检「emergency line」；封面出图（处理中 / 处理完 / 处理完且内存很紧 / Claude）；实测（10-31 18:03，本机）：开跑 21 秒记下对话编号，跑完通知以「emergency」类别弹出横幅；同一个打开命令把 Codex 带到「资源看板告急处理」这段对话（核对时用后台打开，没去点你的通知） |
 | AC-12 | [核] | 一台只装了 Claude 桌面 App、没在终端登录过 Claude Code 的 Mac | 第一次告急 | 退回「交给 agent」的通知，并且一天一次提醒「还差一步：登录一次 Claude Code」；点一下打开终端，在浏览器里授权一次，以后告急它就能自己来。`emergency status` 写明现在谁能自己来、还差什么 | CLI后端、mac原生 | ✅ | auto: test_emergency.EntryTest.test_one_sign_in_to_claude_code_is_offered_once_a_day、RunnerTest.test_the_recorded_agent_first_then_the_other_then_the_notice、RunnerTest.test_an_older_codex_without_thread_source_still_runs；实测：本机 `claude auth status` 报未登录、`emergency status` 写明 Codex 能自己来；没替你跑登录（要你在浏览器里授权） |
 | AC-10 | [边] | agent 处理完，或 30 分钟还没结束 | `rgs emergency done --summary`，或到时间 | 记下这次告急的结论；到时间就停掉这次运行，agent 已经记下的决定照样处理 | CLI后端 | ✅ | auto: RunnerTest.test_a_run_that_overstays_is_stopped_and_its_decisions_still_apply、RunnerTest.test_a_run_that_breaks_clears_itself_and_hands_over |
+| AC-13 | [核] | agent 处理过一次告急 | 下一次告急，或用户让它现在处理 | 接着同一段对话叫它：Codex 是 Codex 里那一个「资源看板 · 资源管理」，Claude 是同一个 Claude Code 会话。这次的时间、原因和材料在哪写在新的一条消息里；前面几次做过什么、用户回过什么都在上文。<br>• 用户在 Codex App 里打开过这段对话（App 占着它）：把这次的消息排进这段对话，由 App 来跑；App 那边只读、决定写不进去时，agent 把那一行放进最后的回复，后台照样复核再做；<br>• 用户删了这段对话，或 Codex 太老、排不进去：新开一个，以后接着新的那个 | CLI后端 | ✅ | auto: RunnerTest.test_every_codex_run_continues_the_one_thread、RunnerTest.test_every_claude_run_continues_the_one_session、RunnerTest.test_a_decision_the_sandbox_would_not_take_comes_back_in_the_reply、CommandTest.test_the_agent_can_only_decide_about_what_it_was_shown；实测（11-02，本机 Codex 0.165）：22:23 第一次新开「资源看板 · 资源管理」；22:26 第二次接着同一段对话，30 秒跑完，agent 写「已确认上轮约4.5GiB任务成功迁至外接盘……不重复登记迁移」；22:30 指向一段被 Codex App 占着、只读的旧对话：App 在那段对话里跑完，两条决定从回复里取回、记下 |
 
 ## 变更记录
 
@@ -60,3 +62,5 @@
 | CH-04 | 2026-10-31 | 加 AC-11、AC-12（RAW-26～28）：封面一行和通知直达 agent 的对话；为了别人装上就能用，查清只在这台 Mac 上成立的几处：<br>• Claude Code 是否登录改用它自己的 `claude auth status`；<br>• 老版本 Claude 桌面 App 里 Claude Code 的另一种放法、Codex App 的几种安装位置都认；<br>• Codex 不认识「来源」字段时去掉它重开，照样能跑 | [需求变更] |
 | CH-05 | 2026-10-31 | 10-31 18:56 第一次真正自己起来的告急（内存「严重」）在收集材料时被一条 60 秒的 `git log` 拖崩，19:04 退回成通知（RAW-33、RAW-34）。改成：材料里每条 git 最多等 15 秒，读不出就当作有没保存的改动；整份材料最多 3 分钟，剩下的标「没来得及查」；一个任务读不出不连累整轮；告急判断挪到后台每一轮最前面、不等存储锁；用户要求的那几次不算进每天 4 次 | [实现引入] |
 | CH-06 | 2026-10-31 | 加 [主动盯着](proactive-watch.md)（RAW-35～37）：每分钟先自己处理，「警告」叫 agent 的门槛从 30 分钟降到 15 分钟；跑崩了或没跑起来的那次不算冷却、不算次数 | [需求变更] |
+| CH-07 | 2026-11-02 | 加 AC-13（RAW-38）：整个资源管理一个对话，每次告急接着同一段对话叫 agent，不再在 Codex 里每次新开一个「资源看板告急处理」 | [需求变更] |
+| CH-08 | 2026-11-02 | 实现 AC-13 时本机真跑查明：<br>• 用户在 Codex App 里打开过的对话，App 会一直占着（本机从 19:41 占到 22:16 还没放），后台接不上；改成把消息排进这段对话（`codex queue`），由 App 来跑；<br>• 从外面读，App 还在跑的那一轮显示「中断」、没有结束时间。第一次实测就按「中断」提前收了尾，App 接着读到了旧材料；改成等到有结束时间才算跑完；<br>• App 跑这一轮时可能是只读的（11-02 19:41 用户在 App 里重跑那次就写不进去）：写不进去的决定由 agent 放进最后的回复，后台取回、照样复核；<br>• 以前那些「资源看板告急处理」对话开在旧的那次目录里，接过来 agent 会读到旧材料，所以不接管，新开一个 | [实现引入] |

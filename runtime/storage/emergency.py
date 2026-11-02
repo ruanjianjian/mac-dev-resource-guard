@@ -31,6 +31,8 @@ import tasks as T
 
 STATE, RUNS, MATERIAL, DECISIONS, RESULT = 'emergency.json', 'emergency', 'material.json', 'decisions.jsonl', 'result.json'
 SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
+CONVERSATION = 'conversation.json'   # the one conversation every run of an agent continues (CH-07)
+TITLE = '资源看板 · 资源管理'
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
 WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
@@ -50,8 +52,15 @@ AGENT_HINTS = ('app-server-broker', 'codex app-server', 'mcp-server', 'mcp_serve
 NEVER = ('resource-guard', 'ResourceDashboard', 'dev-memory', 'postgres', 'mongod', 'redis-server', 'mysqld',
          'docker', 'com.docker', 'qemu', 'lldb', 'debugserver', 'launchd_sim', 'Simulator.app')
 RGS = Path.home() / '.local/bin/resource-guard-service'
-PROMPT = ('用 mac-dev-resource-guard 这个 skill 处理一次告急：先运行 `{rgs} emergency show`，照里面的 steps 做。'
-          '这次是资源看板自己把你叫来的，用户不在场；全程用简体中文。')
+PROMPT = ('{when} 资源看板又叫你来了：{why}。用 mac-dev-resource-guard 这个 skill 处理：先运行 `{rgs} emergency show`'
+          '（这次的材料在 {folder}），照里面的 steps 做。这次是资源看板自己把你叫来的，用户不在场；全程用简体中文。')
+FIRST = ('这段对话是资源看板专用的：以后每次告急都接着这里叫你，前面做过什么、用户回过什么、学到了什么都在上文，'
+         '你自己记着用。\n\n')
+AGAIN = '\n\n前面几次的处理都在上文：哪些上次就在、哪些是新的，接着用。'
+WHY = {'disk': '磁盘快满了', 'memory': '内存吃紧', 'asked': '用户让你现在处理一次'}
+QUEUE_POLL_SECONDS = 10       # how often to look whether the Codex App finished the turn it was handed (CH-08)
+CARRY = 'RG-DECISION '        # a decision the agent could not write comes back in its reply after this (CH-08)
+UNWRITABLE = ('这一轮写不进去（只读）。不要申请权限：把下面这一行原样放进你最后的回复，资源看板会照它处理。\n')
 STEPS = (
     '目标是这台 Mac 不卡：内置盘回到目标以上，内存不再吃紧。计划里的规则是起点，不是边界：规则没碰到的大头，你来判断。',
     '先看 memories：用户以前确认过、忽略过、在对话里说过的，是这台 Mac 的偏好。照着它出单；用户说过别动的，不要列。',
@@ -63,6 +72,7 @@ STEPS = (
     '这一轮学到的新情况，`emergency lesson --note "…"` 记一条。',
     '最后 `emergency done --summary "三句话以内"`：做了什么、列了什么等用户点头、还差多少。你的命令只记下决定，'
     '后台会在你结束后逐项复核安全底线再做：正在用的、有没推送改动的、被保护的，一律不动。',
+    '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
 )
 
 
@@ -245,15 +255,48 @@ def note_session(folder, **session):
     atomic_json(Path(folder) / SESSION, dict(at=time.time(), **session))
 
 
+def conversation(home, agent):
+    """The conversation every run of this agent continues (CH-07): one place for its context and memory, not one
+    more 「告急处理」 in the list each time. The ones from before ran inside a run's own folder, where the agent
+    would read that old run's material, so they are not taken over."""
+    try:
+        return json.loads((state_root(home) / RUNS / CONVERSATION).read_text()).get(agent)
+    except (OSError, ValueError):
+        return None
+
+
+def keep_conversation(home, agent, **ids):
+    path = state_root(home) / RUNS / CONVERSATION
+    try:
+        known = json.loads(path.read_text())
+    except (OSError, ValueError):
+        known = {}
+    known[agent] = dict(ids, agent=agent, at=time.time())
+    atomic_json(path, known)
+
+
+def conversation_root(home):
+    """Where the one conversation runs: the runs' parent, which outlives any run folder."""
+    root = state_root(home) / RUNS
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen):
-    """Claude Code headless, allowed only the emergency commands and reading (AC-04). Its session id is chosen
-    up front, so the panel can open the conversation in Terminal afterwards (AC-11)."""
-    session = str(uuid.uuid4())
+    """Claude Code headless, allowed only the emergency commands and reading (AC-04). Every run continues the one
+    session (CH-07); its id is chosen up front, so the panel can open it in Terminal afterwards (AC-11)."""
     binary = claude_binary(home)
-    note_session(folder, agent='claude', session=session, binary=str(binary), cwd=str(folder))
-    command = [str(binary), '-p', prompt, '--session-id', session, '--output-format', 'json', '--permission-mode', 'dontAsk',
+    cwd = conversation_root(home)
+    known = conversation(home, 'claude')
+    if known and any((Path(home) / '.claude/projects').glob('*/{}.jsonl'.format(known['session']))):
+        session, words, start = known['session'], prompt + AGAIN, '--resume'
+    else:   # first run, or the user deleted the session
+        session, words, start = str(uuid.uuid4()), FIRST + prompt, '--session-id'
+    keep_conversation(home, 'claude', session=session, binary=str(binary), cwd=str(cwd))
+    note_session(folder, agent='claude', session=session, binary=str(binary), cwd=str(cwd))
+    command = [str(binary), '-p', words, start, session, '--output-format', 'json', '--permission-mode', 'dontAsk',
                '--allowedTools', 'Bash({} emergency:*)'.format(RGS), 'Read', 'Skill', '--max-turns', '60']
-    process = popen(command, cwd=str(folder), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    process = popen(command, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, start_new_session=True)
     try:
         out, _ = process.communicate(timeout=timeout)
@@ -262,15 +305,33 @@ def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen):
         return dict(agent='claude', status='timeout')
     try:
         reply = json.loads(out.strip().splitlines()[-1])
+        said = str(reply.get('result') or '')
         return dict(agent='claude', status='error' if reply.get('is_error') else 'done', session=reply.get('session_id'),
-                    reply=str(reply.get('result') or '')[:2000])
+                    reply=said[:2000], said=said)
     except (ValueError, IndexError):
         return dict(agent='claude', status='error', reply=(out or '')[-2000:])
 
 
-def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen):
-    """A Codex thread the user can open in the Codex App, sandboxed to the run's folder (AC-04, CH-02)."""
-    process = popen([str(codex_binary(home)), 'app-server'], cwd=str(folder), env=env, stdin=subprocess.PIPE,
+def queue_codex(home, thread, words, env, run=subprocess.run):
+    """`codex queue`: the Codex App, which has the thread open, runs these words as its next turn. False on a Codex
+    without it."""
+    try:
+        done = run([str(codex_binary(home)), 'queue', '--thread', thread, '--message', words], env=env,
+                   capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def said_in(turn):
+    return '\n'.join(item.get('text') or '' for item in (turn or {}).get('items') or [] if item.get('type') == 'agentMessage')
+
+
+def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=subprocess.run):
+    """The one Codex thread the user can open in the Codex App (AC-04, CH-07), sandboxed to the runs' folder
+    (CH-02). Once the user has opened it, the App owns it until it quits: then the App runs the turn (CH-08)."""
+    cwd = conversation_root(home)
+    process = popen([str(codex_binary(home)), 'app-server'], cwd=str(cwd), env=env, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
     late = threading.Event()
     watchdog = threading.Timer(timeout, lambda: (late.set(), stop_group(process)))
@@ -301,28 +362,60 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen):
                 return message
         raise TimeoutError if late.is_set() else OSError('Codex 意外退出了')
 
+    def turn_of(thread, words):
+        """The turn that started with these words, read without owning the thread."""
+        asked = send('thread/turns/list', dict(threadId=thread, limit=5, itemsView='summary'))
+        for turn in (wait(lambda m: m.get('id') == asked).get('result') or {}).get('data') or []:
+            for item in turn.get('items') or []:
+                if item.get('type') == 'userMessage' and words in [c.get('text') for c in item.get('content') or []]:
+                    return turn
+        return None
+
     thread = None
     try:
         asked = send('initialize', dict(clientInfo=dict(name='resource-guard', title='资源看板', version='1'),
                                         capabilities=dict(experimentalApi=False)))
         wait(lambda m: m.get('id') == asked)
         send('initialized', {}, notify=True)
-        params = dict(cwd=str(folder), approvalPolicy='never', sandbox='workspace-write', ephemeral=False, threadSource='user')
-        asked = send('thread/start', params)
-        started = wait(lambda m: m.get('id') == asked)
-        if 'error' in started:
-            # threadSource is what puts the thread in the Codex App's list; a Codex too old to know it still runs.
-            params.pop('threadSource')
+        words = prompt + AGAIN
+        known = conversation(home, 'codex')
+        if known:
+            asked = send('thread/resume', dict(threadId=known['thread'], cwd=str(cwd), approvalPolicy='never',
+                                               sandbox='workspace-write', excludeTurns=True))
+            resumed = wait(lambda m: m.get('id') == asked)
+            if 'error' not in resumed:
+                thread = known['thread']
+            elif 'active writer' in str(resumed['error']) and queue_codex(home, known['thread'], words, env, run=run):
+                thread = known['thread']
+                note_session(folder, agent='codex', thread=thread)
+                while True:   # the App may be busy with the user's own turn first
+                    turn = turn_of(thread, words)
+                    # Read from outside, a turn the App is still running shows as 「interrupted」 with no end time.
+                    if turn and turn.get('completedAt'):
+                        return dict(agent='codex', status='done', thread=thread, turn=turn.get('status'), via='app',
+                                    said=said_in(turn))
+                    if late.wait(QUEUE_POLL_SECONDS):
+                        raise TimeoutError
+        if thread is None:   # first run, or the user deleted the thread
+            words = FIRST + prompt
+            params = dict(cwd=str(cwd), approvalPolicy='never', sandbox='workspace-write', ephemeral=False, threadSource='user')
             asked = send('thread/start', params)
             started = wait(lambda m: m.get('id') == asked)
-        if 'error' in started:
-            return dict(agent='codex', status='error', reply=str(started['error'])[:2000])
-        thread = started['result']['thread']['id']
+            if 'error' in started:
+                # threadSource is what puts the thread in the Codex App's list; a Codex too old to know it still runs.
+                params.pop('threadSource')
+                asked = send('thread/start', params)
+                started = wait(lambda m: m.get('id') == asked)
+            if 'error' in started:
+                return dict(agent='codex', status='error', reply=str(started['error'])[:2000])
+            thread = started['result']['thread']['id']
+        keep_conversation(home, 'codex', thread=thread)
         note_session(folder, agent='codex', thread=thread)
-        send('thread/name/set', dict(threadId=thread, name='资源看板告急处理'))
-        asked = send('turn/start', dict(threadId=thread, input=[dict(type='text', text=prompt, text_elements=[])]))
+        send('thread/name/set', dict(threadId=thread, name=TITLE))
+        asked = send('turn/start', dict(threadId=thread, input=[dict(type='text', text=words, text_elements=[])]))
         done = wait(lambda m: m.get('method') == 'turn/completed' and (m.get('params') or {}).get('threadId') == thread)
-        return dict(agent='codex', status='done', thread=thread, turn=((done.get('params') or {}).get('turn') or {}).get('status'))
+        return dict(agent='codex', status='done', thread=thread, turn=((done.get('params') or {}).get('turn') or {}).get('status'),
+                    said=said_in(turn_of(thread, words)))
     except TimeoutError:
         return dict(agent='codex', status='timeout', thread=thread)
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -627,9 +720,12 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
 
 # ---- the agent's commands: they only write down decisions (CH-02) --------------------------------------------
 
-def run_folder(cwd=None, env=None):
+def run_folder(cwd=None, env=None, home=None):
     env = os.environ if env is None else env
-    for candidate in (env.get(DIR_ENV), cwd or os.getcwd()):
+    # The conversation no longer runs in the run's folder (CH-07), and a turn the Codex App runs has none of our
+    # variables (CH-08): the run going on is in the state.
+    current = (load_state(Path.home() if home is None else home).get('run') or {}).get('folder')
+    for candidate in (env.get(DIR_ENV), current, cwd or os.getcwd()):
         if candidate and (Path(candidate) / MATERIAL).is_file():
             return Path(candidate)
     raise ValueError('这里不是一次告急处理：资源看板叫你来时才有告急材料')
@@ -682,9 +778,34 @@ def decide(folder, action, target=None, why='', note='', summary=''):
         entry.update(summary=summary)
     else:
         raise ValueError('没有这个动作：' + str(action))
-    with (folder / DECISIONS).open('a') as out:
-        out.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    line = json.dumps(entry, ensure_ascii=False)
+    try:
+        with (folder / DECISIONS).open('a') as out:
+            out.write(line + '\n')
+    except OSError:   # the Codex App ran this turn read-only (CH-08)
+        raise ValueError(UNWRITABLE + CARRY + line)
     return entry
+
+
+def carry(folder, said):
+    """Decisions the agent could not write come back in its reply, one line each; checked again like any other."""
+    key = lambda entry: json.dumps({k: v for k, v in entry.items() if k != 'at'}, sort_keys=True)
+    have = {key(entry) for entry in decisions(folder)}
+    found = []
+    for line in (said or '').splitlines():
+        line = line.strip().strip('`').strip()
+        if not line.startswith(CARRY):
+            continue
+        try:
+            entry = json.loads(line[len(CARRY):])
+            if key(entry) in have:
+                continue
+            found.append(decide(folder, entry['action'], entry.get('pid') or entry.get('path') or entry.get('id'),
+                                why=entry.get('why', ''), note=entry.get('note', ''), summary=entry.get('summary', '')))
+            have.add(key(entry))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return found
 
 
 def decisions(folder):
@@ -857,12 +978,14 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     if not (folder / MATERIAL).is_file():
         atomic_json(folder / MATERIAL, collector(home, cfg, settings, reason, now))
     env = dict(os.environ, **{DIR_ENV: str(folder)})
-    prompt = PROMPT.format(rgs=RGS)
+    prompt = PROMPT.format(when=time.strftime('%m-%d %H:%M', time.localtime(now)), why=WHY.get(reason, reason),
+                           rgs=RGS, folder=folder)
     launcher = run_claude if runner == 'claude' else run_codex
     try:
         agent_result = launcher(home, folder, prompt, env, RUN_MINUTES * 60, popen=popen)
     except Exception as error:   # whatever went wrong starting it, what it already decided is still handled
         agent_result = dict(agent=runner, status='error', reply=str(error) or type(error).__name__)
+    carry(folder, agent_result.pop('said', ''))
     lock = state_root(home) / 'dashboard' / 'operation.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open('a') as busy:
