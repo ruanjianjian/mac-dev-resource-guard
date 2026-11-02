@@ -105,15 +105,41 @@ class RunnerTest(AskFixture):
                 return json.dumps({'is_error': False, 'result': '关了 2 个残留后台', 'session_id': 's1'}) + '\n', None
 
         result = E.run_claude(self.home, self.folder, 'prompt', {E.DIR_ENV: str(self.folder)}, 60, popen=Process)
-        self.assertEqual(result, dict(agent='claude', status='done', session='s1', reply='关了 2 个残留后台'))
+        self.assertEqual(result, dict(agent='claude', status='done', session='s1', reply='关了 2 个残留后台', said='关了 2 个残留后台'))
         command = seen['command']
         self.assertEqual(command[command.index('--permission-mode') + 1], 'dontAsk')
         allowed = command[command.index('--allowedTools') + 1:command.index('--max-turns')]
         self.assertEqual(allowed, ['Bash({} emergency:*)'.format(E.RGS), 'Read', 'Skill'])
-        self.assertEqual(seen['cwd'], str(self.folder))
+        root = str(E.state_root(self.home) / E.RUNS)
+        self.assertEqual(seen['cwd'], root)   # not the run's folder: those get pruned, the conversation stays
         session = json.loads((self.folder / E.SESSION).read_text())   # chosen up front: openable afterwards (AC-11)
         self.assertEqual(command[command.index('--session-id') + 1], session['session'])
-        self.assertEqual((session['agent'], session['cwd']), ('claude', str(self.folder)))
+        self.assertEqual((session['agent'], session['cwd']), ('claude', root))
+        self.assertTrue(command[command.index('-p') + 1].startswith(E.FIRST))
+
+    def test_every_claude_run_continues_the_one_session(self):
+        commands = []
+
+        class Process:
+            pid = None
+            def __init__(self, command, **kwargs):
+                commands.append(command)
+            def communicate(self, timeout=None):
+                return json.dumps({'is_error': False, 'result': 'ok', 'session_id': 's'}) + '\n', None
+
+        E.run_claude(self.home, self.folder, 'p1', {}, 60, popen=Process)
+        first = commands[-1][commands[-1].index('--session-id') + 1]
+        transcript = self.home / '.claude/projects/-runs' / (first + '.jsonl')
+        transcript.parent.mkdir(parents=True); transcript.write_text('{}')
+        E.run_claude(self.home, self.folder, 'p2', {}, 60, popen=Process)
+        again = commands[-1]
+        self.assertEqual(again[again.index('--resume') + 1], first)
+        self.assertNotIn('--session-id', again)
+        self.assertEqual(again[again.index('-p') + 1], 'p2' + E.AGAIN)
+        self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['session'], first)
+        transcript.unlink()   # the user deleted it: a new one, not a run that cannot start
+        E.run_claude(self.home, self.folder, 'p3', {}, 60, popen=Process)
+        self.assertNotEqual(commands[-1][commands[-1].index('--session-id') + 1], first)
 
     def test_codex_starts_a_visible_thread_in_the_run_folder(self):
         sent = []
@@ -152,18 +178,129 @@ class RunnerTest(AskFixture):
                 return 0
 
         result = E.run_codex(self.home, self.folder, 'emergency show 那句', {}, 60, popen=Process)
-        self.assertEqual(result, dict(agent='codex', status='done', thread='t1', turn='completed'))
+        self.assertEqual(result, dict(agent='codex', status='done', thread='t1', turn='completed', said=''))
         self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 't1')
+        self.assertFalse(any(m.get('method') == 'thread/resume' for m in sent))
         start = next(m for m in sent if m.get('method') == 'thread/start')['params']
-        self.assertEqual(start, dict(cwd=str(self.folder), approvalPolicy='never', sandbox='workspace-write',
-                                     ephemeral=False, threadSource='user'))
+        self.assertEqual(start, dict(cwd=str(E.state_root(self.home) / E.RUNS), approvalPolicy='never',
+                                     sandbox='workspace-write', ephemeral=False, threadSource='user'))
         named = next(m for m in sent if m.get('method') == 'thread/name/set')['params']
-        self.assertEqual(named['name'], '资源看板告急处理')
+        self.assertEqual(named['name'], '资源看板 · 资源管理')
         turn = next(m for m in sent if m.get('method') == 'turn/start')['params']
-        self.assertEqual(turn['input'][0]['text'], 'emergency show 那句')
+        self.assertEqual(turn['input'][0]['text'], E.FIRST + 'emergency show 那句')
         refused = next(m for m in sent if m.get('id') == 99)
         self.assertIn('error', refused)   # the server's question is never approved
 
+    def test_every_codex_run_continues_the_one_thread(self):
+        sent, owner, turns, queued, fresh = [], {}, {}, [], ['one', 'two', 'three']
+
+        class Pipe:
+            def __init__(self):
+                self.queue = []
+            def write(self, text):
+                message = json.loads(text)
+                sent.append(message)
+                method, params = message.get('method'), message.get('params') or {}
+                if method == 'thread/resume':
+                    held = owner.get(params['threadId'])
+                    self.queue.append({'id': message['id'], 'result': {}} if held is None else
+                                      {'id': message['id'], 'error': {'message': held}})
+                elif method == 'thread/start':
+                    self.queue.append({'id': message['id'], 'result': {'thread': {'id': fresh.pop(0)}}})
+                elif method == 'turn/start':
+                    thread = params['threadId']
+                    turns.setdefault(thread, []).append({'status': 'completed', 'completedAt': NOW, 'items': [
+                        {'type': 'userMessage', 'content': params['input']},
+                        {'type': 'agentMessage', 'text': '处理完了'}]})
+                    self.queue.append({'method': 'turn/completed', 'params': {'threadId': thread, 'turn': {'status': 'completed'}}})
+                elif method == 'thread/turns/list':
+                    listed = turns.get(params['threadId'], [])
+                    self.queue.append({'id': message['id'], 'result': {'data': list(reversed(listed))[:params['limit']]}})
+                    for turn in listed:   # the App works through what it was handed, one look at a time;
+                        # from outside, a turn it is still running reads 「interrupted」 with no end time (11-02 22:28)
+                        if turn['status'] == 'interrupted':
+                            turn.update(status='completed', completedAt=NOW)
+                        elif turn['status'] == 'queued':
+                            turn['status'] = 'interrupted'
+                elif 'id' in message:
+                    self.queue.append({'id': message['id'], 'result': {}})
+            def flush(self):
+                pass
+
+        class Process:
+            pid = None
+            def __init__(self, command, **kwargs):
+                self.stdin = Pipe(); self.stdout = self
+            def __iter__(self):
+                return self
+            def __next__(self):
+                if not self.stdin.queue:
+                    raise StopIteration
+                return json.dumps(self.stdin.queue.pop(0)) + '\n'
+            def wait(self, timeout=None):
+                return 0
+
+        def run(command, **kwargs):   # `codex queue`: the App that owns the thread takes the words
+            if 'queue' not in command or owner.get('no-queue'):
+                return subprocess.CompletedProcess(command, 2)
+            thread, words = command[command.index('--thread') + 1], command[command.index('--message') + 1]
+            queued.append((thread, words, kwargs.get('env')))
+            turns.setdefault(thread, []).append({'status': 'queued', 'items': [
+                {'type': 'userMessage', 'content': [{'type': 'text', 'text': words}]},
+                {'type': 'agentMessage', 'text': 'RG-DECISION {"action": "lesson", "note": "只读也能交回来"}'}]})
+            return subprocess.CompletedProcess(command, 0)
+
+        # The threads from before ran inside an old run's folder: not taken over, one new thread is started.
+        E.note_session(E.new_folder(self.home, NOW - 86400), agent='codex', thread='old')
+        go = lambda: E.run_codex(self.home, self.folder, 'p', {E.DIR_ENV: str(self.folder)}, 60, popen=Process, run=run)
+        self.assertEqual(go()['thread'], 'one')
+        self.assertFalse(any(m.get('method') == 'thread/resume' for m in sent))
+        sent.clear()
+        result = go()   # the next run continues it
+        self.assertEqual((result['thread'], result['said']), ('one', '处理完了'))
+        resume = next(m for m in sent if m.get('method') == 'thread/resume')['params']
+        self.assertEqual(resume, dict(threadId='one', cwd=str(E.state_root(self.home) / E.RUNS), approvalPolicy='never',
+                                      sandbox='workspace-write', excludeTurns=True))
+        self.assertFalse(any(m.get('method') == 'thread/start' for m in sent))
+        turn = next(m for m in sent if m.get('method') == 'turn/start')['params']
+        self.assertEqual((turn['threadId'], turn['input'][0]['text']), ('one', 'p' + E.AGAIN))
+        named = next(m for m in sent if m.get('method') == 'thread/name/set')['params']
+        self.assertEqual((named['threadId'], named['name']), ('one', E.TITLE))
+
+        # The user opened it in the Codex App, which now owns it: the App runs the turn, in the same thread.
+        owner['one'] = 'thread one already has an active writer'
+        sent.clear()
+        with patch.object(E, 'QUEUE_POLL_SECONDS', 0.01):
+            result = go()
+        self.assertEqual((result['thread'], result['via'], result['turn']), ('one', 'app', 'completed'))
+        self.assertEqual(queued[-1][:2], ('one', 'p' + E.AGAIN))
+        self.assertFalse(any(m.get('method') in ('thread/start', 'turn/start') for m in sent))
+        self.assertIn('RG-DECISION', result['said'])
+        self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 'one')
+
+        owner['no-queue'] = True   # a Codex without `codex queue`: a new thread rather than no run at all
+        self.assertEqual(go()['thread'], 'two')
+        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'two')
+        owner['two'] = 'no rollout found for thread id two'   # the user deleted it: a new one is kept
+        self.assertEqual(go()['thread'], 'three')
+        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'three')
+
+    def test_a_decision_the_sandbox_would_not_take_comes_back_in_the_reply(self):
+        material = dict(orphans=[], tasks=[], simulators=[], waiting=[])
+        (self.folder / E.MATERIAL).write_text(json.dumps(material))
+        self.folder.chmod(0o500)   # the Codex App ran the turn read-only
+        try:
+            with self.assertRaises(ValueError) as refused:
+                E.decide(self.folder, 'lesson', note='只读也能交回来')
+        finally:
+            self.folder.chmod(0o700)
+        line = str(refused.exception).splitlines()[-1]
+        self.assertTrue(line.startswith(E.CARRY))
+        said = '处理完了。\n\n```\n' + line + '\n' + line + '\n```\nRG-DECISION {"action": "stop", "pid": 1, "why": "x"}'
+        [carried] = E.carry(self.folder, said)   # the stop is checked again: pid 1 was never in the material
+        self.assertEqual((carried['action'], carried['note']), ('lesson', '只读也能交回来'))
+        self.assertEqual(E.carry(self.folder, said), [])   # said twice, kept once
+        self.assertEqual([d['action'] for d in E.decisions(self.folder)], ['lesson'])
     def test_an_older_codex_without_thread_source_still_runs(self):
         starts = []
 
@@ -435,9 +572,12 @@ class CommandTest(AskFixture):
         material = E.collect(self.home, self.cfg(), self.settings, 'memory', NOW, activity=Activity(), simctl=self.sims(),
                              table={}, cwd_of=lambda p: {}, prs=lambda r: None, sizer=lambda p: GIB, free=80 * GIB)
         (folder / E.MATERIAL).write_text(json.dumps(material))
-        self.assertEqual(E.run_folder(cwd=str(folder), env={}), folder)
+        self.assertEqual(E.run_folder(cwd=str(folder), env={}, home=self.home), folder)
         with self.assertRaises(ValueError):
-            E.run_folder(cwd=str(self.home), env={})
+            E.run_folder(cwd=str(self.home), env={}, home=self.home)
+        E.save_state(self.home, {'run': {'folder': str(folder)}})   # the agent's shell dropped the variable (CH-07)
+        self.assertEqual(E.run_folder(cwd=str(self.home), env={}, home=self.home), folder)
+        E.save_state(self.home, {})
         for args in (('stop', '12345', '没人用'), ('move', '/nowhere', '闲置'), ('ask', 'trash-empty:/x', '满了'),
                      ('ask', 'simulator-delete:NOPE', '旧'), ('ask', 'simulator-delete:OLD', '')):
             with self.assertRaises(ValueError):
