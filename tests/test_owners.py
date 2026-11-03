@@ -210,6 +210,9 @@ class WordsTest(unittest.TestCase):
         where = {1: ('/t/a/shop', False), 2: ('/t/b/shop', False)}
         [checkouts] = O.group(O.describe(same, [1, 2], where, {}, set(), NOW))
         self.assertEqual(checkouts['projects'], ['a/shop', 'b/shop'])   # two checkouts of one repo are two projects
+        left = {1: row(1, 'node /t/a/server.ts', hours=23), 2: row(2, 'node /t/b/server.ts', hours=0.2)}
+        [both] = O.group(O.describe(left, [1, 2], {}, {}, set(), NOW))
+        self.assertEqual(both['fact'], '没人管了 · 12 分钟～23 小时')   # not the oldest one's age for both
 
 
 

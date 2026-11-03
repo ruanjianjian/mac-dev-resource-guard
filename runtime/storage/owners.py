@@ -443,6 +443,7 @@ def group(rows):
         entry['bytes'] += row['bytes']
         entry['cores'] = round(entry['cores'] + row['cores'], 1)
         entry['age'] = max(entry['age'], row['age'])
+        entry['youngest'] = min(entry.get('youngest', row['age']), row['age'])
         entry['pids'].append(row['pid'])
         if row['project'] and row['project'] not in entry['projects']:
             entry['projects'].append(row['project'])   # paths here; names once all are in
@@ -452,6 +453,9 @@ def group(rows):
             entry['fact'] = row['fact']   # the liveliest member speaks for the group
     for entry in groups.values():
         entry['title'] = entry['tool'] + ('' if entry['app'] or entry['count'] == 1 else ' ×{}'.format(entry['count']))
+        young, old = span(entry.pop('youngest')), span(entry['age'])
+        if entry['owner']['kind'] == 'gone' and entry['owner'].get('via') != 'sim' and young != old:
+            entry['fact'] = '没人管了 · {}～{}'.format(young, old)   # 11-03: one of 12 minutes read as 「23 小时」
         entry['projects'] = names(entry['projects'])
     return sorted(groups.values(), key=lambda g: -g['bytes'])
 
