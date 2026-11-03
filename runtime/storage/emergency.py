@@ -37,8 +37,11 @@ TITLE = '资源看板 · 资源管理'
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
 WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
-MEMORY_QUIET_HOURS = 6
-DAY_LIMIT = 4                 # runs in any 24 hours (AC-03)
+MEMORY_QUIET_HOURS = 6        # nothing new since the agent last looked: it comes again only after this
+SOONER_MINUTES = 30           # still tight and something new: it comes again this soon (agent-investigates AC-07)
+HEAVY_GIB = 1.0               # a group this big, or one burning a core, is worth a new look when it appears
+SWAP_MORE_GIB = 3.0
+DAY_LIMIT = 12                # runs in any 24 hours: a ceiling against a loop; what changed decides the rest (AC-07)
 RUN_MINUTES = 30              # a run that takes longer is stopped (AC-10)
 GIT_SECONDS = 15              # one git call while gathering the material; slower reads as unknown
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
@@ -54,6 +57,7 @@ FIRST = ('这段对话是资源看板专用的：以后每次告急都接着这�
 AGAIN = '\n\n前面几次的处理都在上文：哪些上次就在、哪些是新的，接着用。'
 LAST = '上次（{when}）的回执：{receipt}。{judged}\n\n'                       # agent-investigates AC-04, AC-06
 STREAK = '这是连续第 {n} 次因为{why}叫你：上次处理完，后台看还紧。先说清上次漏了什么，再处理。\n\n'   # AC-05
+NEW = '跟上次（{when}）比，这次新出现的：{what}。先看这些。\n\n'                         # AC-07
 STREAK_HOURS = 12
 WHY = {'disk': '磁盘快满了', 'memory': '内存吃紧', 'asked': '用户让你现在处理一次'}
 QUEUE_POLL_SECONDS = 10       # how often to look whether the Codex App finished the turn it was handed (CH-08)
@@ -64,7 +68,8 @@ STEPS = (
     '先回答「为什么紧」，再动手：前几名是谁、各属于哪个项目、谁起的、该不该还在跑。证据在 who（谁占着内存和 CPU，'
     '主人还在不在动）、trend（最近 60 分钟的趋势）、watch_did（后台这次自己已经做了什么）里；不够就自己用只读命令查'
     '（ps、top、lsof、vm_stat、du）。别只看 orphans。',
-    '再看 memories：用户以前确认过、忽略过、在对话里说过的，是这台 Mac 的偏好。照着它出单；用户说过别动的，不要列。',
+    '再看 decisions 和 lessons：decisions 是用户以前确认过、忽略过、在对话里说过的，lessons 是以前学到的规则，'
+    '都是这台 Mac 的偏好和经验。照着它出单；用户说过别动的，不要列。',
     '能直接关的：companions 里 may_stop 为真的陪跑后台（主人走了，或起它的 agent 6 小时没动），和 orphans 里没人管的残留'
     '后台（看它开在哪个任务里、PR 合没合、改动推没推）。判断没人用了，就 `emergency stop <pid> --why "依据"`。',
     '主人还在、但你判断该关的（比如开了几天还占满一个核的流），列给用户点头：`emergency ask process-stop:<pid> --why "依据"`。'
@@ -72,7 +77,9 @@ STEPS = (
     '闲置任务挪到外接盘不丢东西：判断短期不会再用、改动都推了的，`emergency move <路径> --why "依据"`。',
     '会丢东西的（删模拟器、关模拟器、收尾任务）只能列给用户：`emergency ask <kind>:<id> --why "依据"`，'
     'kind 是 simulator-delete、simulator-shutdown 或 task-delete。依据写证据，比如「PR #12 已合入，改动都推了，3 天没开」。',
-    '这一轮学到的新情况，`emergency lesson --note "…"` 记一条。',
+    '学到了以后也用得上的经验，记成一条规则：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；'
+    '改的是已有的那条，加 `--replaces <id>`。这一次查到了什么、做了什么写进 done --summary，不要记成经验。'
+    'old_notes 是以前每次的笔记，不是规则：里面以后还用得上的，也这样改写成规则（带 --replaces）。',
     '说「恢复了」之前看 trend 的最近 10 分钟：一分钟正常不算恢复。后台收尾时也会自己再看一次。',
     '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。'
     '你的命令只记下决定，后台会在你结束后逐项复核安全底线再做：正在用的、有没推送改动的、被保护的，一律不动。',
@@ -134,8 +141,36 @@ def running(state, now):
     return bool(run) and alive(run.get('pid')) and now - run.get('started', 0) < (RUN_MINUTES + 5) * 60
 
 
-def due(state, free, critical, pressure, now):
-    """Why the agent should come now ('disk' or 'memory'), or None. Updates `state` in place (AC-01~03)."""
+def sign(group):
+    """One group of who holds what, the same from minute to minute: tool, owner and projects, not how it is doing."""
+    owner = group.get('owner') or {}
+    return '|'.join([group['tool'], owner.get('kind', ''), owner.get('name') or ''] + sorted(group.get('projects', [])))
+
+
+def view(seen, pressure, now):
+    """What the agent would be shown now, kept at each run to tell later what is new (agent-investigates AC-07)."""
+    who = seen.get('who') or {}
+    groups = who.get('groups', []) if now - who.get('at', 0) <= 600 else []
+    heavy = {sign(g): O.line(g, now) for g in groups if g['bytes'] >= HEAVY_GIB * GIB or g.get('busy_since')}
+    swap = ((seen.get('samples') or [{}])[-1]).get('swap_used')
+    return dict(at=now, pressure=pressure, swap=swap, heavy=heavy)
+
+
+def news(looked, current):
+    """What has changed since the agent last looked: a big one it has not seen, pressure gone 「严重」, swap well up."""
+    if not looked or not current:
+        return []
+    found = [line for key, line in current['heavy'].items() if key not in looked.get('heavy', {})]
+    if current['pressure'] >= 4 > looked.get('pressure', 0):
+        found.append('内存压力到了「严重」')
+    if current['swap'] is not None and looked.get('swap') is not None and current['swap'] - looked['swap'] >= SWAP_MORE_GIB:
+        found.append('swap 比上次多了 {:.0f} GB（{:.0f} → {:.0f} GB）'.format(current['swap'] - looked['swap'], looked['swap'], current['swap']))
+    return found
+
+
+def due(state, free, critical, pressure, now, current=None):
+    """Why the agent should come now ('disk' or 'memory'), or None. Updates `state` in place (AC-01~03).
+    `current` is view() now: still tight and something new, the agent comes before the quiet hours are over."""
     level = disk_level(free, critical)
     if level == 0:
         state['disk_fired'] = 0     # back above the line: the next drop counts again
@@ -146,14 +181,18 @@ def due(state, free, critical, pressure, now):
     reason = None
     if level > state.get('disk_fired', 0):
         reason = 'disk'
-    elif (pressure >= 4 or pressure >= 2 and now - state.get('warn_since', now) >= WARN_MINUTES * 60) \
-            and now - state.get('memory_fired_at', 0) >= MEMORY_QUIET_HOURS * 3600:
-        reason = 'memory'
+    elif pressure >= 4 or pressure >= 2 and now - state.get('warn_since', now) >= WARN_MINUTES * 60:
+        looked = state.get('looked') or {}
+        if now - state.get('memory_fired_at', 0) >= MEMORY_QUIET_HOURS * 3600:
+            reason = 'memory'
+        elif now - looked.get('at', 0) >= SOONER_MINUTES * 60 and (news(looked, current) or not looked and current and current['heavy']):
+            reason = 'memory'   # nothing kept from its last look (an update): what is there now is all new to it
     if reason is None or running(state, now):
         return None
     starts = [t for t in state.get('starts', []) if now - t < 86400]
     state['starts'] = starts
     if len(starts) >= DAY_LIMIT:
+        state['capped'] = dict(at=now, reason=reason)   # the user hears it once (AC-07)
         return None
     return reason
 
@@ -727,7 +766,9 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         simulators=sorted(sims, key=lambda s: -s['gib']),
         tasks=sorted(tasks_found, key=lambda t: -(t['gib'] or 0))[:25],
         waiting=[dict(id=i['id'], title=i['title'], state=i['state']) for i in pending['items']],
-        memories=agent_plan.memories(home)[-60:],
+        decisions=[m for m in agent_plan.memories(home) if m.get('kind') == 'decision'][-40:],
+        lessons=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then']) for m in agent_plan.lessons(home)],
+        old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         steps=list(STEPS))
 
@@ -753,7 +794,8 @@ def who_now(seen, table, managed, now, run=subprocess.run):
              and not any(word in row['command'] for word in NEVER)]
     wrappers = {table[p]['ppid'] for p in mates}
     mates = [p for p in mates if p not in wrappers]   # `zsh -c '… stream …'` around the stream: list the stream
-    where = O.looks(set(top) | set(hot) | set(mates) | {int(p) for p in agents if int(p) in table}, run)
+    where = O.looks(set(top) | set(hot) | set(mates) | {int(p) for p in agents if int(p) in table}
+                    | O.users(table, top + list(hot)), run)
     groups = O.group(O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot))
     helpers = []
     for pid in mates:
@@ -826,9 +868,13 @@ def receipt(made, carried, result):
         parts.append('交回 {} 条决定，照做 {} 条'.format(len(handed), len(ok))
                      + ('，跳过 {} 条（{}）'.format(len(skipped), '；'.join(sorted({d['result'] for d in skipped}))[:120]) if skipped else '')
                      + ('，{} 条列进「等你确认」'.format(len(result['asks'])) if result['asks'] else ''))
+    learned = result.get('learned', [])
+    if learned:
+        fresh = sum(1 for m in learned if not m.get('replaces'))
+        parts.append('记下 {} 条经验'.format(len(learned)) + ('（{} 条是改写旧的）'.format(len(learned) - fresh) if fresh < len(learned) else ''))
     words = '；'.join(parts) or '没有交回要做的决定'
     return dict(handed=len(handed), done=len(ok), skipped=[dict(what=d.get('pid') or d.get('path'), why=d['result']) for d in skipped],
-                asks=len(result['asks']), carried=carried, words=words)
+                asks=len(result['asks']), learned=len(learned), carried=carried, words=words)
 
 
 # ---- the agent's commands: they only write down decisions (CH-02) --------------------------------------------
@@ -859,7 +905,11 @@ def show(folder, home=None, now=None):
     return dict(generated=made, **found)
 
 
-def decide(folder, action, target=None, why='', note='', summary='', cause='', need=''):
+LESSON_HOW = '经验要写成以后也用得上的规则：--when "遇到什么情况" --do "该怎么做、为什么"；这一次做了什么写进 done --summary'
+ONCE = re.compile(r'本轮|这一轮|上一轮|上轮|这次|上次|(?<!\d)\d{1,2}:\d{2}(?!\d)')
+
+
+def decide(folder, action, target=None, why='', note='', summary='', cause='', need='', when='', then='', replaces=''):
     """One decision of the agent's, checked against the material it was given."""
     folder = Path(folder)
     found = material(folder)
@@ -900,9 +950,16 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             entry.update(id=target, kind=kind, title=Path(key).name + ('（在外接盘上）' if task['on_drive'] else ''),
                          bytes=int((task['gib'] or 0) * GIB), why=why)
     elif action == 'lesson':
-        if not note.strip():
-            raise ValueError('要写下学到了什么：--note "…"')
-        entry.update(note=note)
+        when, then, replaces = when.strip(), then.strip(), replaces.strip()
+        if not (when and then):
+            raise ValueError(LESSON_HOW)
+        once = ONCE.search(when + ' ' + then)
+        if once:
+            raise ValueError('「{}」只属于这一次。'.format(once.group(0)) + LESSON_HOW)
+        known = {m['id'] for m in found.get('lessons', []) + found.get('old_notes', [])}
+        if replaces and replaces not in known:
+            raise ValueError('材料里没有这条经验：' + replaces)
+        entry.update(when=when, then=then, **({'replaces': replaces} if replaces else {}))
     elif action == 'done':
         if not summary.strip():
             raise ValueError('要写结论：--summary "…"')
@@ -930,7 +987,7 @@ def asked_process(found, key, table=None):
     if row is None:
         raise ValueError('进程 {} 已经不在了'.format(key))
     who = O.owner(table, int(key), launchd_jobs() or set())
-    if who.get('self') or any(word in row['command'] for word in NEVER):
+    if who.get('self') or any(word in row['command'] for word in NEVER) or O.device(table, int(key)):
         raise ValueError('{} 是 App 本身、数据库、容器、调试器或模拟器，不能列'.format(O.tool(row['command'])))
     place = O.project(dict(O.looks([int(key)])).get(int(key), (None, False))[0])
     agents = watch_state(Path.home()).get('agents', {})
@@ -957,7 +1014,9 @@ def carry(folder, said):
             target = entry.get('id') if entry.get('action') == 'ask' else entry.get('pid') or entry.get('path') or entry.get('id')
             receipt['recorded'].append(decide(folder, entry['action'], target, why=entry.get('why', ''),
                                               note=entry.get('note', ''), summary=entry.get('summary', ''),
-                                              cause=entry.get('cause', ''), need=entry.get('need', '')))
+                                              cause=entry.get('cause', ''), need=entry.get('need', ''),
+                                              when=entry.get('when', ''), then=entry.get('then', ''),
+                                              replaces=entry.get('replaces', '')))
             have.add(key(entry))
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             receipt['refused'].append(dict(line=line[len(CARRY):][:120], why=(str(error) or type(error).__name__).split('\n')[0][:120]))
@@ -1111,14 +1170,16 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
         skipped = '这会儿查不清哪些程序在用它' if activity.errors else move_task(home, cfg, settings, entry['path'], activity, pins)
         done.append(dict(entry, result=skipped or '已挪到外接盘'))
     asks = add_asks(home, [e for e in made if e['action'] == 'ask'], now)
-    for entry in (e for e in made if e['action'] == 'lesson'):
+    learned = []
+    for entry in (e for e in made if e['action'] == 'lesson' and e.get('when')):
         try:
-            agent_plan.remember(home, 'lesson', 'emergency', note=entry['note'])
+            learned.append(agent_plan.learn(home, 'emergency', entry['when'], entry['then'], entry.get('replaces')))
         except (OSError, ValueError):
             pass
     last = next((e for e in reversed(made) if e['action'] == 'done'), {})
     return dict(done=done, asks=[dict(id=a['id'], title=a['title'], bytes=a['bytes']) for a in asks],
-                summary=last.get('summary', ''), cause=last.get('cause', ''), need=last.get('need', ''))
+                summary=last.get('summary', ''), cause=last.get('cause', ''), need=last.get('need', ''),
+                learned=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then'], replaces=m.get('replaces')) for m in learned])
 
 
 def notice_words(result, agent_result):
@@ -1178,6 +1239,9 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     prompt = PROMPT.format(when=time.strftime('%m-%d %H:%M', time.localtime(now)), why=WHY.get(reason, reason),
                            rgs=RGS, folder=folder)
     last = before.get('last') or {}
+    run_now = before.get('run') or {}
+    if run_now.get('new') and run_now.get('looked_at'):
+        prompt = NEW.format(when=time.strftime('%H:%M', time.localtime(run_now['looked_at'])), what='；'.join(run_now['new'])) + prompt
     if streak >= 2:
         prompt = STREAK.format(n=streak, why=WHY.get(reason, reason)) + prompt
     if last.get('receipt'):
@@ -1256,13 +1320,22 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     critical = settings.critical_free_gib * GIB
     pressure = memory_pressure(run)
     state = load_state(home)
-    reason = due(state, free, critical, pressure, now)
+    current = view(watch_state(home), pressure, now)
+    reason = due(state, free, critical, pressure, now, current)
     if asked:
         reason = None if running(state, now) else 'asked'
+    capped = state.pop('capped', None)
     if reason is None:
+        if capped and now - state.get('capped_told', 0) >= 86400:
+            state['capped_told'] = now
+            last = state.get('last') or {}
+            agent_plan.notice(home, 'agent 今天已经来了 {} 次，还是紧'.format(DAY_LIMIT),
+                              '{}。{}'.format(last.get('need') or last.get('judged') or WHY.get(capped['reason']),
+                                             '点一下打开它的对话，让它接着看。' if last.get('talk') else '明天这个时候它才会自己再来。'),
+                              tab='emergency' if last.get('talk') else 'cover')
         save_state(home, state)
         return None
-    prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired')}
+    prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired', 'looked')}
     mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
     if not ready:
@@ -1287,7 +1360,9 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     last = state.get('last') or {}
     again = last.get('tight') and last.get('reason') == reason and now - last.get('at', 0) <= STREAK_HOURS * 3600
     state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev,
-                        streak=last.get('streak', 1) + 1 if again else 1)
+                        streak=last.get('streak', 1) + 1 if again else 1, new=news(state.get('looked'), current)[:5],
+                        looked_at=(state.get('looked') or {}).get('at'))
+    state['looked'] = current
     save_state(home, state)
     return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
 

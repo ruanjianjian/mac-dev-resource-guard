@@ -7,6 +7,7 @@ often holds secrets.
 """
 from pathlib import Path
 import os
+import plistlib
 import re
 import subprocess
 
@@ -53,6 +54,9 @@ COMPANIONS = (
 SYSTEM = re.compile(r'^/(?:System|usr/libexec|usr/sbin|sbin)/|^/Library/(?:Apple|SystemExtensions|Developer/PrivateFrameworks)/'
                     r'|\.xpc/Contents/MacOS/')
 SERVERS = ('语言服务', 'agent 帮手')   # they answer clients: only after hours without any CPU of their own
+# A simulator's own processes sit under its launchd_sim, or run from its folder; both name the device (AC-06).
+DEVICE = re.compile(r'/CoreSimulator/Devices/([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})/')
+OWNER_ORDER = ('agent', 'editor', 'terminal', 'app')   # who speaks for a simulator several tools are connected to
 FRIENDLY = {'node': 'node', 'Python': 'python', 'python3': 'python'}
 
 
@@ -148,6 +152,67 @@ def tool(command):
 
 def companion(command):
     return next((label for label, pattern in COMPANIONS if pattern.search(command)), None)
+
+
+def device(table, pid):
+    """The simulator a process runs inside (its UDID), or None: the process or one above it is that device's
+    launchd_sim, or runs a program from the device's folder (an app being tested)."""
+    current, seen = table.get(pid), set()
+    while current is not None and current['pid'] not in seen:
+        seen.add(current['pid'])
+        found = DEVICE.search(current['command'])
+        first = current['command'].split()[0] if current['command'].split() else ''
+        if found and (Path(first).name == 'launchd_sim' or DEVICE.search(first)):
+            return found.group(1)
+        current = table.get(current['ppid'])
+    return None
+
+
+_NAMES = {}
+
+
+def device_name(udid, home=None):
+    """「iPhone 17 Pro」 from the device's own plist: no simctl, which hangs when the Mac is this tight."""
+    if udid not in _NAMES:
+        plist = (Path.home() if home is None else Path(home)) / 'Library/Developer/CoreSimulator/Devices' / udid / 'device.plist'
+        try:
+            _NAMES[udid] = plistlib.loads(plist.read_bytes()).get('name') or udid[:8]
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            _NAMES[udid] = udid[:8]
+    return _NAMES[udid]
+
+
+def connected(table, udid):
+    """Processes outside the simulator that name it: a screen or log stream, a test run, a build for it."""
+    return [pid for pid, row in table.items() if udid in row['command'] and device(table, pid) != udid
+            and 'CoreSimulator.framework' not in row['command'] and not any(w in row['command'] for w in NEVER[:3])]
+
+
+def users(table, pids):
+    """What callers should also look at (lsof) to tell a simulator's project: who is connected to the ones listed."""
+    found = set()
+    for udid in {device(table, p) for p in pids} - {None}:
+        found.update(connected(table, udid))
+    return found
+
+
+def sim_owner(table, udid, managed=()):
+    """Who uses a simulator (AC-06): the owner of what is connected to it, an agent first; the Simulator App when
+    only it shows the device; nobody when nothing is connected, or only what nobody owns any more."""
+    found, links = [], connected(table, udid)
+    for pid in links:
+        who = owner(table, pid, managed)
+        mine = kind_of(table[pid]['command'])
+        if mine and mine[0] in OWNER_ORDER:   # the tool itself can own (Xcode running the tests)
+            who = dict(kind=mine[0], name=mine[1], pid=pid)
+        if who['kind'] in OWNER_ORDER:
+            found.append(dict(who, via='uses', user=pid))
+    if found:
+        return min(found, key=lambda w: OWNER_ORDER.index(w['kind']))
+    if any(bundle(row['command']) == 'Simulator' for row in table.values()):
+        return dict(kind='app', name='Simulator', via='shows')
+    left = sorted({tool(table[p]['command']) for p in links if not table[p]['command'].startswith(('sh ', '/bin/sh ', 'zsh ', '/bin/zsh '))})
+    return dict(kind='gone', via='sim', left=left, since=max((table[p]['age'] for p in links), default=None))
 
 
 def owner(table, pid, managed=()):
@@ -284,20 +349,23 @@ def fact(who, row, agents, now):
     """What can be seen about its owner, instead of 「在用」 (AC-02)."""
     if who.get('self'):
         return 'App 本身'
+    verb = '在用' if who.get('via') == 'uses' else '起的'
     if who['kind'] == 'agent':
         moved, entry = still_since(who, agents), agents.get(str(who.get('pid'))) or {}
         if moved is None or moved == entry.get('seen') and now - moved < AGENT_QUIET_HOURS * 3600:
-            return who['name'] + ' 起的'   # not seen moving yet: nothing to say about it
+            return '{} {}'.format(who['name'], verb)   # not seen moving yet: nothing to say about it
         quiet = now - moved
         if quiet < 120:
-            return '{} 起的 · 刚刚还在动'.format(who['name'])
-        return '{} 起的 · {}{}'.format(who['name'], span(quiet), '前还在动' if quiet < 3600 else '没动')
+            return '{} {} · 刚刚还在动'.format(who['name'], verb)
+        return '{} {} · {}{}'.format(who['name'], verb, span(quiet), '前还在动' if quiet < 3600 else '没动')
     if who['kind'] in ('editor', 'terminal', 'app'):
-        return '{} 开着'.format(who['name'])
+        return '{} {}'.format(who['name'], '在用' if who.get('via') == 'uses' else '开着')
     if who['kind'] == 'service':
         return '后台服务'
     if who['kind'] == 'gone':
-        return '没人管了 · {}'.format(span(row['age']))
+        if who.get('via') == 'sim' and who.get('left'):   # only a stream nobody owns any more is connected
+            return '只有没人管的 {} 连着 · {}'.format('、'.join(who['left']), span(who['since'] or row['age']))
+        return ('没人连着 · {}' if who.get('via') == 'sim' else '没人管了 · {}').format(span(row['age']))
     return '查不到是谁的'
 
 
@@ -346,9 +414,16 @@ def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, hom
         row = table.get(pid)
         if row is None:
             continue
-        who = owner(table, pid, managed)
-        place = None if who.get('self') or who['kind'] == 'service' else project(where.get(pid, (None, False))[0], home)
-        rows.append(dict(pid=pid, lstart=row['lstart'], tool=tool(row['command']), project=place and place['path'],
+        udid = device(table, pid)
+        if udid:   # one of a simulator's own processes: the simulator is the tool, whoever is connected its owner
+            who = sim_owner(table, udid, managed)
+            name = 'iOS 模拟器 · ' + device_name(udid, home)
+            place = project(where.get(who.get('user'), (None, False))[0], home)
+        else:
+            who = owner(table, pid, managed)
+            name = tool(row['command'])
+            place = None if who.get('self') or who['kind'] == 'service' else project(where.get(pid, (None, False))[0], home)
+        rows.append(dict(pid=pid, lstart=row['lstart'], tool=name, project=place and place['path'], sim=udid,
                          owner=who, fact=fact(who, row, agents, now), age=row['age'],
                          bytes=max(row['rss'], (sizes or {}).get(pid, 0)), cores=round(row.get('pcpu', 0) / 100, 1),
                          busy_since=hot.get(pid), companion=companion(row['command'])))
@@ -362,7 +437,8 @@ def group(rows):
         who = row['owner']
         key = (row['tool'], who['kind'], who.get('name'))
         entry = groups.setdefault(key, dict(tool=row['tool'], owner=who, count=0, projects=[], bytes=0, cores=0.0,
-                                            age=0, fact=row['fact'], busy_since=None, pids=[], app=bool(who.get('self'))))
+                                            age=0, fact=row['fact'], busy_since=None, pids=[],
+                                            app=bool(who.get('self') or row.get('sim'))))   # one simulator is one thing
         entry['count'] += 1
         entry['bytes'] += row['bytes']
         entry['cores'] = round(entry['cores'] + row['cores'], 1)

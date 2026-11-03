@@ -214,6 +214,7 @@ def who(state, table, now, managed, run=subprocess.run, sizes=None, own=()):
     top = sorted((p for p in table if p not in own and 'kernel_task' not in table[p]['command']), key=held_by, reverse=True)[:O.TOP]
     agents = O.track(state, table, now)
     pids = set(top) | set(hot) | set(companions(table, own, managed)) | {int(p) for p in agents}
+    pids |= O.users(table, top + list(hot))   # who is connected to a simulator tells its project (know-who AC-06)
     where = O.seen_where(state, table, [p for p in pids if p in table], run)
     rows = O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot)
     groups = O.group(rows)
@@ -298,25 +299,25 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         everything = why is None and len(calm) >= NORMAL_TO_RELEASE and all(s['pressure'] <= 1 for s in calm[-NORMAL_TO_RELEASE:])
         result['released'] = release(state, table, kill, now, everything=everything)
     groups = []
+    # While tight most of what each one holds is swapped or compressed, which ps does not see (11-03: the Claude App
+    # showed 0.5 GB of its 4 GB): who holds what is measured the way top counts it then.
+    sizes = footprints(run) if why and table is not None else None
     if table is not None:
         managed = E.launchd_jobs(run) if managed is None else managed
         if managed is not None:
             try:
-                groups, where = who(state, table, now, managed, run, own=[os.getpid()])
+                groups, where = who(state, table, now, managed, run, sizes=sizes, own=[os.getpid()])
             except (OSError, subprocess.SubprocessError):
                 groups, where = [], {}
             observe(state, [dict(pid=p, lstart=table[p]['lstart'], cpu_seconds=sum(table[c]['cpu'] for c in E.descendants(table, p) if c in table))
                             for p in companions(table, [os.getpid()], managed) if O.companion(table[p]['command']) in O.SERVERS], now)
             result['stopped'] = leftovers(state, table, kill, sleep, now, managed, where, bool(why), own=[os.getpid()])
     if why and table is not None:
-        sizes = footprints(run)
         result['paused'] = queue(state, table, kill, now, own=[os.getpid()], sizes=sizes)
         quiet = now - state.get('noticed_at', 0) >= NOTICE_GAP
         if not state.get('episode'):
             state['episode'] = dict(since=now, why=why)
             if quiet:
-                if managed is not None:
-                    groups, _ = who(state, table, now, managed, run, sizes=sizes, own=[os.getpid()])
                 body = words(result['stopped'], result['paused'], top_users(groups), big_sessions(home, now), hot_users(groups, now))
                 notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
                 state['noticed_at'] = now

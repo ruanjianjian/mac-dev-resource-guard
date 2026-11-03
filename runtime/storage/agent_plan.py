@@ -11,6 +11,7 @@ import fcntl
 import functools
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -391,8 +392,9 @@ def remove_keep(home, path, by='agent', why=''):
 
 
 @_writes
-def remember(home, kind, about, note='', words='', path=None, decision=None, source='agent'):
-    """One memory: a decision of the user's (with their own words when there are any) or a lesson (RAW-04)."""
+def remember(home, kind, about, note='', words='', path=None, decision=None, source='agent', rule=None, replaces=None):
+    """One memory: a decision of the user's (with their own words when there are any) or a lesson (RAW-04).
+    A lesson with a `rule` ({when, then}) is one to use again; `replaces` names the one it rewrites."""
     if kind not in KINDS:
         raise ValueError('记忆只有两种：decision（用户的决定）或 lesson（学到的教训）')
     if not str(about or '').strip():
@@ -400,7 +402,8 @@ def remember(home, kind, about, note='', words='', path=None, decision=None, sou
     if not (str(note or '').strip() or str(words or '').strip()):
         raise ValueError('要写下用户的原话或说明')
     entry = dict(id='m{}'.format(len(_read_lines(home, MEMORY)) + 1), at=time.time(), kind=kind, source=source,
-                 about=str(about), decision=decision, path=str(path) if path else None, words=words, note=note)
+                 about=str(about), decision=decision, path=str(path) if path else None, words=words, note=note,
+                 **({'rule': rule} if rule else {}), **({'replaces': replaces} if replaces else {}))
     _append(home, MEMORY, entry)
     return entry
 
@@ -408,6 +411,32 @@ def remember(home, kind, about, note='', words='', path=None, decision=None, sou
 def memories(home, about=None, last=None):
     found = [m for m in _read_lines(home, MEMORY) if about is None or m.get('about') == about]
     return found[-last:] if last else found
+
+
+def _replaced(found):
+    return {m['replaces'] for m in found if m.get('replaces')}
+
+
+def lessons(home, about=None):
+    """The rules learned so far (agent-investigates AC-08): 「when → then」 lessons, each only in its newest form."""
+    found = [m for m in memories(home, about) if m.get('kind') == 'lesson']
+    gone = _replaced(found)
+    return [m for m in found if m.get('rule') and m['id'] not in gone]
+
+
+def old_notes(home, about='emergency'):
+    """Lessons written before they had to be rules: mostly one run's notes, a few worth rewriting as rules."""
+    found = [m for m in memories(home) if m.get('kind') == 'lesson']
+    gone = _replaced(found)
+    return [m for m in found if not m.get('rule') and m.get('about') == about and m['id'] not in gone]
+
+
+def learn(home, about, when, then, replaces=None):
+    """A rule learned; one already kept for the same situation is rewritten, not repeated (AC-08)."""
+    same = lambda text: re.sub(r'\s+', '', text)
+    if not replaces:
+        replaces = next((m['id'] for m in lessons(home, about) if same(m['rule']['when']) == same(when)), None)
+    return remember(home, 'lesson', about, note='{} → {}'.format(when, then), rule=dict(when=when, then=then), replaces=replaces)
 
 
 @_writes

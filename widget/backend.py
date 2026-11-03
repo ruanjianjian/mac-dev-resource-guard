@@ -801,25 +801,28 @@ class Adapter:
             simulators = (json.loads(fixture.read_text()) if fixture.is_file() else []) if self.isolated else memory_external.simulator_inspect()
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             simulators = []
+        watched = self.home / '.local/state/dev-resource-guard/watch.json'
+        seen = (read_json(watched) if watched.is_file() else None) or {}
+        picture = seen.get('who') or {}
+        groups = picture.get('groups') if now - picture.get('at', 0) <= 300 else None
+        sys.path.insert(0, str(engine_root() / 'runtime/storage'))
+        import owners
         for sim in sorted(simulators, key=lambda r: -r['rss_kib']):
+            whose = next((g for g in groups or [] if set(g['pids']) & set(sim.get('pids', []))), None)   # know-who AC-06
             if sim['reason'] == 'simulator_not_attached':
                 hours = (now - idle_since.get('simulator:' + sim['id'], now)) / 3600
                 rows.append(dict(id='sim:' + sim['id'], title=sim['name'], category='可以关掉', bytes=sim['rss_kib'] * 1024,
                                  eligible=True, command=None, detail='', outcome=None, tag='free',
                                  reason='{:.0f} 小时没连 · 可以关'.format(hours) if hours >= 1 else '现在没连 · 可以关'))
             else:
-                rows.append(dict(id='sim:' + sim['id'], title=sim['name'] + ' 模拟器', category='正在用', bytes=sim['rss_kib'] * 1024,
-                                 eligible=False, command=None, detail='', outcome=None, tag='link',
-                                 reason=('、'.join(sim['attached']) or '开发工具') + ' 连着'))
+                hot = owners.busy_words(whose, now) if whose else ''
+                rows.append(dict(id='sim:' + sim['id'], title=sim['name'] + ' 模拟器' + (' · ' + owners.where_words(whose) if whose and whose['projects'] else ''),
+                                 category='正在用', bytes=sim['rss_kib'] * 1024, eligible=False, command=None, detail='', outcome=None, tag='link',
+                                 reason=(hot + ' · ' if hot else '') + (whose['fact'] if whose and whose['owner'].get('via') == 'uses'
+                                                                        else ('、'.join(sim['attached']) or '开发工具') + ' 连着')))
         inside = {pid for sim in simulators for pid in sim.get('pids', [])}   # apps running in a simulator count there
         system = ('Simulator', 'SimMetalHost', 'SimRender', 'launchd_sim', 'kernel_task', 'WindowServer', 'iOS 模拟器')
-        watched = self.home / '.local/state/dev-resource-guard/watch.json'
-        seen = (read_json(watched) if watched.is_file() else None) or {}
-        picture = seen.get('who') or {}
-        groups = picture.get('groups') if now - picture.get('at', 0) <= 300 else None
         # know-who AC-02: whose each one is, what can be seen of its owner, and how busy it is.
-        sys.path.insert(0, str(engine_root() / 'runtime/storage'))
-        import owners
         for group in (groups or [])[:8]:
             if any(pid in inside for pid in group['pids']) or any(word in group['tool'] for word in system):
                 continue
