@@ -20,8 +20,9 @@ DAY = 86400
 
 class Readings:
     """sysctl answers for one minute: pressure and swap in GB."""
-    def __init__(self, pressure=1, swap_used=1.0, swap_total=16.0):
+    def __init__(self, pressure=1, swap_used=1.0, swap_total=16.0, folders=None):
         self.pressure, self.used, self.total = pressure, swap_used, swap_total
+        self.folders, self.writes = folders or {}, set()
 
     def __call__(self, args, **kwargs):
         if 'kern.memorystatus_vm_pressure_level' in args:
@@ -31,11 +32,16 @@ class Readings:
                 self.total * 1024, self.used * 1024), '')
         if args[:2] == ['/bin/launchctl', 'list']:
             return subprocess.CompletedProcess(args, 0, 'PID\tStatus\tLabel\n987\t0\tcn.example.service\n', '')
+        if args[0] == '/usr/sbin/lsof':   # every process works in its folder, output to nowhere
+            pids = args[args.index('-p') + 1].split(',')
+            return subprocess.CompletedProcess(args, 0, ''.join('p{0}\nfcwd\ntDIR\nn{1}\nf1\nt{2}\nn{3}\n'.format(
+                p, self.folders.get(int(p), '/'), *(('REG', '/tmp/rec.log') if int(p) in self.writes else ('CHR', '/dev/null')))
+                for p in pids), '')
         return subprocess.CompletedProcess(args, 0, '', '')
 
 
-def row(pid, command, ppid=1, hours=30, cpu=10.0, gib=0.1, lstart='Thu Oct 29 13:22:55 2026'):
-    return dict(pid=pid, ppid=ppid, age=hours * 3600, cpu=cpu, rss=int(gib * GIB), lstart=lstart, command=command)
+def row(pid, command, ppid=1, hours=30, cpu=10.0, gib=0.1, lstart='Thu Oct 29 13:22:55 2026', pcpu=0.0):
+    return dict(pid=pid, ppid=ppid, age=hours * 3600, cpu=cpu, pcpu=pcpu, rss=int(gib * GIB), lstart=lstart, command=command)
 
 
 class WatchFixture(TierFixture):
@@ -49,7 +55,7 @@ class WatchFixture(TierFixture):
     def tick(self, now, readings, table, **kwargs):
         kwargs.setdefault('managed', {987})
         return W.tick(self.home, now, run=readings, table=table, kill=self.kill, sleep=lambda s: None,
-                      cwd_of=lambda pids: {p: '/' for p in pids}, notice=self.notice, **kwargs)
+                      notice=self.notice, **kwargs)
 
 
 class SqueezeTest(unittest.TestCase):
@@ -101,6 +107,62 @@ class LeftoverTest(WatchFixture):
         result = self.tick(NOW, Readings(pressure=1), {100: row(100, 'baguette stream --udid X')})
         self.assertIsNone(result['tight'])
         self.assertEqual(self.kills, [])
+
+
+class CompanionTest(WatchFixture):
+    """know-who AC-03: companions go by their owner, not by whether their parent exited."""
+    TERM = row(10, '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal', hours=80)
+    CLAUDE = row(13, '/opt/homebrew/bin/claude --resume abc', ppid=10, hours=80, cpu=500.0)
+
+    def table(self, claude_cpu=500.0, more=None):
+        return {10: self.TERM, 13: dict(self.CLAUDE, cpu=claude_cpu),
+                61: row(61, 'sim-mirror stream --udid 4E5D --fps 1', ppid=13, hours=72, cpu=72 * 3600 * 0.99, pcpu=99.0), **(more or {})}
+
+    def test_a_stream_its_agent_left_goes_after_six_still_hours_even_while_memory_is_fine(self):
+        self.assertEqual(self.tick(NOW, Readings(), self.table())['stopped'], [])          # the agent was just seen
+        for hour in range(1, 7):
+            self.tick(NOW + hour * 3600, Readings(), self.table(500.0 + hour * 0.2))     # idle: barely any CPU
+        result = self.tick(NOW + 6 * 3600 + 120, Readings(), self.table(501.3))
+        self.assertEqual([s['pid'] for s in result['stopped']], [61])
+        self.assertIn('Claude Code 已经 6 小时没动', result['stopped'][0]['why'])
+        self.assertNotIn((13, signal.SIGTERM), self.kills)                               # never the agent itself
+        [(title, body, tab)] = self.notices
+        self.assertEqual((title, tab), ('关掉了占着 CPU 的陪跑后台', 'memory'))
+        self.assertIn('sim-mirror', body)
+
+    def test_an_agent_that_keeps_working_keeps_its_stream(self):
+        self.tick(NOW, Readings(), self.table())
+        self.tick(NOW + 3 * 3600, Readings(), self.table(500.5))
+        self.tick(NOW + 3 * 3600 + 60, Readings(), self.table(505.5))                    # a turn three hours in
+        result = self.tick(NOW + 7 * 3600, Readings(pressure=4), self.table(505.7))
+        self.assertEqual(result['stopped'], [])
+
+    def test_editor_and_terminal_companions_and_recordings_stay(self):
+        cursor = {20: row(20, '/Applications/Cursor.app/Contents/MacOS/Cursor', hours=80),
+                  22: row(22, 'node /x/node_modules/typescript/lib/tsserver.js', ppid=20, hours=80, pcpu=90.0),
+                  31: row(31, '/bin/zsh', ppid=10, hours=80),
+                  32: row(32, 'tail -f /var/log/system.log', ppid=31, hours=80, pcpu=60.0),
+                  50: row(50, 'xcrun simctl spawn booted log stream --level debug', hours=30, pcpu=70.0)}
+        readings = Readings(pressure=4)
+        readings.writes = {50}
+        self.tick(NOW, readings, self.table(more=cursor))
+        result = self.tick(NOW + 7 * 3600, readings, self.table(more=cursor))
+        self.assertEqual([s['pid'] for s in result['stopped']], [61])
+        for pid in (22, 32, 50):
+            self.assertNotIn((pid, signal.SIGTERM), self.kills)
+
+    def test_the_minute_keeps_who_holds_what_for_the_page_and_the_agent(self):
+        readings = Readings(folders={101: '/code/shop', 102: '/code/blog'})
+        table = self.table(more={101: row(101, 'node /code/shop/server.js', ppid=13, gib=1.5),
+                                 102: row(102, 'node /code/blog/server.js', ppid=13, gib=1.0)})
+        self.tick(NOW, readings, table)
+        lines = W.status(self.home, NOW)['who']
+        self.assertIn('node server.js ×2 · 2 个项目：shop、blog · Claude Code 起的', lines)   # not seen moving yet: no claim
+        self.assertIn('sim-mirror · Claude Code 起的 · 占满 1 个核已经 3 天', lines)
+        self.assertIn('Terminal · App 本身', lines)
+        table[13] = dict(table[13], cpu=table[13]['cpu'] + 5)                                 # a turn
+        self.tick(NOW + 60, readings, table)
+        self.assertIn('node server.js ×2 · 2 个项目：shop、blog · Claude Code 起的 · 刚刚还在动', W.status(self.home, NOW + 60)['who'])
 
 
 class QueueTest(WatchFixture):
@@ -162,7 +224,7 @@ class QueueTest(WatchFixture):
             return readings(args, **kwargs)
         result = self.tick(NOW, run, table)
         self.assertEqual(sorted(p['pid'] for p in result['paused']), [2, 3])     # ps shows 0.18 GB each; top 3 GB
-        self.assertIn('tsc 8.8 GB', self.notices[0][1])
+        self.assertIn('tsc ×3 8.8 GB', self.notices[0][1])   # whose they are cannot be told here: nothing made up
 
     def test_apps_databases_and_light_jobs_are_never_queued(self):
         table = {1: row(1, '/Applications/Claude.app/Contents/MacOS/Claude', hours=1, cpu=900.0, gib=6.0),

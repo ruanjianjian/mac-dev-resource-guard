@@ -100,6 +100,26 @@ class DashboardTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.adapter.run('memory-clean', value['token'])
             run.assert_called_once_with('dev-memory', ['inspect', '--json'])
 
+    def test_memory_page_says_whose_each_one_is(self):
+        """know-who AC-02: what can be seen of each owner instead of 「在用 · 不动」, and how busy it is."""
+        now = time.time()
+        claude = dict(kind='agent', name='Claude Code', pid=13)
+        groups = [dict(title='node server.js ×4', tool='node server.js', owner=claude, count=4, projects=['a', 'b', 'c', 'd'],
+                       bytes=3 * 2 ** 30, cores=0.2, age=7200, fact='Claude Code 起的 · 5 分钟前还在动', busy_since=None, pids=[101, 102, 103, 104], app=False),
+                  dict(title='Baguette', tool='Baguette', owner=dict(kind='gone'), count=1, projects=[], bytes=12 * 2 ** 20,
+                       cores=1.0, age=3 * 86400, fact='没人管了 · 3 天', busy_since=now - 3 * 86400, pids=[61], app=False),
+                  dict(title='WindowServer', tool='WindowServer', owner=dict(kind='service', name='WindowServer'), count=1, projects=[],
+                       bytes=2 ** 30, cores=0.1, age=86400, fact='后台服务', busy_since=None, pids=[300], app=False)]
+        path = self.home / '.local/state/dev-resource-guard/watch.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(who=dict(at=now, groups=groups))))
+        rows = {r['title']: r for r in self.adapter.run('memory-page')['rows'] if r['category'] == '正在用'}
+        self.assertEqual(set(rows), {'node server.js ×4 · 4 个项目：a、b、c等', 'Baguette'})   # the system's own is not listed
+        node = rows['node server.js ×4 · 4 个项目：a、b、c等']
+        self.assertEqual((node['reason'], node['tag'], node['bytes']), ('Claude Code 起的 · 5 分钟前还在动', 'use', 3 * 2 ** 30))
+        self.assertEqual((rows['Baguette']['reason'], rows['Baguette']['tag']), ('占满 1 个核已经 3 天 · 没人管了 · 3 天', 'auto'))
+        self.assertFalse(any('在用 · 不动' in r['reason'] for r in rows.values()))
+
     def test_memory_preserves_apps_devices_and_pending(self):
         rows = backend.rows_memory(memory(external_resources=[dict(id='gradle:1', kind='gradle', eligible=False, reason='pending_readonly_no_retry')],
             top_memory=[dict(pid=123, name='Xcode', mem='1G', argv='SECRET', policy='保留')],

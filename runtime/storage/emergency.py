@@ -26,6 +26,7 @@ import agent_plan
 import ask_tier
 import auto_tier
 import checkup
+import owners as O
 import plan as space_plan
 import tasks as T
 
@@ -43,35 +44,38 @@ GIT_SECONDS = 15              # one git call while gathering the material; slowe
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
-ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete')
-# Background helpers agents leave behind: app-server brokers, MCP servers, REPLs, log tails and searches.
-AGENT_HINTS = ('app-server-broker', 'codex app-server', 'mcp-server', 'mcp_server', 'node_repl',
-               'tail -n +1 -F', 'ugrep ', 'baguette stream', 'log stream')
-# Never an orphan to stop, whatever its parent: this tool itself, and the user's databases, containers and
-# debuggers (SKILL.md 内存: no killing of those).
-NEVER = ('resource-guard', 'ResourceDashboard', 'dev-memory', 'postgres', 'mongod', 'redis-server', 'mysqld',
-         'docker', 'com.docker', 'qemu', 'lldb', 'debugserver', 'launchd_sim', 'Simulator.app')
+ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop')
+NEVER = O.NEVER
 RGS = Path.home() / '.local/bin/resource-guard-service'
 PROMPT = ('{when} 资源看板又叫你来了：{why}。用 mac-dev-resource-guard 这个 skill 处理：先运行 `{rgs} emergency show`'
           '（这次的材料在 {folder}），照里面的 steps 做。这次是资源看板自己把你叫来的，用户不在场；全程用简体中文。')
 FIRST = ('这段对话是资源看板专用的：以后每次告急都接着这里叫你，前面做过什么、用户回过什么、学到了什么都在上文，'
          '你自己记着用。\n\n')
 AGAIN = '\n\n前面几次的处理都在上文：哪些上次就在、哪些是新的，接着用。'
+LAST = '上次（{when}）的回执：{receipt}。{judged}\n\n'                       # agent-investigates AC-04, AC-06
+STREAK = '这是连续第 {n} 次因为{why}叫你：上次处理完，后台看还紧。先说清上次漏了什么，再处理。\n\n'   # AC-05
+STREAK_HOURS = 12
 WHY = {'disk': '磁盘快满了', 'memory': '内存吃紧', 'asked': '用户让你现在处理一次'}
 QUEUE_POLL_SECONDS = 10       # how often to look whether the Codex App finished the turn it was handed (CH-08)
 CARRY = 'RG-DECISION '        # a decision the agent could not write comes back in its reply after this (CH-08)
 UNWRITABLE = ('这一轮写不进去（只读）。不要申请权限：把下面这一行原样放进你最后的回复，资源看板会照它处理。\n')
 STEPS = (
     '目标是这台 Mac 不卡：内置盘回到目标以上，内存不再吃紧。计划里的规则是起点，不是边界：规则没碰到的大头，你来判断。',
-    '先看 memories：用户以前确认过、忽略过、在对话里说过的，是这台 Mac 的偏好。照着它出单；用户说过别动的，不要列。',
-    '没人管的残留后台（orphans：父进程已退出、放了一天以上）占着内存，还会让任务目录看起来像在用。'
-    '看它开在哪个任务里、那个任务的 PR 合没合、改动推没推；判断没人用了，就 `emergency stop <pid> --why "依据"`。',
+    '先回答「为什么紧」，再动手：前几名是谁、各属于哪个项目、谁起的、该不该还在跑。证据在 who（谁占着内存和 CPU，'
+    '主人还在不在动）、trend（最近 60 分钟的趋势）、watch_did（后台这次自己已经做了什么）里；不够就自己用只读命令查'
+    '（ps、top、lsof、vm_stat、du）。别只看 orphans。',
+    '再看 memories：用户以前确认过、忽略过、在对话里说过的，是这台 Mac 的偏好。照着它出单；用户说过别动的，不要列。',
+    '能直接关的：companions 里 may_stop 为真的陪跑后台（主人走了，或起它的 agent 6 小时没动），和 orphans 里没人管的残留'
+    '后台（看它开在哪个任务里、PR 合没合、改动推没推）。判断没人用了，就 `emergency stop <pid> --why "依据"`。',
+    '主人还在、但你判断该关的（比如开了几天还占满一个核的流），列给用户点头：`emergency ask process-stop:<pid> --why "依据"`。'
+    'App 本身、数据库、容器、调试器、模拟器本身都不碰。',
     '闲置任务挪到外接盘不丢东西：判断短期不会再用、改动都推了的，`emergency move <路径> --why "依据"`。',
     '会丢东西的（删模拟器、关模拟器、收尾任务）只能列给用户：`emergency ask <kind>:<id> --why "依据"`，'
     'kind 是 simulator-delete、simulator-shutdown 或 task-delete。依据写证据，比如「PR #12 已合入，改动都推了，3 天没开」。',
     '这一轮学到的新情况，`emergency lesson --note "…"` 记一条。',
-    '最后 `emergency done --summary "三句话以内"`：做了什么、列了什么等用户点头、还差多少。你的命令只记下决定，'
-    '后台会在你结束后逐项复核安全底线再做：正在用的、有没推送改动的、被保护的，一律不动。',
+    '说「恢复了」之前看 trend 的最近 10 分钟：一分钟正常不算恢复。后台收尾时也会自己再看一次。',
+    '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。'
+    '你的命令只记下决定，后台会在你结束后逐项复核安全底线再做：正在用的、有没推送改动的、被保护的，一律不动。',
     '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
 )
 
@@ -450,17 +454,17 @@ def _seconds(text):
 
 
 def process_table(run=subprocess.run):
-    out = run(['/bin/ps', '-axww', '-o', 'pid=,ppid=,etime=,time=,rss=,lstart=,command='], capture_output=True,
+    out = run(['/bin/ps', '-axww', '-o', 'pid=,ppid=,uid=,etime=,time=,%cpu=,rss=,lstart=,command='], capture_output=True,
               text=True, errors='surrogateescape', timeout=20).stdout
     table = {}
     for line in out.splitlines():
-        fields = line.split(None, 10)
-        if len(fields) < 11 or not fields[0].isdigit():
+        fields = line.split(None, 12)
+        if len(fields) < 13 or not fields[0].isdigit():
             continue
         try:
-            table[int(fields[0])] = dict(pid=int(fields[0]), ppid=int(fields[1]), age=_seconds(fields[2]),
-                                         cpu=_seconds(fields[3]), rss=int(fields[4]) * 1024,
-                                         lstart=' '.join(fields[5:10]), command=fields[10])
+            table[int(fields[0])] = dict(pid=int(fields[0]), ppid=int(fields[1]), uid=int(fields[2]), age=_seconds(fields[3]),
+                                         cpu=_seconds(fields[4]), pcpu=float(fields[5]), rss=int(fields[6]) * 1024,
+                                         lstart=' '.join(fields[7:12]), command=fields[12])
         except ValueError:
             continue
     return table
@@ -519,7 +523,7 @@ def orphans(task_roots, table=None, cwd_of=cwds, own=None, managed=None):
     for row in roots:
         cwd = where.get(row['pid'], '')
         inside = next((str(root) for root in task_roots if cwd == str(root) or cwd.startswith(str(root).rstrip('/') + '/')), None)
-        if not inside and not any(word in row['command'] for word in AGENT_HINTS):
+        if not inside and O.companion(row['command']) is None:
             continue
         tree = descendants(table, row['pid'])
         found.append(dict(pid=row['pid'], lstart=row['lstart'], age_hours=round(row['age'] / 3600, 1),
@@ -702,6 +706,13 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
                              attached=ask_tier.attached(device['udid'], activity), tasks=named.get(device['udid'], [])))
     roots = [Path(r['path']) for r in cfg['task_roots']]
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
+    seen = watch_state(home)
+    try:
+        table = process_table() if table is None else table
+        jobs = (launchd_jobs() or set()) if managed is None else managed
+        groups, helpers = who_now(seen, table, jobs, now)
+    except (OSError, subprocess.SubprocessError):
+        groups, helpers = [], []
     return dict(
         schema=1, at=now, reason=reason, rgs=str(RGS),
         why=why_words(reason, free, settings.critical_free_gib * GIB, memory_pressure()),
@@ -709,6 +720,9 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
                   external=str(cfg['external_root']) if cfg['external_root'] else None,
                   external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
         memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
+        who=[dict(line=O.line(g, now), pids=g['pids'][:8], gib=round(g['bytes'] / GIB, 1), cores=g['cores'], owner=g['owner'])
+             for g in groups[:10]],
+        companions=helpers, trend=trend(seen.get('samples', []), now), watch_did=watch_did(seen, now),
         orphans=leftovers(roots, table, cwd_of, set() if table is not None and managed is None else managed),
         simulators=sorted(sims, key=lambda s: -s['gib']),
         tasks=sorted(tasks_found, key=lambda t: -(t['gib'] or 0))[:25],
@@ -716,6 +730,105 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         memories=agent_plan.memories(home)[-60:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         steps=list(STEPS))
+
+
+def watch_state(home):
+    try:
+        return json.loads((state_root(home) / 'watch.json').read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def who_now(seen, table, managed, now, run=subprocess.run):
+    """know-who AC-01 for the material: who holds memory and CPU, and which companions may go and why.
+    The watch's agent clocks are used as they are; nothing is written back."""
+    agents = seen.get('agents', {})
+    hot = {p: now - row['age'] for p, row in table.items() if row.get('pcpu', 0) >= O.BUSY_SHARE * 100
+           and row['age'] >= O.BUSY_MINUTES * 60 and row['cpu'] / row['age'] >= O.BUSY_SHARE}
+    hot.update({int(p): v[1] for p, v in seen.get('busy', {}).items() if int(p) in table and now - v[1] >= O.BUSY_MINUTES * 60})
+    sizes = O.footprints(run)   # swapped and compressed memory too: on a tight Mac most of it is there
+    top = sorted((p for p in table if 'kernel_task' not in table[p]['command']),
+                 key=lambda p: -max(table[p]['rss'], sizes.get(p, 0)))[:O.TOP]
+    mates = [p for p, row in table.items() if O.companion(row['command']) and p not in managed
+             and not any(word in row['command'] for word in NEVER)]
+    wrappers = {table[p]['ppid'] for p in mates}
+    mates = [p for p in mates if p not in wrappers]   # `zsh -c '… stream …'` around the stream: list the stream
+    where = O.looks(set(top) | set(hot) | set(mates) | {int(p) for p in agents if int(p) in table}, run)
+    groups = O.group(O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot))
+    helpers = []
+    for pid in mates:
+        quiet = seen.get('seen', {}).get(str(pid))
+        who = O.owner(table, pid, managed)
+        yes, why = O.verdict(table[pid], who, where, agents, quiet and quiet['since'], now)
+        row = O.describe(table, [pid], where, agents, managed, now, hot=hot)[0]
+        helpers.append(dict(pid=pid, lstart=table[pid]['lstart'], line=O.line(dict(row, title=row['tool'], projects=O.names([row['project']] if row['project'] else [])), now),
+                            kind=O.companion(table[pid]['command']), may_stop=yes, why=why or '',
+                            mb=round(table[pid]['rss'] / 2 ** 20), command=table[pid]['command'][:200]))
+    return groups, sorted(helpers, key=lambda h: (not h['may_stop'], -h['mb']))[:20]
+
+
+def trend(samples, now):
+    """agent-investigates AC-01, AC-06: the last hour of the watch's minutes, in words and figures."""
+    hour = [s for s in samples if now - s['at'] <= 3600]
+    last10 = [s for s in hour if now - s['at'] <= 600]
+    if not hour:
+        return dict(words='最近 60 分钟没有记录', calm=None)
+    warn, critical = sum(1 for s in hour if s['pressure'] == 2), sum(1 for s in hour if s['pressure'] >= 4)
+    bad = sum(1 for s in last10 if s['pressure'] >= 2)
+    swaps = [s.get('swap_used') or 0 for s in hour]
+    calm = len(last10) >= 8 and bad == 0
+    words = '最近 60 分钟：「警告」{} 分钟、「严重」{} 分钟；swap 从 {:.1f} GB 到 {:.1f} GB（最高 {:.1f} GB）；最近 10 分钟{}'.format(
+        warn, critical, swaps[0], swaps[-1], max(swaps), '都正常' if calm else '有 {} 分钟不正常'.format(bad) if bad else '记录不够')
+    return dict(words=words, calm=calm, warn_minutes=warn, critical_minutes=critical, bad_last10=bad,
+                swap_from=swaps[0], swap_to=swaps[-1], swap_max=max(swaps))
+
+
+def watch_did(seen, now):
+    """What the minute-by-minute watch did itself in the last hour, and who waits in its queue."""
+    acted = [a for a in seen.get('acted', []) if now - a['at'] <= 3600]
+    return dict(stopped=sum(a.get('stopped', 0) for a in acted), paused=sum(a.get('paused', 0) for a in acted),
+                names=[n for a in acted for n in a.get('names', [])][:10],
+                queued=[q['name'] for q in seen.get('paused', [])])
+
+
+def judge(home, reason, settings, now=None, free=None, samples=None):
+    """agent-investigates AC-06: the background's own look when the agent is done, by the watch's measure."""
+    now = time.time() if now is None else now
+    found = []
+    if reason in ('memory', 'asked'):
+        recent = trend(watch_state(home).get('samples', []) if samples is None else samples, now)
+        if recent['calm'] is None:
+            pressure = memory_pressure()
+            found.append((pressure >= 2, '后台看：内存压力现在是「{}」'.format({1: '正常', 2: '警告', 4: '严重'}.get(pressure, '读不到'))))
+        elif recent['bad_last10']:
+            found.append((True, '后台看：最近 10 分钟有 {} 分钟「警告」或「严重」，还紧'.format(recent['bad_last10'])))
+        else:
+            found.append((not recent['calm'], '后台看：最近 10 分钟都正常' if recent['calm'] else '后台看：记录不够，还不能说缓过来了'))
+    if reason in ('disk', 'asked'):
+        free = shutil.disk_usage(str(settings.volume)).free if free is None else free
+        short = settings.warning_free_gib - free / GIB   # the user's target (`rgs target`); target_free_gib is where tidying stops
+        found.append((short > 0, '后台看：内置盘还剩 {:.0f} GB，{}'.format(free / GIB, '比目标少 {:.0f} GB'.format(short) if short > 0 else '到目标了')))
+    if reason == 'asked' and len(found) == 2 and not found[1][0]:
+        found = found[:1]   # asked by the user, disk fine: say only how memory is
+    return dict(tight=any(t for t, _ in found), words='；'.join(w for _, w in found))
+
+
+def receipt(made, carried, result):
+    """agent-investigates AC-04: what came back, what was written down, what was done and what was skipped."""
+    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask')]
+    ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘')]
+    skipped = [d for d in result['done'] if d not in ok]
+    parts = []
+    if carried['received']:
+        parts.append('从回复里收到 {} 条，记上 {} 条'.format(carried['received'], len(carried['recorded']))
+                     + ('（没记上：{}）'.format('；'.join(r['why'] for r in carried['refused'][:3])) if carried['refused'] else ''))
+    if handed:
+        parts.append('交回 {} 条决定，照做 {} 条'.format(len(handed), len(ok))
+                     + ('，跳过 {} 条（{}）'.format(len(skipped), '；'.join(sorted({d['result'] for d in skipped}))[:120]) if skipped else '')
+                     + ('，{} 条列进「等你确认」'.format(len(result['asks'])) if result['asks'] else ''))
+    words = '；'.join(parts) or '没有交回要做的决定'
+    return dict(handed=len(handed), done=len(ok), skipped=[dict(what=d.get('pid') or d.get('path'), why=d['result']) for d in skipped],
+                asks=len(result['asks']), carried=carried, words=words)
 
 
 # ---- the agent's commands: they only write down decisions (CH-02) --------------------------------------------
@@ -735,7 +848,18 @@ def material(folder):
     return json.loads((Path(folder) / MATERIAL).read_text())
 
 
-def decide(folder, action, target=None, why='', note='', summary=''):
+def show(folder, home=None, now=None):
+    """`emergency show`: the material, first saying when it was made and whether it is this run's (AC-01)."""
+    now = time.time() if now is None else now
+    found = material(folder)
+    made = '这份材料是 {} 生成的（{}前）'.format(time.strftime('%m-%d %H:%M', time.localtime(found['at'])), O.span(now - found['at']))
+    current = (load_state(Path.home() if home is None else home).get('run') or {}).get('folder')
+    if current and Path(current) != Path(folder):
+        made += '；这不是这次的材料，这次的在 ' + current
+    return dict(generated=made, **found)
+
+
+def decide(folder, action, target=None, why='', note='', summary='', cause='', need=''):
     """One decision of the agent's, checked against the material it was given."""
     folder = Path(folder)
     found = material(folder)
@@ -744,9 +868,14 @@ def decide(folder, action, target=None, why='', note='', summary=''):
         raise ValueError('要写依据：--why "…"')
     if action == 'stop':
         orphan = next((o for o in found['orphans'] if str(o['pid']) == str(target)), None)
-        if orphan is None:
-            raise ValueError('{} 不在告急材料的残留后台（orphans）里'.format(target))
-        entry.update(pid=orphan['pid'], lstart=orphan['lstart'], cpu_seconds=orphan['cpu_seconds'], why=why)
+        mate = next((c for c in found.get('companions', []) if str(c['pid']) == str(target) and c['may_stop']), None)
+        if orphan is None and mate is None:
+            raise ValueError('{} 不在告急材料里能直接关的（orphans，或 companions 里 may_stop 的）；主人还在的，'
+                             '用 `emergency ask process-stop:{}` 列给用户'.format(target, target))
+        if orphan is not None:
+            entry.update(pid=orphan['pid'], lstart=orphan['lstart'], cpu_seconds=orphan['cpu_seconds'], why=why)
+        else:
+            entry.update(pid=mate['pid'], lstart=mate['lstart'], companion=True, why=why)
     elif action == 'move':
         task = next((t for t in found['tasks'] if t['path'] == str(target)), None)
         if task is None or task['on_drive']:
@@ -756,7 +885,9 @@ def decide(folder, action, target=None, why='', note='', summary=''):
         kind, _, key = str(target or '').partition(':')
         if kind not in ASK_KINDS:
             raise ValueError('只能列这几类：' + '、'.join(ASK_KINDS))
-        if kind.startswith('simulator'):
+        if kind == 'process-stop':
+            entry.update(asked_process(found, key), id=target, kind=kind, why=why)
+        elif kind.startswith('simulator'):
             sim = next((s for s in found['simulators'] if s['id'] == key), None)
             if sim is None:
                 raise ValueError('告急材料里没有这台模拟器：' + key)
@@ -775,7 +906,9 @@ def decide(folder, action, target=None, why='', note='', summary=''):
     elif action == 'done':
         if not summary.strip():
             raise ValueError('要写结论：--summary "…"')
-        entry.update(summary=summary)
+        if not cause.strip():
+            raise ValueError('要先写为什么紧：--cause "…"（查下来不紧，就写不紧的依据）')
+        entry.update(summary=summary, cause=cause, **({'need': need} if need.strip() else {}))
     else:
         raise ValueError('没有这个动作：' + str(action))
     line = json.dumps(entry, ensure_ascii=False)
@@ -787,25 +920,48 @@ def decide(folder, action, target=None, why='', note='', summary=''):
     return entry
 
 
+def asked_process(found, key, table=None):
+    """A process the agent wants gone while its owner is still around: the user decides (AC-03). Never an App
+    itself, a database, a container, a debugger or a simulator itself."""
+    if not key.isdigit():
+        raise ValueError('process-stop 后面接进程号：process-stop:<pid>')
+    table = process_table() if table is None else table
+    row = table.get(int(key))
+    if row is None:
+        raise ValueError('进程 {} 已经不在了'.format(key))
+    who = O.owner(table, int(key), launchd_jobs() or set())
+    if who.get('self') or any(word in row['command'] for word in NEVER):
+        raise ValueError('{} 是 App 本身、数据库、容器、调试器或模拟器，不能列'.format(O.tool(row['command'])))
+    place = O.project(dict(O.looks([int(key)])).get(int(key), (None, False))[0])
+    agents = watch_state(Path.home()).get('agents', {})
+    title = '{}（{}{}）'.format(O.tool(row['command']), O.fact(who, row, agents, time.time()), '，' + place['name'] if place else '')
+    return dict(title=title, bytes=row['rss'], pid=int(key), lstart=row['lstart'])
+
+
 def carry(folder, said):
-    """Decisions the agent could not write come back in its reply, one line each; checked again like any other."""
+    """Decisions the agent could not write come back in its reply, one line each; checked again like any other.
+    Returns the receipt of that: how many lines, which were written down, which not and why (AC-04)."""
     key = lambda entry: json.dumps({k: v for k, v in entry.items() if k != 'at'}, sort_keys=True)
     have = {key(entry) for entry in decisions(folder)}
-    found = []
+    receipt = dict(received=0, recorded=[], refused=[])
     for line in (said or '').splitlines():
         line = line.strip().strip('`').strip()
         if not line.startswith(CARRY):
             continue
+        receipt['received'] += 1
         try:
             entry = json.loads(line[len(CARRY):])
             if key(entry) in have:
+                receipt['recorded'].append(entry)
                 continue
-            found.append(decide(folder, entry['action'], entry.get('pid') or entry.get('path') or entry.get('id'),
-                                why=entry.get('why', ''), note=entry.get('note', ''), summary=entry.get('summary', '')))
+            target = entry.get('id') if entry.get('action') == 'ask' else entry.get('pid') or entry.get('path') or entry.get('id')
+            receipt['recorded'].append(decide(folder, entry['action'], target, why=entry.get('why', ''),
+                                              note=entry.get('note', ''), summary=entry.get('summary', ''),
+                                              cause=entry.get('cause', ''), need=entry.get('need', '')))
             have.add(key(entry))
-        except (ValueError, KeyError, TypeError, AttributeError):
-            continue
-    return found
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            receipt['refused'].append(dict(line=line[len(CARRY):][:120], why=(str(error) or type(error).__name__).split('\n')[0][:120]))
+    return receipt
 
 
 def decisions(folder):
@@ -841,16 +997,47 @@ def stop_orphan(entry, table=None, kill=os.kill, sleep=time.sleep, managed=None)
     cpu = sum(table[p]['cpu'] for p in tree if p in table)
     if cpu - entry.get('cpu_seconds', cpu) > ORPHAN_CPU_SECONDS:
         return '这段时间它还在干活，没动'
+    return stop_tree(table, entry['pid'], entry['lstart'], kill=kill, sleep=sleep)
+
+
+def stop_tree(table, pid, lstart, kill=os.kill, sleep=time.sleep):
+    """End a process and what it started, children first, if it is still the same process. None once done."""
+    row = table.get(pid)
+    if row is None:
+        return '已经不在了'
+    if row['lstart'] != lstart:
+        return '进程号已被别的程序用了，没动'
+    tree = descendants(table, pid)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in reversed(tree):
+        for each in reversed(tree):
             try:
-                kill(pid, sig)
+                kill(each, sig)
             except OSError:
                 pass
         sleep(3)
         if not any(alive(p) for p in tree):
             break
     return None
+
+
+def stop_companion(home, entry, table=None, kill=os.kill, sleep=time.sleep):
+    """A companion the agent chose: still the same process, and its owner still gone or still (know-who AC-03)."""
+    table = process_table() if table is None else table
+    row = table.get(entry['pid'])
+    if row is None:
+        return '已经不在了'
+    if row['lstart'] != entry['lstart']:
+        return '进程号已被别的程序用了，没动'
+    jobs = launchd_jobs()
+    if jobs is None:
+        return '这会儿查不清它是不是系统服务，没动'
+    seen = watch_state(home)
+    quiet = seen.get('seen', {}).get(str(entry['pid']))
+    where = O.looks([entry['pid']] + [int(p) for p in seen.get('agents', {}) if int(p) in table])
+    yes, why = O.verdict(row, O.owner(table, entry['pid'], jobs), where, seen.get('agents', {}), quiet and quiet['since'], time.time())
+    if not yes:
+        return why or '它的主人又在动了，没动'
+    return stop_tree(table, entry['pid'], entry['lstart'], kill=kill, sleep=sleep)
 
 
 def move_task(home, cfg, settings, path, activity, pins):
@@ -900,7 +1087,8 @@ def add_asks(home, entries, now):
         items[entry['id']] = dict(id=entry['id'], kind=entry['kind'], title=entry['title'], bytes=entry['bytes'],
                                   reason='agent：' + entry['why'], loses=ask_tier.LOSES[entry['kind']], by='agent', at=now,
                                   fingerprint='agent:{:.0f}'.format(now), state='pending', result=None, updated=now,
-                                  **({'path': path} if path.startswith('/') else {}))
+                                  **({'path': path} if path.startswith('/') else {}),
+                                  **({'lstart': entry['lstart']} if entry.get('lstart') else {}))
         added.append(items[entry['id']])
     pending['items'] = sorted(items.values(), key=lambda i: (i['kind'], i['title']))
     pending['updated'] = now
@@ -915,7 +1103,7 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
     made = decisions(folder)
     done = []
     for entry in (e for e in made if e['action'] == 'stop'):
-        skipped = stop_orphan(entry, table)
+        skipped = stop_companion(home, entry, table) if entry.get('companion') else stop_orphan(entry, table)
         done.append(dict(entry, result=skipped or '已关掉'))
     pins, _ = StorageManager(settings)._pins(now)
     for entry in (e for e in made if e['action'] == 'move'):
@@ -928,12 +1116,14 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
             agent_plan.remember(home, 'lesson', 'emergency', note=entry['note'])
         except (OSError, ValueError):
             pass
-    summary = next((e['summary'] for e in reversed(made) if e['action'] == 'done'), '')
-    return dict(done=done, asks=[dict(id=a['id'], title=a['title'], bytes=a['bytes']) for a in asks], summary=summary)
+    last = next((e for e in reversed(made) if e['action'] == 'done'), {})
+    return dict(done=done, asks=[dict(id=a['id'], title=a['title'], bytes=a['bytes']) for a in asks],
+                summary=last.get('summary', ''), cause=last.get('cause', ''), need=last.get('need', ''))
 
 
 def notice_words(result, agent_result):
     stopped = [d for d in result['done'] if d['action'] == 'stop' and d['result'] == '已关掉']
+    judged = result.get('judged') or {}
     moved = [d for d in result['done'] if d['action'] == 'move' and d['result'] == '已挪到外接盘']
     parts = []
     if stopped:
@@ -949,7 +1139,11 @@ def notice_words(result, agent_result):
     body = '；'.join(parts) or (result['summary'] or '这次没找到能安全处理的')
     if result['summary'] and parts:
         body += '。' + result['summary']
-    return body[:240]
+    if judged.get('words'):
+        body = judged['words'] + '。' + body
+    if result.get('need'):
+        body += '。要你做：' + result['need']
+    return body[:300]
 
 
 def run(home, cfg, settings, reason, folder, runner, now=None, **hooks):
@@ -971,28 +1165,41 @@ def run(home, cfg, settings, reason, folder, runner, now=None, **hooks):
         raise
 
 
-def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess.Popen, applier=apply, collector=collect):
+def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess.Popen, applier=apply, collector=collect,
+         judger=judge):
     """Hand the agent its material, let it decide, then do what passes the floor (AC-04~10)."""
     now = time.time() if now is None else now
     folder = Path(folder)
     if not (folder / MATERIAL).is_file():
         atomic_json(folder / MATERIAL, collector(home, cfg, settings, reason, now))
     env = dict(os.environ, **{DIR_ENV: str(folder)})
+    before = load_state(home)
+    streak = (before.get('run') or {}).get('streak', 1)
     prompt = PROMPT.format(when=time.strftime('%m-%d %H:%M', time.localtime(now)), why=WHY.get(reason, reason),
                            rgs=RGS, folder=folder)
+    last = before.get('last') or {}
+    if streak >= 2:
+        prompt = STREAK.format(n=streak, why=WHY.get(reason, reason)) + prompt
+    if last.get('receipt'):
+        prompt = LAST.format(when=time.strftime('%m-%d %H:%M', time.localtime(last['at'])), receipt=last['receipt'],
+                             judged=last.get('judged', '')) + prompt
     launcher = run_claude if runner == 'claude' else run_codex
     try:
         agent_result = launcher(home, folder, prompt, env, RUN_MINUTES * 60, popen=popen)
     except Exception as error:   # whatever went wrong starting it, what it already decided is still handled
         agent_result = dict(agent=runner, status='error', reply=str(error) or type(error).__name__)
-    carry(folder, agent_result.pop('said', ''))
+    carried = carry(folder, agent_result.pop('said', ''))
     lock = state_root(home) / 'dashboard' / 'operation.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open('a') as busy:
         fcntl.flock(busy, fcntl.LOCK_EX)   # the dashboard or the tiers may be cleaning: wait for them
         result = applier(home, cfg, settings, folder, now=time.time())
-    atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, **result))
+    result['receipt'] = receipt(decisions(folder), carried, result)
+    result['judged'] = judger(home, reason, settings)
+    atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=streak, **result))
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
+    if result['judged']['tight'] and streak >= 2:
+        title = 'agent 处理了 {} 次还没缓过来'.format(streak)   # AC-05: the user hears it
     brief = notice_words(result, agent_result)
     # AC-11: with a conversation to open, the notice opens it (and offers 「去确认」 when something waits).
     talk = (folder / SESSION).is_file()
@@ -1007,7 +1214,9 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
         undo_fired(state)
     state.pop('run', None)
     state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent=agent_result.get('status'),
-                         runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk)
+                         runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk,
+                         receipt=result['receipt']['words'], judged=result['judged']['words'], tight=result['judged']['tight'],
+                         streak=streak, cause=result['cause'], need=result['need'])
     save_state(home, state)
     ask_tier.launch_app()
     return dict(agent=agent_result, **result)
@@ -1075,7 +1284,10 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     folder = new_folder(home, now)
     prune_runs(home)
     pid = starter(reason, folder, ready[0])
-    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev)
+    last = state.get('last') or {}
+    again = last.get('tight') and last.get('reason') == reason and now - last.get('at', 0) <= STREAK_HOURS * 3600
+    state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev,
+                        streak=last.get('streak', 1) + 1 if again else 1)
     save_state(home, state)
     return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
 
