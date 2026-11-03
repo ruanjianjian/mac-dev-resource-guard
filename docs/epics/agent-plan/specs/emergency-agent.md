@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～24（10-31 内置盘跌到 4 GB、随后内存吃紧那次）；入口和「别人装上就能用」依据 RAW-26～28；整个资源管理一个对话依据 RAW-38。
+原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-18～24（10-31 内置盘跌到 4 GB、随后内存吃紧那次）；入口和「别人装上就能用」依据 RAW-26～28；整个资源管理一个对话依据 RAW-38。告急材料、步骤、回执和升级按 [告急时先查清为什么](agent-investigates.md) 改（RAW-40～43）。
 
 ## 意图
 

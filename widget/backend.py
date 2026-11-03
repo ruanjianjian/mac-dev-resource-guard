@@ -120,7 +120,7 @@ def rows_memory(body):
 KIND_TITLES = {'simulator-delete': '删除模拟器', 'simulator-shutdown': '关闭模拟器', 'task-delete': '删除任务目录',
                'runtime-delete': '删除运行时', 'move': '搬到外接盘', 'prune': '删构建产物', 'tool-cache': '清工具缓存',
                'installer-delete': '删除安装包', 'trash-empty': '清空', 'device-support-delete': '删除',
-               'archive-delete': '删除', 'cache-move': '缓存搬到外接盘'}
+               'archive-delete': '删除', 'cache-move': '缓存搬到外接盘', 'process-stop': '关掉程序'}
 OUTCOMES = {'pending': '待确认', 'failed': '上次失败', 'ignored': '已忽略', 'done': '已完成', 'aborted': '已放弃', 'skipped': '已跳过'}
 TIER_STATUS = {
     'disabled': '自动档未打开：在「接入设置」打开后，空间低于提醒线时会自动搬迁闲置任务目录、删可重新生成的构建产物。',
@@ -812,7 +812,23 @@ class Adapter:
                                  eligible=False, command=None, detail='', outcome=None, tag='link',
                                  reason=('、'.join(sim['attached']) or '开发工具') + ' 连着'))
         inside = {pid for sim in simulators for pid in sim.get('pids', [])}   # apps running in a simulator count there
-        for proc in latest.get('top_memory', [])[:8]:
+        system = ('Simulator', 'SimMetalHost', 'SimRender', 'launchd_sim', 'kernel_task', 'WindowServer', 'iOS 模拟器')
+        watched = self.home / '.local/state/dev-resource-guard/watch.json'
+        seen = (read_json(watched) if watched.is_file() else None) or {}
+        picture = seen.get('who') or {}
+        groups = picture.get('groups') if now - picture.get('at', 0) <= 300 else None
+        # know-who AC-02: whose each one is, what can be seen of its owner, and how busy it is.
+        sys.path.insert(0, str(engine_root() / 'runtime/storage'))
+        import owners
+        for group in (groups or [])[:8]:
+            if any(pid in inside for pid in group['pids']) or any(word in group['tool'] for word in system):
+                continue
+            where, hot = owners.where_words(group), owners.busy_words(group, now)
+            nobody = group['owner']['kind'] == 'gone'
+            rows.append(dict(id='proc:{}'.format(group['pids'][0]), title=group['title'] + (' · ' + where if where else ''),
+                             category='正在用', bytes=group['bytes'] or None, eligible=False, command=None, detail='', outcome=None,
+                             tag='auto' if nobody else 'use', reason=(hot + ' · ' if hot else '') + group['fact']))   # the core it burns first
+        for proc in ([] if groups is not None else latest.get('top_memory', [])[:8]):
             if proc.get('pid') in inside or any(word in proc.get('name', '') for word in
                                                  ('Simulator', 'SimMetalHost', 'SimRender', 'launchd_sim', 'kernel_task', 'WindowServer')):
                 continue

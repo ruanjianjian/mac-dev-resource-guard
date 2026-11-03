@@ -165,7 +165,8 @@ final class CoverStore: ObservableObject {
     var memorySummary: String {
         let sims = (memory?.rows ?? []).filter { $0.id.hasPrefix("sim:") }
         if !sims.isEmpty { return "模拟器 \(sims.count) 台占 \(size(sims.reduce(0) { $0 + ($1.bytes ?? 0) }))" }
-        return memoryRows("正在用").first.map { "主要是 " + $0.title } ?? "点开看是谁在用"
+        // know-who: a row's title carries its projects after " · "; the banner names only the tool.
+        return memoryRows("正在用").first.map { "主要是 " + ($0.title.components(separatedBy: " · ").first ?? $0.title) } ?? "点开看是谁在用"
     }
     var target: ResourceRow? { plan?.rows?.first { $0.category == "目标" } }
     var targetGB: Double? { target.flatMap { Double($0.title.filter { $0.isNumber }) } }
@@ -249,7 +250,7 @@ private struct EmergencyPill: View {
     var body: some View {
         HStack(spacing: 6) {
             if line.running && note.isEmpty { Circle().fill(Color(hex: 0x7FD3A8)).frame(width: 6, height: 6) }
-            Text(!note.isEmpty ? note : line.running ? "\(line.agent) 正在处理告急 ›" : "\(line.agent) \(clock(line.at)) 处理过告急 ›")
+            Text(!note.isEmpty ? note : line.running ? "\(line.agent) 正在处理告急 ›" : "\(line.agent) \(clock(line.at)) 处理过告急\(line.tight ? " · 还紧" : "") ›")
                 .font(.system(size: 11, weight: .medium)).foregroundColor(Ink.cream).lineLimit(1).truncationMode(.tail)
         }
         .padding(.horizontal, 12).padding(.vertical, 4).frame(maxWidth: 260)

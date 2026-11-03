@@ -362,8 +362,8 @@ def emergency_command(home, a):
     if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done'):
         folder = emergency.run_folder()
         if what == 'show':
-            return emergency.material(folder)
-        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary)
+            return emergency.show(folder, home)
+        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary, cause=a.cause, need=a.need)
     if what == 'status':
         state = emergency.load_state(home)
         cfg = tiers_config.load(home)
@@ -1032,6 +1032,8 @@ def main():
     p.add_argument('--stream-hours', type=float, help='rule simulator-shutdown: hours after which a screen or log stream no longer counts as use')
     p.add_argument('--changed', choices=['yes', 'no'], help='review done: did this review change the plan')
     p.add_argument('--summary', default='', help='review done / emergency done: the conclusion, also told to the user')
+    p.add_argument('--cause', default='', help='emergency done: why this Mac was tight')
+    p.add_argument('--need', default='', help='emergency done: what the user has to do, if anything')
     p.add_argument('--reason', choices=['disk', 'memory', 'asked'], help='emergency run: why the agent was started')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):

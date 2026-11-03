@@ -15,6 +15,7 @@ from test_tiers import DAY, git
 import agent_plan
 import ask_tier
 import emergency as E
+import owners as O
 from storage import GIB, Activity
 
 CRITICAL = 25 * GIB
@@ -297,10 +298,14 @@ class RunnerTest(AskFixture):
         line = str(refused.exception).splitlines()[-1]
         self.assertTrue(line.startswith(E.CARRY))
         said = '处理完了。\n\n```\n' + line + '\n' + line + '\n```\nRG-DECISION {"action": "stop", "pid": 1, "why": "x"}'
-        [carried] = E.carry(self.folder, said)   # the stop is checked again: pid 1 was never in the material
-        self.assertEqual((carried['action'], carried['note']), ('lesson', '只读也能交回来'))
-        self.assertEqual(E.carry(self.folder, said), [])   # said twice, kept once
-        self.assertEqual([d['action'] for d in E.decisions(self.folder)], ['lesson'])
+        carried = E.carry(self.folder, said)
+        self.assertEqual(carried['received'], 3)
+        self.assertEqual((carried['recorded'][0]['action'], carried['recorded'][0]['note']), ('lesson', '只读也能交回来'))
+        [refused] = carried['refused']   # the stop is checked again: pid 1 was never in the material
+        self.assertIn('不在告急材料里', refused['why'])
+        again = E.carry(self.folder, said)
+        self.assertEqual((again['received'], len(again['refused'])), (3, 1))
+        self.assertEqual([d['action'] for d in E.decisions(self.folder)], ['lesson'])   # said twice, kept once
     def test_an_older_codex_without_thread_source_still_runs(self):
         starts = []
 
@@ -498,7 +503,7 @@ class ApplyTest(AskFixture):
         (folder / E.MATERIAL).write_text(json.dumps(material))
         for target in asks:
             E.decide(folder, 'ask', target.format(task=task), why='PR #3 已合入，改动都推了')
-        E.decide(folder, 'done', summary='列了两项等你确认。')
+        E.decide(folder, 'done', summary='列了两项等你确认。', cause='两台模拟器和一个闲置任务占着空间')
         with patch.object(E, 'run_codex', return_value=dict(agent='codex', status=status, thread='t1')), \
                 patch.object(ask_tier, 'launch_app'):
             E.run(self.home, self.cfg(), self.settings, 'disk', folder, 'codex', now=now)
@@ -524,6 +529,149 @@ class ApplyTest(AskFixture):
         with patch.object(ask_tier, 'last_used', return_value=now):   # still in use by the rules' measure
             pending = self.refresh(simctl, now=now + (ask_tier.AGENT_ASK_DAYS + 1) * DAY)
         self.assertNotIn('simulator-delete:NEW', self.ids(pending))   # nobody answered for days: it leaves
+
+
+def proc(pid, command, ppid=1, hours=30, cpu=10.0, pcpu=0.0, mb=100, lstart='Thu Oct 29 13:22:55 2026'):
+    return dict(pid=pid, ppid=ppid, age=hours * 3600, cpu=cpu, pcpu=pcpu, rss=mb * 2 ** 20, lstart=lstart, command=command)
+
+
+class InvestigateTest(AskFixture):
+    """agent-investigates: the agent answers why first, can act on what it finds, and the background has the last word."""
+    TABLE = {10: proc(10, '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal', hours=80),
+             13: proc(13, '/opt/homebrew/bin/claude --resume abc', ppid=10, hours=80),
+             20: proc(20, '/Applications/Cursor.app/Contents/MacOS/Cursor', hours=80, mb=900),
+             61: proc(61, 'sim-mirror stream --udid 4E5D --fps 1', ppid=13, hours=72, cpu=72 * 3600 * 0.99, pcpu=99.0, mb=12),
+             62: proc(62, 'tail -f /tmp/web.log', ppid=20, hours=50, mb=4),
+             101: proc(101, 'node /code/shop/server.js', ppid=13, mb=1500),
+             700: proc(700, 'postgres -D data', mb=300)}
+    WHERE = {13: ('/code/shop', False), 61: ('/code/shop', False), 62: ('/code/shop', False), 101: ('/code/shop', False)}
+
+    def setUp(self):
+        super().setUp()
+        for name, value in (('launch_app', None),):
+            stub = patch.object(ask_tier, name); stub.start(); self.addCleanup(stub.stop)
+
+    def watch(self, pressures, now=NOW, **more):
+        samples = [dict(at=now - (len(pressures) - i) * 60, pressure=p, swap_used=8.0 + i * 0.1, swap_total=17.0)
+                   for i, p in enumerate(pressures)]
+        path = E.state_root(self.home) / 'watch.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(samples=samples, **more)))
+
+    def material(self, now=NOW):
+        with patch.object(O, 'looks', return_value=self.WHERE):
+            return E.collect(self.home, self.cfg(), self.settings, 'memory', now, activity=Activity(), simctl=self.sims(),
+                             table=self.TABLE, cwd_of=lambda p: {}, prs=lambda r: None, sizer=lambda p: 0, free=80 * GIB,
+                             managed=set())
+
+    def test_the_material_says_whose_it_is_how_the_hour_went_and_what_the_watch_did(self):
+        self.watch([2] * 50 + [1] * 10, agents={'13': dict(lstart='a', cpu=1.0, at=NOW, moved=NOW - 7 * 3600)},
+                   acted=[dict(at=NOW - 600, stopped=1, paused=2, names=['tail', 'tsc', 'tsc'])], paused=[dict(name='tsc')])
+        material = self.material()
+        json.dumps(material)
+        lines = [w['line'] for w in material['who']]
+        self.assertIn('node server.js · shop · Claude Code 起的 · 7 小时没动', lines)
+        self.assertIn('sim-mirror · shop · Claude Code 起的 · 7 小时没动 · 占满 1 个核已经 3 天', lines)
+        mates = {m['pid']: m for m in material['companions']}
+        self.assertTrue(mates[61]['may_stop'])
+        self.assertIn('Claude Code 已经 7 小时没动', mates[61]['why'])
+        self.assertFalse(mates[62]['may_stop'])                       # Cursor is open: someone may be watching
+        self.assertNotIn(700, mates)                                   # a database is never anyone's to stop
+        trend = material['trend']
+        self.assertIn('「警告」50 分钟', trend['words'])
+        self.assertTrue(trend['calm'])
+        self.assertEqual((trend['swap_from'], trend['swap_to']), (8.0, 13.9))
+        self.assertEqual(material['watch_did'], dict(stopped=1, paused=2, names=['tail', 'tsc', 'tsc'], queued=['tsc']))
+        self.assertIn('先回答「为什么紧」', material['steps'][1])
+        self.assertIn('别只看 orphans', material['steps'][1])
+
+    def test_show_says_when_the_material_was_made_and_whether_it_is_this_runs(self):
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW - 180, reason='memory')))
+        shown = E.show(folder, self.home, now=NOW)
+        self.assertIn('生成的（3 分钟前）', shown['generated'])
+        self.assertEqual(shown['reason'], 'memory')
+        E.save_state(self.home, dict(run=dict(folder=str(self.home / 'elsewhere'))))
+        self.assertIn('这不是这次的材料', E.show(folder, self.home, now=NOW)['generated'])
+
+    def test_the_agent_can_stop_what_may_go_ask_for_the_rest_and_must_say_why_it_was_tight(self):
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, orphans=[], tasks=[], simulators=[], waiting=[], companions=[
+            dict(pid=61, lstart='Thu Oct 29 13:22:55 2026', may_stop=True), dict(pid=62, lstart='Thu Oct 29 13:22:55 2026', may_stop=False)])))
+        self.assertTrue(E.decide(folder, 'stop', '61', why='Claude Code 7 小时没动')['companion'])
+        with self.assertRaises(ValueError) as owner_there:
+            E.decide(folder, 'stop', '62', why='开了两天')
+        self.assertIn('process-stop:62', str(owner_there.exception))
+        with patch.object(E, 'process_table', return_value=self.TABLE), patch.object(E, 'launchd_jobs', return_value=set()), \
+                patch.object(O, 'looks', return_value=self.WHERE):
+            asked = E.decide(folder, 'ask', 'process-stop:62', why='Cursor 开着，但这个 tail 开了两天没人看')
+            self.assertEqual((asked['title'], asked['lstart']), ('tail（Cursor 开着，shop）', 'Thu Oct 29 13:22:55 2026'))
+            for pid in ('20', '700'):
+                with self.assertRaises(ValueError) as never:
+                    E.decide(folder, 'ask', 'process-stop:' + pid, why='x')
+                self.assertIn('不能列', str(never.exception))
+        with self.assertRaises(ValueError) as no_cause:
+            E.decide(folder, 'done', summary='关了一个流')
+        self.assertIn('为什么紧', str(no_cause.exception))
+        done = E.decide(folder, 'done', summary='关了一个流', cause='一路截屏流占满一个核', need='看一下 Cursor 里那个 tail')
+        self.assertEqual((done['cause'], done['need']), ('一路截屏流占满一个核', '看一下 Cursor 里那个 tail'))
+
+    def test_a_run_that_did_not_help_says_so_and_the_next_one_hears_it(self):
+        executable(self.home / '.local/bin/codex')
+        (self.home / '.codex').mkdir(); (self.home / '.codex/auth.json').write_text('{}')
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, orphans=[], tasks=[], simulators=[], waiting=[], companions=[
+            dict(pid=61, lstart='Thu Oct 29 13:22:55 2026', may_stop=True)])))
+        self.watch([2] * 10)                                          # still 「警告」 when the agent is done
+        said = '\n'.join(['RG-DECISION {"action": "stop", "pid": 61, "why": "Claude Code 7 小时没动"}',
+                          'RG-DECISION {"action": "stop", "pid": 99, "why": "x"}',
+                          'RG-DECISION {"action": "done", "summary": "关了一路截屏流", "cause": "截屏流占满一个核"}'])
+        prompts = []
+
+        def codex(home, folder, prompt, env, timeout, popen=None):
+            prompts.append(prompt)
+            return dict(agent='codex', status='done', thread='t', said=said)
+
+        cfg = self.cfg()
+        with patch.object(E, 'run_codex', codex), patch.object(E, 'stop_companion', return_value=None):
+            E.run(self.home, cfg, self.settings, 'memory', folder, 'codex', now=NOW)
+            result = json.loads((folder / E.RESULT).read_text())
+            self.assertIn('从回复里收到 3 条，记上 2 条（没记上：99 不在告急材料里能直接关的', result['receipt']['words'])
+            self.assertIn('交回 1 条决定，照做 1 条', result['receipt']['words'])
+            self.assertEqual(result['judged'], dict(tight=True, words='后台看：最近 10 分钟有 10 分钟「警告」或「严重」，还紧'))
+            last = E.load_state(self.home)['last']
+            self.assertEqual((last['tight'], last['streak'], last['cause']), (True, 1, '截屏流占满一个核'))
+            [notice] = agent_plan.queued_notices(self.home)
+            self.assertTrue(notice['body'].startswith('后台看：最近 10 分钟有 10 分钟'))
+            # Six hours on it is still tight: the next run is the second in a row, and both the agent and the user hear it.
+            later = NOW + E.MEMORY_QUIET_HOURS * 3600 + 60
+            state = E.load_state(self.home)
+            state['warn_since'] = later - 3600
+            state['last']['at'] = NOW                                   # the run above, on this test's clock
+            E.save_state(self.home, state)
+            got = E.tick(self.home, cfg, self.settings, later, run=FakeRun(pressure=2), env={},
+                         starter=lambda reason, folder, runner: 4243, free=80 * GIB)
+            self.assertEqual(got['reason'], 'memory')
+            self.assertEqual(E.load_state(self.home)['run']['streak'], 2)
+            second = Path(got['folder'])
+            (second / E.MATERIAL).write_text(json.dumps(dict(at=later, orphans=[], tasks=[], simulators=[], waiting=[], companions=[])))
+            self.watch([2] * 10, now=later)
+            E.run(self.home, cfg, self.settings, 'memory', second, 'codex', now=later)
+        self.assertTrue(prompts[1].startswith('上次（'))
+        self.assertIn('交回 1 条决定，照做 1 条', prompts[1])
+        self.assertIn('这是连续第 2 次因为内存吃紧叫你', prompts[1])
+        titles = [n['title'] for n in agent_plan.queued_notices(self.home)]
+        self.assertIn('agent 处理了 2 次还没缓过来', titles)
+
+    def test_the_background_judges_by_the_last_ten_minutes_not_by_one(self):
+        calm = [dict(at=NOW - (10 - i) * 60, pressure=1, swap_used=8.0, swap_total=17.0) for i in range(10)]
+        self.assertEqual(E.judge(self.home, 'memory', self.settings, NOW, samples=calm),
+                         dict(tight=False, words='后台看：最近 10 分钟都正常'))
+        flicker = calm[:-1] + [dict(calm[-1], pressure=2)]
+        self.assertTrue(E.judge(self.home, 'memory', self.settings, NOW, samples=flicker)['tight'])
+        short = self.settings.warning_free_gib - 2
+        self.assertEqual(E.judge(self.home, 'disk', self.settings, NOW, free=short * GIB),
+                         dict(tight=True, words='后台看：内置盘还剩 {:.0f} GB，比目标少 2 GB'.format(short)))
 
 
 class ConfirmTest(AskFixture):
@@ -564,6 +712,31 @@ class ConfirmTest(AskFixture):
         self.assertNotIn(str(task), git(self.home / 'main', 'worktree', 'list', '--porcelain'))
         [again] = ask_tier.execute(self.home, cfg, self.settings, [key], simctl, activity=Activity())
         self.assertEqual(again['outcome'], '已跳过')
+
+
+class ProcessStopTest(AskFixture):
+    """agent-investigates AC-03: a process whose owner is still around goes only on the user's click, rechecked."""
+    def ask(self, child, lstart=None):
+        lstart = lstart or E.process_table()[child.pid]['lstart']
+        key = 'process-stop:{}'.format(child.pid)
+        E.add_asks(self.home, [dict(id=key, kind='process-stop', title='sleep（Terminal 开着）', bytes=GIB, why='证据', lstart=lstart)], time.time())
+        return key
+
+    def test_confirmed_it_stops_and_a_changed_one_is_left_alone(self):
+        child = subprocess.Popen(['/bin/sleep', '300'])
+        self.addCleanup(child.kill)
+        key, sims = self.ask(child), self.sims()
+        [item] = ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())['items']
+        self.assertEqual((item['loses'], item['lstart']), (ask_tier.LOSES['process-stop'], E.process_table()[child.pid]['lstart']))
+        [done] = ask_tier.execute(self.home, self.cfg(), self.settings, [key], sims, activity=Activity())
+        self.assertEqual(done['outcome'], '已完成')
+        self.assertIsNotNone(child.wait(timeout=10))
+        other = subprocess.Popen(['/bin/sleep', '300'])
+        self.addCleanup(other.kill)
+        stale = self.ask(other, lstart='Mon Jan  1 00:00:00 2001')   # the pid now names another program
+        [skipped] = ask_tier.execute(self.home, self.cfg(), self.settings, [stale], sims, activity=Activity())
+        self.assertEqual(skipped['outcome'], '已跳过')
+        self.assertIsNone(other.poll())
 
 
 class CommandTest(AskFixture):

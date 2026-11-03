@@ -4,9 +4,9 @@ On 10-31 four 4 GB type checks ran at once and the Mac froze. Nothing warned, th
 on slow process lookups, the agent came late and broke, and by the time the user said 「暂停排队」 the checks had
 finished (RAW-35～37). So, each minute and with cheap reads only:
 - the squeeze is judged from the trend (pressure that stays up, swap that climbs), not only from 「严重」;
-- leftovers nobody runs any more are stopped, and heavy jobs that crowd each other are queued (paused, then let
-  go one at a time) — nothing is deleted and every pause is let go again;
-- one notice per squeeze says what was done and who holds the memory;
+- companions whose owner is gone or still are stopped (know-who AC-03), and heavy jobs that crowd each other are
+  queued (paused, then let go one at a time) — nothing is deleted and every pause is let go again;
+- one notice per squeeze says what was done and whose it is that holds the memory (know-who AC-01, AC-02);
 - whatever still needs judgement goes to the agent (emergency.py).
 """
 import fcntl
@@ -22,6 +22,7 @@ import time
 from storage import GIB, atomic_json
 import agent_plan
 import emergency as E
+import owners as O
 import tiers_config
 
 STATE = 'watch.json'
@@ -33,11 +34,9 @@ CALM_TO_END = 10              # minutes of no squeeze before a squeeze counts as
 NOTICE_GAP = 30 * 60          # at most one notice in this long
 PAUSE_LIMIT = 20 * 60         # nobody waits longer than this
 HEAVY_BYTES = GIB // 2        # what is still in memory; a job the Mac already swapped out shows less
-HELPER_IDLE_HOURS = 6         # an agent helper this long without CPU is abandoned; waiting on a model uses next to none
-                              # for minutes, so one quiet minute would not be enough
+HELPER_IDLE_HOURS = O.AGENT_QUIET_HOURS   # a server this long without CPU of its own is abandoned
 BIG_SESSION_BYTES = 300 * 2 ** 20
 SESSION_HOURS = 3
-STREAMS = ('baguette stream', ' log stream')
 # Build, type-check, bundle and test tools: heavy for a while, then done. Never an App, a database or a debugger.
 HEAVY = re.compile(r'node_modules/\.bin/(?:tsc|vue-tsc|vitest|jest|webpack|next|vite|esbuild|eslint|tsx)\b'
                    r'|(?:^|/)(?:swift-frontend|swiftc|swift-build|xcodebuild|clang|clang\+\+|cargo|rustc|kotlinc|javac)(?:\s|$)'
@@ -130,20 +129,7 @@ def release(state, table, kill, now, everything=False):
     return let_go
 
 
-def footprints(run=subprocess.run, limit=80):
-    """What each process really holds, swapped and compressed memory included ({pid: bytes}), as `top` counts it.
-    `ps` only sees what is still in RAM: on 10-31 five 3 GB type checks each showed under 300 MB there."""
-    try:
-        out = run(['/usr/bin/top', '-l', '1', '-o', 'mem', '-n', str(limit), '-stats', 'pid,mem'],
-                  capture_output=True, text=True, timeout=30).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    found, unit = {}, {'K': 2 ** 10, 'M': 2 ** 20, 'G': 2 ** 30, 'B': 1}
-    for line in out.splitlines():
-        match = re.match(r'\s*(\d+)\s+([\d.]+)([KMGB])[+-]?\s*$', line)
-        if match:
-            found[int(match.group(1))] = int(float(match.group(2)) * unit[match.group(3)])
-    return found
+footprints = O.footprints
 
 
 def held(row, sizes):
@@ -182,60 +168,76 @@ def queue(state, table, kill, now, own=(), sizes=None):
 
 
 def observe(state, found, now):
-    """Every minute, tight or not: since when each leftover has used no CPU (a little more resets the clock)."""
-    seen, fresh = state.get('seen', {}), {}
-    for orphan in found:
-        key, before = str(orphan['pid']), state.get('seen', {}).get(str(orphan['pid']))
-        if before and before['lstart'] == orphan['lstart'] and orphan['cpu_seconds'] - before['cpu'] <= E.ORPHAN_CPU_SECONDS:
+    """Every minute, tight or not: since when each companion server has used no CPU (a little more resets the clock)."""
+    fresh = {}
+    for entry in found:
+        key, before = str(entry['pid']), state.get('seen', {}).get(str(entry['pid']))
+        if before and before['lstart'] == entry['lstart'] and entry['cpu_seconds'] - before['cpu'] <= E.ORPHAN_CPU_SECONDS:
             fresh[key] = before
         else:
-            fresh[key] = dict(lstart=orphan['lstart'], cpu=orphan['cpu_seconds'], since=now)
+            fresh[key] = dict(lstart=entry['lstart'], cpu=entry['cpu_seconds'], since=now)
     state['seen'] = fresh
 
 
-def leftovers(state, found, table, kill, sleep, now, managed):
-    """Stop what nobody runs any more (AC-02): a day-old screen or log stream at once; an agent helper only after
-    hours without any CPU."""
-    stopped = []
-    for orphan in found:
-        command = orphan['command']
-        stream = any(word in command for word in STREAMS)
-        helper = any(word in command for word in E.AGENT_HINTS)
-        quiet = state.get('seen', {}).get(str(orphan['pid']))
-        if stream:
-            entry = dict(pid=orphan['pid'], lstart=orphan['lstart'], cpu_seconds=float('inf'))   # streams always burn CPU
-        elif helper and quiet and now - quiet['since'] >= HELPER_IDLE_HOURS * 3600:
-            entry = dict(pid=orphan['pid'], lstart=orphan['lstart'], cpu_seconds=quiet['cpu'])
-        else:
-            continue   # a dev server in a task folder, or a helper that may still be waiting on a model
-        if E.stop_orphan(entry, table, kill=kill, sleep=sleep, managed=managed) is None:
-            stopped.append(dict(pid=orphan['pid'], name=short_name(command), mb=orphan['rss_mb']))
+def companions(table, own=(), managed=()):
+    return [pid for pid, row in table.items() if O.companion(row['command']) and pid not in own and pid not in managed
+            and not any(word in row['command'] for word in E.NEVER)]
+
+
+def leftovers(state, table, kill, sleep, now, managed, where, tight, own=()):
+    """Stop the companions whose owner is gone or has been still for six hours (know-who AC-03): while memory is
+    tight, or when the companion itself burns half a core."""
+    stopped, ended = [], set()
+    for pid in sorted(companions(table, own, managed), key=lambda p: -table[p]['age']):   # parents before children
+        row = table[pid]
+        if pid in ended or not tight and row.get('pcpu', 0) < O.COMPANION_SHARE * 100:
+            continue
+        quiet = state.get('seen', {}).get(str(pid))
+        yes, why = O.verdict(row, O.owner(table, pid, managed), where, state.get('agents', {}),
+                             quiet and quiet['since'], now)
+        if yes and E.stop_tree(table, pid, row['lstart'], kill=kill, sleep=sleep) is None:
+            ended.update(E.descendants(table, pid))
+            stopped.append(dict(pid=pid, name=O.tool(row['command']), mb=round(row['rss'] / 2 ** 20), why=why))
     return stopped
-
-
-FRIENDLY = {'claude': 'Claude Code', 'codex': 'Codex 后台', 'node': 'Node 程序', 'Python': 'Python 程序'}
 
 
 def short_name(command):
     """What people would call it: the App's name, or the tool's (tsc, swift-frontend…)."""
-    if 'CoreSimulator' in command or 'SimulatorRuntime' in command or 'launchd_sim' in command:
-        return 'iOS 模拟器'
-    app = re.search(r'/([^/]+)\.app/Contents/', command)
-    if app:
-        return app.group(1)
-    tool = re.search(r'node_modules/\.bin/([\w.-]+)', command)
-    if tool:
-        return tool.group(1)
-    first = command.split()[0] if command.split() else command
-    return FRIENDLY.get(Path(first).name, Path(first).name)
+    return O.tool(command)
 
 
-def top_users(table, limit=3, sizes=None):
-    groups = {}
-    for row in table.values():
-        name = short_name(row['command'])
-        groups[name] = groups.get(name, 0) + held(row, sizes)
-    return [dict(name=n, gib=round(b / GIB, 1)) for n, b in sorted(groups.items(), key=lambda kv: -kv[1])[:limit] if b >= GIB / 4]
+def who(state, table, now, managed, run=subprocess.run, sizes=None, own=()):
+    """know-who AC-01: the biggest processes and the ones that have burned a core for half an hour, each with its
+    tool, project and owner. Kept in the state for the memory page, the notice and the agent's material."""
+    hot = O.busy(state, table, now)
+    held_by = lambda pid: held(table[pid], sizes)
+    top = sorted((p for p in table if p not in own and 'kernel_task' not in table[p]['command']), key=held_by, reverse=True)[:O.TOP]
+    agents = O.track(state, table, now)
+    pids = set(top) | set(hot) | set(companions(table, own, managed)) | {int(p) for p in agents}
+    where = O.seen_where(state, table, [p for p in pids if p in table], run)
+    rows = O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot)
+    groups = O.group(rows)
+    state['who'] = dict(at=now, groups=groups, lines=[O.line(g, now) for g in groups])
+    return groups, where
+
+
+def top_users(groups, limit=3):
+    """The notice's 「最占内存的」: by App or tool, with project and owner (know-who AC-02)."""
+    found = []
+    for g in groups[:limit]:
+        if g['bytes'] < GIB / 4:
+            continue
+        kind = g['owner']['kind']
+        extra = [O.where_words(g)] + ([g['fact'].split(' · ')[0]] if kind in ('agent', 'editor', 'terminal') and not g['app']
+                                      else ['没人管了'] if kind == 'gone' else [])
+        extra = [e for e in extra if e]
+        found.append(dict(name=g['title'] + ('（{}）'.format('，'.join(extra)) if extra else ''), gib=round(g['bytes'] / GIB, 1)))
+    return found
+
+
+def hot_users(groups, now, limit=2):
+    """know-who AC-04: what has burned most of a core for half an hour or more."""
+    return [g['title'] + '（' + g['fact'] + '）' + O.busy_words(g, now) for g in groups if g.get('busy_since')][:limit]
 
 
 def big_sessions(home, now):
@@ -253,21 +255,23 @@ def big_sessions(home, now):
     return sorted(found, key=lambda s: -s['mb'])[:2]
 
 
-def words(stopped, paused, users, sessions):
+def words(stopped, paused, users, sessions, hot=()):
     parts = []
     if stopped:
-        parts.append('关掉了 {} 个没人管的残留后台（{}）'.format(len(stopped), '、'.join(sorted({s['name'] for s in stopped}))))
+        parts.append('关掉了 {} 个没人管的陪跑后台（{}）'.format(len(stopped), '、'.join(sorted({s['name'] for s in stopped}))))
     if paused:
         parts.append('{} 个重活同时在跑，已让 {} 个排队（{}），一个跑完再放下一个'.format(
             len(paused) + 1, len(paused), '、'.join(sorted({p['name'] for p in paused}))))
     if users:
         parts.append('现在最占内存的是 ' + '、'.join('{} {:.1f} GB'.format(u['name'], u['gib']) for u in users))
+    for line in hot:
+        parts.append(line)
     for session in sessions:
         parts.append('{} 有个会话已经 {} MB，开个新会话会顺很多'.format(session['agent'], session['mb']))
     return '；'.join(parts) + '。' if parts else ''
 
 
-def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=time.sleep, cwd_of=E.cwds, managed=None,
+def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=time.sleep, managed=None,
          notice=agent_plan.notice, emergency_tick=None):
     """One minute of watching (AC-01～05). Never raises for a slow Mac: what cannot be read is skipped this minute."""
     now = time.time() if now is None else now
@@ -293,27 +297,27 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         calm = [s for s in state['samples'] if now - s['at'] <= NORMAL_TO_RELEASE * 60 + 30]
         everything = why is None and len(calm) >= NORMAL_TO_RELEASE and all(s['pressure'] <= 1 for s in calm[-NORMAL_TO_RELEASE:])
         result['released'] = release(state, table, kill, now, everything=everything)
-    found = []
+    groups = []
     if table is not None:
         managed = E.launchd_jobs(run) if managed is None else managed
         if managed is not None:
             try:
-                found = E.orphans([Path(r['path']) for r in cfg['task_roots']], table, cwd_of, own=[os.getpid()], managed=managed)
+                groups, where = who(state, table, now, managed, run, own=[os.getpid()])
             except (OSError, subprocess.SubprocessError):
-                found = []
-            observe(state, found, now)
+                groups, where = [], {}
+            observe(state, [dict(pid=p, lstart=table[p]['lstart'], cpu_seconds=sum(table[c]['cpu'] for c in E.descendants(table, p) if c in table))
+                            for p in companions(table, [os.getpid()], managed) if O.companion(table[p]['command']) in O.SERVERS], now)
+            result['stopped'] = leftovers(state, table, kill, sleep, now, managed, where, bool(why), own=[os.getpid()])
     if why and table is not None:
-        result['stopped'] = leftovers(state, found, table, kill, sleep, now, managed) if found else []
         sizes = footprints(run)
         result['paused'] = queue(state, table, kill, now, own=[os.getpid()], sizes=sizes)
-        if result['stopped'] or result['paused']:
-            acted = dict(at=now, stopped=len(result['stopped']), paused=len(result['paused']))
-            state['acted'] = (state.get('acted', []) + [acted])[-20:]
         quiet = now - state.get('noticed_at', 0) >= NOTICE_GAP
         if not state.get('episode'):
             state['episode'] = dict(since=now, why=why)
             if quiet:
-                body = words(result['stopped'], result['paused'], top_users(table, sizes=sizes), big_sessions(home, now))
+                if managed is not None:
+                    groups, _ = who(state, table, now, managed, run, sizes=sizes, own=[os.getpid()])
+                body = words(result['stopped'], result['paused'], top_users(groups), big_sessions(home, now), hot_users(groups, now))
                 notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
                 state['noticed_at'] = now
         elif (result['stopped'] or result['paused']) and quiet:
@@ -322,6 +326,13 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         state['episode']['last_tight'] = now
     elif why is None and state.get('episode') and now - state['episode'].get('last_tight', state['episode']['since']) >= CALM_TO_END * 60:
         state.pop('episode', None)
+    if why is None and result['stopped'] and now - state.get('noticed_at', 0) >= NOTICE_GAP:
+        notice(home, '关掉了占着 CPU 的陪跑后台', words(result['stopped'], [], [], []), tab='memory')   # know-who AC-03
+        state['noticed_at'] = now
+    if result['stopped'] or result['paused']:
+        names = [s['name'] for s in result['stopped']] + [p['name'] for p in result['paused']]
+        acted = dict(at=now, stopped=len(result['stopped']), paused=len(result['paused']), names=names[:6])
+        state['acted'] = (state.get('acted', []) + [acted])[-20:]
     save(home, state)
     if emergency_tick is not None:
         result['emergency'] = emergency_tick(home, now)
@@ -349,4 +360,4 @@ def status(home, now=None):
     return dict(on=tiers_config.load(home).get('proactive_watch', True), tight=squeeze(state.get('samples', []), now),
                 pressure={1: '正常', 2: '警告', 4: '严重'}.get(last.get('pressure'), '未知'), swap_gib=last.get('swap_used'),
                 queued=[dict(name=p['name'], gib=p['gib'], minutes=round((now - p['since']) / 60)) for p in state.get('paused', [])],
-                acted=state.get('acted', [])[-5:])
+                acted=state.get('acted', [])[-5:], who=(state.get('who') or {}).get('lines', [])[:8])

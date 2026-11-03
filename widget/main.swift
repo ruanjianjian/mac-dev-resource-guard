@@ -43,6 +43,8 @@ struct EmergencyLine: Equatable {
     let at: Double
     let brief: String
     let asks: Int
+    /// agent-investigates AC-06: the background's own look when the agent was done said this Mac is still tight.
+    var tight = false
 }
 
 /// What the cover says about the agent that handled an emergency, from the background's emergency.json:
@@ -55,7 +57,7 @@ func emergencyLine(_ state: [String: Any], now: Double = Date().timeIntervalSinc
     if let last = state["last"] as? [String: Any], (last["talk"] as? Bool) == true,
        let at = (last["at"] as? NSNumber)?.doubleValue, now - at < 86400 {
         return EmergencyLine(running: false, agent: name(last["runner"]), at: at, brief: last["brief"] as? String ?? "",
-                             asks: (last["asks"] as? NSNumber)?.intValue ?? 0)
+                             asks: (last["asks"] as? NSNumber)?.intValue ?? 0, tight: (last["tight"] as? Bool) == true)
     }
     return nil
 }
@@ -480,11 +482,12 @@ func renderCover(_ tab: String, to out: String) throws {
     if let pressure = env["RENDER_PRESSURE"].flatMap(UInt32.init) {
         model.snapshot.pressure = pressure; model.snapshot.memorySince = Date().timeIntervalSince1970 - 360
     }
-    // RENDER_EMERGENCY=running:codex or done:codex:<what it did>:<asks> pins the agent line on the cover.
+    // RENDER_EMERGENCY=running:codex, done:codex:<what it did>:<asks> or tight:… (done, still tight) pins the agent line.
     if let parts = env["RENDER_EMERGENCY"]?.split(separator: ":", maxSplits: 3).map(String.init), parts.count >= 2 {
         let name = ["claude": "Claude", "codex": "Codex"][parts[1]] ?? "agent"
         model.snapshot.emergency = EmergencyLine(running: parts[0] == "running", agent: name, at: Date().timeIntervalSince1970 - 1200,
-                                                 brief: parts.count > 2 ? parts[2] : "", asks: parts.count > 3 ? Int(parts[3]) ?? 0 : 0)
+                                                 brief: parts.count > 2 ? parts[2] : "", asks: parts.count > 3 ? Int(parts[3]) ?? 0 : 0,
+                                                 tight: parts[0] == "tight")
     }
     // RENDER_WATCH=<stopped>:<paused> pins what the watch did twenty minutes ago.
     if let parts = env["RENDER_WATCH"]?.split(separator: ":").compactMap({ Int($0) }), parts.count == 2 {
@@ -552,6 +555,8 @@ if CommandLine.arguments.contains("--run-tick") {
     require(emergencyLine(["run": ["started": now - 3600, "agent": "codex"]], now: now) == nil)   // overstayed: not live
     let done = emergencyLine(["last": ["at": now - 600, "runner": "claude", "talk": true, "brief": "关了 3 个残留后台", "asks": 2]], now: now)
     require(done == EmergencyLine(running: false, agent: "Claude", at: now - 600, brief: "关了 3 个残留后台", asks: 2))
+    let still = emergencyLine(["last": ["at": now - 600, "runner": "codex", "talk": true, "brief": "后台看：还紧", "asks": 0, "tight": true]], now: now)
+    require(still?.tight == true)
     require(emergencyLine(["last": ["at": now - 600, "runner": "codex", "talk": false]], now: now) == nil)   // nothing to open
     require(emergencyLine(["last": ["at": now - 90000, "runner": "codex", "talk": true]], now: now) == nil)  // older than a day
     require(watchLine([:], now: now) == nil)

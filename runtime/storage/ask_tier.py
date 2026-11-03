@@ -11,6 +11,7 @@ import time
 from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
 import auto_tier
+import owners as O
 import spaces
 import tasks as T
 
@@ -26,6 +27,7 @@ LOSES = {
     'trash-empty': '废纸篓里的全部文件，清空后不能恢复',
     'device-support-delete': '下次连这台设备调试时，Xcode 要花几分钟重新准备',
     'archive-delete': '这个版本的安装包和查崩溃用的符号文件',
+    'process-stop': '它这次运行的状态，要用时得重新启动它',
 }
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
@@ -33,7 +35,8 @@ NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|Co
 # for up to a day this way). Only how long such a stream has run says whether anyone still looks.
 # The program itself must be the stream (a word of its own, or the last part of a path), not a path that happens
 # to hold these words, like a project in /repos/baguette/stream.
-PASSIVE = re.compile(r'(?i)(?:^|[\s;&|(/])baguette\s+stream(?:\s|$)|(?:^|[\s;&|(/])simctl\s+spawn\s+\S+\s+log\s+stream(?:\s|$)')
+PASSIVE = re.compile(r'(?i)(?:^|[\s;&|(/])baguette\s+stream(?:\s|$)|(?:^|[\s;&|(/])simctl\s+spawn\s+\S+\s+log\s+stream(?:\s|$)'
+                     r'|(?:^|[\s;&|(/])[\w.-]+\s+stream\s+(?:\S+\s+)*?--udid(?:[\s=]|$)')   # any tool's screen stream of a device
 APP = Path.home() / 'Applications/资源看板.app'
 
 
@@ -287,6 +290,8 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
                 del items[key]
             elif item['kind'] == 'task-delete' and not Path(key.split(':', 1)[1]).exists():
                 del items[key]
+            elif item['kind'] == 'process-stop' and same_process(item) is None:
+                del items[key]
             continue
         path = Path(key.split(':', 1)[1])
         # A moved task whose drive is unplugged stays listed but cannot run (ask AC-09).
@@ -309,10 +314,31 @@ def device_ids(simctl):
     return {d['udid'] for devices in listing.get('devices', {}).values() for d in devices}
 
 
+def same_process(item, run=subprocess.run):
+    """The process a process-stop ask names, if it is still that one: (command, ppid) or None."""
+    pid = item['id'].split(':', 1)[1]
+    try:
+        out = run(['/bin/ps', '-ww', '-o', 'ppid=,lstart=,command=', '-p', pid], capture_output=True, text=True,
+                  errors='surrogateescape', timeout=10).stdout.split(None, 6)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(out) < 7 or ' '.join(out[1:6]) != item.get('lstart'):
+        return None
+    return out[6].strip(), int(out[0])
+
+
 def agent_floor(home, cfg, item, activity, pins, simctl):
     """emergency-agent AC-08: an ask of the agent's is rechecked against the safety floor only, not the rules'
     waiting days. Returns (fresh fields, None) when it may go ahead, or (None, why not)."""
     kind, target = item['kind'], item['id'].split(':', 1)[1]
+    if kind == 'process-stop':   # agent-investigates AC-03
+        found = same_process(item)
+        if found is None:
+            return None, '它已经不在了，或进程号换了程序'
+        command, _ = found
+        if O.kind_of(command) and O.kind_of(command)[0] != 'agent' or any(word in command for word in O.NEVER):
+            return None, '它是 App 本身、数据库、容器、调试器或模拟器'
+        return dict(bytes=item['bytes'], reason=item['reason']), None
     if kind.startswith('simulator'):
         try:
             listing = json.loads(simctl(['list', 'devices', '--json']))
@@ -485,6 +511,11 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 simctl(['runtime', 'delete', target])
             elif item['kind'] == 'trash-empty':
                 trash_emptier()
+            elif item['kind'] == 'process-stop':
+                import emergency   # here only: it imports this module
+                skipped = emergency.stop_tree(emergency.process_table(), int(target), item['lstart'])
+                if skipped:
+                    raise RuntimeError(skipped)
             elif item['kind'] in ('installer-delete', 'device-support-delete', 'archive-delete'):
                 path = Path(target)
                 if path.is_dir() and not path.is_symlink():
