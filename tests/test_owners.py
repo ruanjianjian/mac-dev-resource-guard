@@ -1,4 +1,5 @@
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -209,7 +210,68 @@ class WordsTest(unittest.TestCase):
         where = {1: ('/t/a/shop', False), 2: ('/t/b/shop', False)}
         [checkouts] = O.group(O.describe(same, [1, 2], where, {}, set(), NOW))
         self.assertEqual(checkouts['projects'], ['a/shop', 'b/shop'])   # two checkouts of one repo are two projects
+        left = {1: row(1, 'node /t/a/server.ts', hours=23), 2: row(2, 'node /t/b/server.ts', hours=0.2)}
+        [both] = O.group(O.describe(left, [1, 2], {}, {}, set(), NOW))
+        self.assertEqual(both['fact'], '没人管了 · 12 分钟～23 小时')   # not the oldest one's age for both
 
+
+
+UDID, OTHER = '386C210B-5E0F-4000-833B-E798B0C5A858', '78022C0C-75B4-48E6-A69A-28D2BB11BC7B'
+DEVICES = '/Users/dev/Library/Developer/CoreSimulator/Devices/'
+RUNTIME = '/Library/Developer/CoreSimulator/Volumes/iOS_24A/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot'
+SIMS = {
+    **{p: TABLE[p] for p in (10, 11, 12, 13, 30, 31, 32, 33)},
+    80: row(80, 'launchd_sim ' + DEVICES + UDID + '/data/var/run/launchd_bootstrap.plist', hours=1),
+    81: row(81, RUNTIME + '/usr/libexec/backboardd', ppid=80, hours=1, pcpu=90.0, mb=300),
+    82: row(82, DEVICES + UDID + '/data/Containers/Bundle/Application/AB12/Runner.app/Runner', ppid=80, hours=1, mb=700),
+    83: row(83, '/Users/dev/.local/bin/baguette stream --udid ' + UDID + ' --fps 5', ppid=13, hours=1),     # Claude Code's
+    84: row(84, '/usr/bin/xcrun simctl spawn ' + UDID + ' log stream --style compact', ppid=33, hours=1),   # Codex's
+    90: row(90, 'launchd_sim ' + DEVICES + OTHER + '/data/var/run/launchd_bootstrap.plist', hours=5),
+    91: row(91, RUNTIME + '/System/Library/CoreServices/SpringBoard.app/SpringBoard', ppid=90, hours=5, mb=400),
+    95: row(95, '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/'
+                'com.apple.CoreSimulator.CoreSimulatorService.xpc/Contents/MacOS/com.apple.CoreSimulator.CoreSimulatorService'),
+}
+
+
+class SimulatorTest(unittest.TestCase):
+    """know-who AC-06: a simulator is the tool, and whoever is connected to it — not 「后台服务」 — its owner."""
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        for udid, name in ((UDID, 'iPhone 17 Pro'), (OTHER, 'iPad Air')):
+            folder = self.home / 'Library/Developer/CoreSimulator/Devices' / udid
+            folder.mkdir(parents=True)
+            (folder / 'device.plist').write_bytes(plistlib.dumps({'name': name, 'UDID': udid}))
+        O._NAMES.clear()
+        self.addCleanup(O._NAMES.clear)
+
+    def test_each_process_belongs_to_the_device_it_runs_in(self):
+        self.assertEqual([O.device(SIMS, p) for p in (80, 81, 82, 91)], [UDID, UDID, UDID, OTHER])
+        self.assertEqual([O.device(SIMS, p) for p in (83, 84, 95, 13)], [None] * 4)   # connected to it, or the Mac's own
+        self.assertEqual(O.device_name(UDID, self.home), 'iPhone 17 Pro')
+        self.assertEqual(O.users(SIMS, [81, 91]), {83, 84})
+
+    def test_who_is_connected_owns_it_and_says_how_lively(self):
+        agents = {'13': dict(lstart='x', cpu=1.0, at=NOW, moved=NOW - 60, seen=NOW - 2 * HOUR)}
+        where = {83: ('/code/shop', False), 84: ('/code/shop', False)}
+        rows = O.describe(SIMS, [81, 82, 91, 95], where, agents, set(), NOW, hot={81: NOW - 40 * 60}, home=self.home)
+        lines = {g['title']: O.line(g, NOW) for g in O.group(rows)}
+        self.assertEqual(lines, {
+            'iOS 模拟器 · iPhone 17 Pro': 'iOS 模拟器 · iPhone 17 Pro · shop · Claude Code 在用 · 刚刚还在动 · 占满 1 个核已经 40 分钟',
+            'iOS 模拟器 · iPad Air': 'iOS 模拟器 · iPad Air · 没人连着 · 5 小时',
+            'iOS 模拟器': 'iOS 模拟器 · 后台服务'})   # the Mac's own simulator service is shared, nobody's in particular
+        shown = {**SIMS, 99: row(99, '/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator')}
+        self.assertEqual(O.sim_owner(shown, OTHER), dict(kind='app', name='Simulator', via='shows'))
+        self.assertEqual(O.fact(O.sim_owner(shown, OTHER), SIMS[91], {}, NOW), 'Simulator 开着')
+        left = {**SIMS, 97: row(97, 'sh -c tail -f /dev/null | baguette stream --udid ' + OTHER, hours=3),
+                98: row(98, '/Users/dev/.local/bin/baguette stream --udid ' + OTHER, ppid=97, hours=3)}   # nohup'd, its agent gone
+        self.assertEqual(O.fact(O.sim_owner(left, OTHER), SIMS[91], {}, NOW), '只有没人管的 baguette 连着 · 3 小时')
+
+    def test_the_agent_cannot_ask_to_stop_what_runs_inside_a_simulator(self):
+        import emergency as E
+        for pid in (81, 82):
+            with self.assertRaises(ValueError) as refused:
+                E.asked_process({}, str(pid), SIMS)
+            self.assertIn('模拟器', str(refused.exception))
 
 if __name__ == '__main__':
     unittest.main()

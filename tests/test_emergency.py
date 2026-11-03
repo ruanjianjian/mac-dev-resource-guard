@@ -45,15 +45,41 @@ class TriggerTest(unittest.TestCase):
         self.assertNotIn('warn_since', state)
         self.assertEqual(E.due(state, free, CRITICAL, 4, NOW + 7 * 3600), 'memory')   # 「严重」 needs no half hour
 
-    def test_no_second_run_while_one_is_going_and_four_a_day_at_most(self):
+    def test_no_second_run_while_one_is_going_and_a_ceiling_a_day(self):
         state = {'run': {'pid': os.getpid(), 'started': NOW}}
         self.assertIsNone(E.due(state, 20 * GIB, CRITICAL, 1, NOW + 60))
         state = {'run': {'pid': os.getpid(), 'started': NOW - 40 * 60}}            # overstayed: no longer counts
         self.assertEqual(E.due(state, 20 * GIB, CRITICAL, 1, NOW), 'disk')
-        state = {'starts': [NOW - h * 3600 for h in (1, 2, 3, 4)]}
+        state = {'starts': [NOW - h * 1800 for h in range(1, E.DAY_LIMIT + 1)]}
         self.assertIsNone(E.due(state, 20 * GIB, CRITICAL, 1, NOW))
-        state = {'starts': [NOW - h * 3600 for h in (1, 2, 3, 25)]}
+        self.assertEqual(state['capped'], dict(at=NOW, reason='disk'))   # the user hears it once
+        state = {'starts': [NOW - h * 1800 for h in range(1, E.DAY_LIMIT)] + [NOW - 25 * 3600]}
         self.assertEqual(E.due(state, 20 * GIB, CRITICAL, 1, NOW), 'disk')
+
+    def test_still_tight_and_something_new_brings_the_agent_back_within_the_quiet_hours(self):
+        group = lambda tool, gib, owner=('agent', 'Codex'), projects=(): dict(
+            tool=tool, title=tool, owner=dict(kind=owner[0], name=owner[1]), projects=list(projects), bytes=gib * GIB,
+            fact=owner[1] + ' 在用', busy_since=None, count=1, cores=0.0)
+        looked_at = lambda groups, swap, at, pressure=2: E.view({'who': {'at': at, 'groups': groups},
+                                                                 'samples': [{'swap_used': swap}]}, pressure, at)
+        state, free = {'warn_since': NOW - 3600}, 100 * GIB
+        first = looked_at([group('tsc', 2), group('ugrep', 0.2)], 16.0, NOW)
+        self.assertEqual(list(first['heavy']), ['tsc|agent|Codex'])   # only what is worth a look
+        self.assertEqual(E.due(state, free, CRITICAL, 2, NOW, first), 'memory')
+        E.mark_fired(state, 'memory', free, CRITICAL, NOW)
+        state['looked'] = first
+        hour = NOW + 3600
+        self.assertIsNone(E.due(state, free, CRITICAL, 2, hour, looked_at([group('tsc', 2)], 16.5, hour)))   # the same again
+        sims = [group('tsc', 2), group('iOS 模拟器 · iPhone 17 Pro', 1.9, ('agent', 'Claude Code'), ['shop'])]
+        soon = NOW + 20 * 60
+        self.assertIsNone(E.due(state, free, CRITICAL, 2, soon, looked_at(sims, 16.5, soon)))   # new, but too soon
+        later = NOW + 31 * 60
+        self.assertEqual(E.news(first, looked_at(sims, 16.5, later)), ['iOS 模拟器 · iPhone 17 Pro · shop · Claude Code 在用'])
+        self.assertEqual(E.due(state, free, CRITICAL, 2, later, looked_at(sims, 16.5, later)), 'memory')
+        self.assertEqual(E.news(first, looked_at([group('tsc', 2)], 19.0, later)), ['swap 比上次多了 3 GB（16 → 19 GB）'])
+        self.assertEqual(E.news(first, looked_at([group('tsc', 2)], 16.0, later, pressure=4)), ['内存压力到了「严重」'])
+        updated = {'warn_since': NOW - 3600, 'memory_fired_at': NOW}   # fired by a version that kept no look
+        self.assertEqual(E.due(updated, free, CRITICAL, 2, later, looked_at([group('tsc', 2)], 16.0, later)), 'memory')
 
 
 def executable(path):
@@ -248,7 +274,7 @@ class RunnerTest(AskFixture):
             queued.append((thread, words, kwargs.get('env')))
             turns.setdefault(thread, []).append({'status': 'queued', 'items': [
                 {'type': 'userMessage', 'content': [{'type': 'text', 'text': words}]},
-                {'type': 'agentMessage', 'text': 'RG-DECISION {"action": "lesson", "note": "只读也能交回来"}'}]})
+                {'type': 'agentMessage', 'text': 'RG-DECISION {"action": "lesson", "when": "只读", "then": "放进回复"}'}]})
             return subprocess.CompletedProcess(command, 0)
 
         # The threads from before ran inside an old run's folder: not taken over, one new thread is started.
@@ -292,7 +318,7 @@ class RunnerTest(AskFixture):
         self.folder.chmod(0o500)   # the Codex App ran the turn read-only
         try:
             with self.assertRaises(ValueError) as refused:
-                E.decide(self.folder, 'lesson', note='只读也能交回来')
+                E.decide(self.folder, 'lesson', when='只读的对话里记决定', then='写不进去就放进回复，资源看板会取')
         finally:
             self.folder.chmod(0o700)
         line = str(refused.exception).splitlines()[-1]
@@ -300,7 +326,7 @@ class RunnerTest(AskFixture):
         said = '处理完了。\n\n```\n' + line + '\n' + line + '\n```\nRG-DECISION {"action": "stop", "pid": 1, "why": "x"}'
         carried = E.carry(self.folder, said)
         self.assertEqual(carried['received'], 3)
-        self.assertEqual((carried['recorded'][0]['action'], carried['recorded'][0]['note']), ('lesson', '只读也能交回来'))
+        self.assertEqual((carried['recorded'][0]['action'], carried['recorded'][0]['when']), ('lesson', '只读的对话里记决定'))
         [refused] = carried['refused']   # the stop is checked again: pid 1 was never in the material
         self.assertIn('不在告急材料里', refused['why'])
         again = E.carry(self.folder, said)
@@ -459,7 +485,7 @@ class MaterialTest(AskFixture):
         self.assertEqual(entry['gib'], 3.0)
         [phone] = material['simulators']
         self.assertEqual((phone['tasks'], phone['days_since_used'] >= 5), (['done-task'], True))
-        self.assertTrue(any(m['words'] == '开着但 3 小时没人连的，不要关机。' for m in material['memories']))
+        self.assertTrue(any(m['words'] == '开着但 3 小时没人连的，不要关机。' for m in material['decisions']))
         self.assertTrue(material['steps'] and material['rules'])
 
 
@@ -616,6 +642,72 @@ class InvestigateTest(AskFixture):
         done = E.decide(folder, 'done', summary='关了一个流', cause='一路截屏流占满一个核', need='看一下 Cursor 里那个 tail')
         self.assertEqual((done['cause'], done['need']), ('一路截屏流占满一个核', '看一下 Cursor 里那个 tail'))
 
+    def test_something_new_brings_it_back_sooner_and_it_is_told_what(self):
+        executable(self.home / '.local/bin/codex')
+        (self.home / '.codex').mkdir(); (self.home / '.codex/auth.json').write_text('{}')
+        cfg = self.cfg()
+        heavy = lambda tool, owner: dict(tool=tool, title=tool, owner=owner, projects=['shop'], bytes=2 * GIB, cores=0.5,
+                                         fact=owner['name'] + ' 在用', busy_since=None, count=1, pids=[1])
+        tsc = heavy('tsc', dict(kind='agent', name='Codex'))
+        start = lambda now: E.tick(self.home, cfg, self.settings, now, run=FakeRun(pressure=2), env={},
+                                   starter=lambda reason, folder, runner: 4243, free=80 * GIB)
+        self.watch([2] * 20, who=dict(at=NOW, groups=[tsc]))
+        E.save_state(self.home, dict(warn_since=NOW - 3600))
+        self.assertEqual(start(NOW)['reason'], 'memory')
+        later = NOW + 40 * 60
+        self.watch([2] * 20, now=later, who=dict(at=later, groups=[tsc]))
+        self.assertIsNone(start(later))                       # nothing new: it would only say the same again
+        sim = heavy('iOS 模拟器 · iPhone 17 Pro', dict(kind='agent', name='Claude Code', via='uses'))
+        self.watch([2] * 20, now=later, who=dict(at=later, groups=[tsc, sim]))
+        got = start(later)
+        self.assertEqual(got['reason'], 'memory')
+        prompts = []
+
+        def codex(home, folder, prompt, env, timeout, popen=None):
+            prompts.append(prompt)
+            return dict(agent='codex', status='done', thread='t', said='')
+
+        (Path(got['folder']) / E.MATERIAL).write_text(json.dumps(dict(at=later, orphans=[], tasks=[], simulators=[], waiting=[], companions=[])))
+        with patch.object(E, 'run_codex', codex):
+            E.run(self.home, cfg, self.settings, 'memory', got['folder'], 'codex', now=later)
+        self.assertIn('跟上次（{}）比，这次新出现的：iOS 模拟器 · iPhone 17 Pro · shop · Claude Code 在用。先看这些。'.format(
+            time.strftime('%H:%M', time.localtime(NOW))), prompts[0])
+        # At the ceiling the user hears it once, not at every wake.
+        state = E.load_state(self.home)
+        state.update(starts=[later - i * 60 for i in range(E.DAY_LIMIT)], memory_fired_at=0)
+        E.save_state(self.home, state)
+        before = len(agent_plan.queued_notices(self.home))
+        self.assertIsNone(start(later + 600))
+        self.assertIsNone(start(later + 900))
+        titles = [n['title'] for n in agent_plan.queued_notices(self.home)][before:]
+        self.assertEqual(titles, ['agent 今天已经来了 {} 次，还是紧'.format(E.DAY_LIMIT)])
+
+    def test_lessons_are_rules_kept_once_and_old_notes_can_be_rewritten(self):
+        diary = agent_plan.remember(self.home, 'lesson', 'emergency', note='22:30 本轮无新增孤儿，40223 仍保留')
+        dns = agent_plan.remember(self.home, 'lesson', 'emergency', note='clusterdns 是本机共用的 DNS，不能只凭父进程退出就关')
+        material = self.material()
+        self.assertEqual(([n['id'] for n in material['old_notes']], material['lessons']), ([diary['id'], dns['id']], []))
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(material))
+        for refused in (dict(note='本轮 swap 18 GB'), dict(when='本轮内存紧', then='没关'), dict(when='内存紧', then='22:37 查过了'),
+                        dict(when='内存紧', then='先看谁在占', replaces='m99')):
+            with self.assertRaises(ValueError):
+                E.decide(folder, 'lesson', **refused)
+        E.decide(folder, 'lesson', when='孤儿列表里有 clusterdns 或 mirrord intproxy', then='保留：是本机共用的 DNS', replaces=dns['id'])
+        E.decide(folder, 'lesson', when='截屏流开了一天以上、主人还在', then='列进「等你确认」，不自己关')
+        E.decide(folder, 'done', summary='记了两条', cause='截屏流占着核')
+        result = E.apply(self.home, self.cfg(), self.settings, folder, now=NOW, table=self.TABLE)
+        receipt = E.receipt(E.decisions(folder), dict(received=0, recorded=[], refused=[]), result)
+        self.assertEqual((receipt['words'], receipt['learned']), ('记下 2 条经验（1 条是改写旧的）', 2))
+        self.assertEqual([r['rule']['when'] for r in agent_plan.lessons(self.home)],
+                         ['孤儿列表里有 clusterdns 或 mirrord intproxy', '截屏流开了一天以上、主人还在'])
+        self.assertEqual([n['id'] for n in agent_plan.old_notes(self.home)], [diary['id']])   # the rewritten note is gone
+        # The same situation again rewrites its rule instead of adding a second one.
+        again = agent_plan.learn(self.home, 'emergency', '截屏流开了一天以上、主人还在', '列进「等你确认」；主人 6 小时没动就关')
+        self.assertEqual(again['replaces'], result['learned'][1]['id'])
+        lessons = agent_plan.lessons(self.home)
+        self.assertEqual((len(lessons), lessons[-1]['rule']['then']), (2, '列进「等你确认」；主人 6 小时没动就关'))
+
     def test_a_run_that_did_not_help_says_so_and_the_next_one_hears_it(self):
         executable(self.home / '.local/bin/codex')
         (self.home / '.codex').mkdir(); (self.home / '.codex/auth.json').write_text('{}')
@@ -757,7 +849,7 @@ class CommandTest(AskFixture):
                 E.decide(folder, *args[:2], why=args[2])
         with self.assertRaises(ValueError):
             E.decide(folder, 'done')
-        E.decide(folder, 'lesson', note='Codex 的 app-server 会在任务目录里留一天以上')
+        E.decide(folder, 'lesson', when='Codex 的 app-server 留在任务目录里', then='放满一天、所属任务的 PR 合了再关')
         self.assertEqual([d['action'] for d in E.decisions(folder)], ['lesson'])
 
 

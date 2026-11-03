@@ -225,6 +225,9 @@ class QueueTest(WatchFixture):
         result = self.tick(NOW, run, table)
         self.assertEqual(sorted(p['pid'] for p in result['paused']), [2, 3])     # ps shows 0.18 GB each; top 3 GB
         self.assertIn('tsc ×3 8.8 GB', self.notices[0][1])   # whose they are cannot be told here: nothing made up
+        self.tick(NOW + 60, run, table)   # every tight minute, not only the one that sent the notice
+        [tsc] = [g for g in W.load(self.home)['who']['groups'] if g['tool'] == 'tsc']
+        self.assertGreater(tsc['bytes'], 8 * 2 ** 30)
 
     def test_apps_databases_and_light_jobs_are_never_queued(self):
         table = {1: row(1, '/Applications/Claude.app/Contents/MacOS/Claude', hours=1, cpu=900.0, gib=6.0),

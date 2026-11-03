@@ -363,7 +363,8 @@ def emergency_command(home, a):
         folder = emergency.run_folder()
         if what == 'show':
             return emergency.show(folder, home)
-        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary, cause=a.cause, need=a.need)
+        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary, cause=a.cause, need=a.need,
+                                when=a.when, then=a.then, replaces=a.replaces)
     if what == 'status':
         state = emergency.load_state(home)
         cfg = tiers_config.load(home)
@@ -1034,6 +1035,9 @@ def main():
     p.add_argument('--summary', default='', help='review done / emergency done: the conclusion, also told to the user')
     p.add_argument('--cause', default='', help='emergency done: why this Mac was tight')
     p.add_argument('--need', default='', help='emergency done: what the user has to do, if anything')
+    p.add_argument('--when', default='', help='emergency lesson: the situation the rule is for')
+    p.add_argument('--do', dest='then', default='', help='emergency lesson: what to do then, and why')
+    p.add_argument('--replaces', default='', help='emergency lesson: the id of the lesson or old note it rewrites')
     p.add_argument('--reason', choices=['disk', 'memory', 'asked'], help='emergency run: why the agent was started')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):

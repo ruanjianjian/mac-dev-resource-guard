@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-40～42。
+原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-40～42，本轮新增 RAW-46～47。
 
 ## 意图
 
@@ -20,6 +20,8 @@
 - **陪跑后台按主人判断**：只在有人看着时才有用的后台，主人走了、或主人是 agent 且 6 小时没动，才关；主人是还开着的终端或编辑器，不关。
 - **后台长时间占满 CPU 要写出来**：只说，不因此关。
 
+11-03 晚上又卡的时候，五台模拟器加起来占满 3 个核，看板上只有一行「iOS 模拟器 ×5 · 后台服务」：看不出是哪几台、谁在测、还有没有人连着（RAW-46、RAW-47）。模拟器自己的程序都挂在系统的模拟器服务下面，往上找主人只能找到系统；真正在用它的，是连着它的截屏流、日志流、测试和编译。所以模拟器按「谁连着它」认主人。
+
 ## 非目标
 
 - 不读别的进程的环境变量：里面常有密钥。
@@ -36,6 +38,7 @@
 | AC-03 | [核] | 一个陪跑后台在跑。陪跑后台指只在有人看着时才有用的这几类：<br>• 日志流（`log stream`、`tail -f`、`adb logcat`…）；<br>• 画面流和录屏（模拟器截屏流、`simctl io … recordVideo`…）；<br>• `--watch` 模式的编译和测试；<br>• 语言服务、MCP 服务这类编辑器或 agent 的帮手 | 内存变紧，或它自己占了半个核以上 | 按主人决定：<br>• 主人是 agent，那个 agent 6 小时没动 → 关；<br>• 没人管了，开了 6 小时以上，同一个项目里 6 小时内也没有 agent 动过 → 关；<br>• 主人是还开着的终端、编辑器或别的 App → 不关；<br>• 它在往文件里写（在录日志、录屏）→ 不关。<br>关之前复核还是同一个进程。关了的写进通知 | CLI后端 | ✅ | auto: test_owners.VerdictTest 五条（agent 6 小时没动才关；编辑器、终端里的不关；写文件的不关；没人管的要项目里也没 agent 在动；agent 自己的 MCP、语言服务不关）、test_watch.CompanionTest 三条（内存不紧也会关占满一个核的；agent 还在干活就留着）。实测：本机两路截屏流的主人几分钟前还在动，留下了；本机没有满 6 小时的例子，「关掉」这一步由 test_emergency.ProcessStopTest 对真进程验证 |
 | AC-04 | [核] | 一个后台连续 30 分钟以上占满大半个核（80% 以上） | 用户打开内存页；或资源看板发「内存在变紧」通知；或叫 agent 来处理告急 | 写出它是谁的、占了几个核、已经多久，比如「截屏流（Claude Code 起的）占满 1 个核已经 3 天」。只写不关，除非 AC-03 允许 | mac原生、CLI后端 | ✅ | auto: test_owners.ActivityTest.test_busy_for_half_an_hour_or_all_its_life、WordsTest。实测：who 和告急材料里都写着「占满 2 个核已经 3 天」，没有因此关掉 |
 | AC-05 | [边] | 换一台 Mac：别的终端、编辑器、agent，别的项目结构 | 同 AC-01 | 认得出的主人至少有：<br>• 终端：Terminal、iTerm2、Warp、Ghostty、kitty、Alacritty、WezTerm、tmux；<br>• 编辑器：VS Code、Cursor、Windsurf、Zed、Xcode、JetBrains 全家、Sublime Text；<br>• agent：Claude Code、Codex、Gemini CLI、Aider、opencode。<br>认不出的写「查不到是谁的」，不当作没人管。项目只看 git 仓库，不依赖资源看板的任务目录 | CLI后端 | ✅ | auto: test_owners.OwnerTest（Terminal、iTerm2 + tmux、Cursor、PyCharm、Claude Code、Codex、Aider、Codex App、launchd 服务、root 的系统服务、Xcode 自带的 make）。实测：本机全部进程过一遍，「没人管了」只剩用户自己的残留（开发服务器、代理、agent 帮手）。本机没装 VS Code、Cursor，编辑器只有单元测试覆盖 |
+| AC-06 | [核] | 开着几台 iOS 模拟器 | 同 AC-01 | 每台模拟器单独一行，写设备名（「iOS 模拟器 · iPhone 17 Pro」），不再一律写「后台服务」：<br>• **谁在用**：连着它的截屏流、日志流、测试、编译的主人，比如「Claude Code 在用 · 刚刚还在动」「Xcode 在用」；几个都连着时，agent 优先；<br>• **项目**：连着它的那个程序在哪个项目；<br>• 只有 Simulator App 开着它：「Simulator 开着」；<br>• 什么都没连：「没人连着 · 5 小时」；只有没人管的流连着：「只有没人管的 Baguette 连着 · 1 小时」。<br>内存页的模拟器那行也这样写。模拟器里的程序 agent 不能列「关掉程序」（关模拟器照旧只能列 simulator-shutdown 给用户点头）。内存紧时，谁占多少按 `top` 的算法（含被换出、被压缩的） | CLI后端、mac原生 | ✅ | auto: test_owners.SimulatorTest 三条、test_dashboard.test_a_simulator_row_says_who_uses_it、test_watch.QueueTest.test_jobs_mostly_swapped_out_still_count_by_what_they_really_hold。红：去掉按设备认主人、去掉「模拟器里的不能列」、内存紧时不按 top 算，对应用例都失败。实测（11-03 22:53，本机六台模拟器）：告急材料的 who 写着「iOS 模拟器 · TBG Gray · elys-monorepo · Claude Code 在用 · 2 分钟前还在动」「iOS 模拟器 · Elys Memory Card Peer · 只有没人管的 Baguette 连着 · 1 小时 · 占满 2 个核已经 1 小时」；Claude App 自己的模拟器窗口连着的那台写「Claude 在用」 |
 
 ## 变更记录
 
@@ -43,3 +46,4 @@
 |---|---|---|---|
 | CH-01 | 2026-11-03 | 新建（RAW-40～42）。[主动盯着](proactive-watch.md) AC-02 里「截屏流、日志流放一天就关」由本 spec AC-03 取代 | [需求变更] |
 | CH-02 | 2026-11-03 | 本机实测时改了几处（[实现引入]）：<br>• 系统自己的服务（系统路径、root 跑的）算后台服务，不算没人管；<br>• App 里自带的命令行工具（Xcode 的 make、git）不算那个 App；<br>• 同名的两份检出写成「a/shop」「b/shop」；<br>• 刚开始盯的 agent 不说「还在动」，看到它动了才说；<br>• 从 `/` 或主目录起的 agent 看不出在哪个项目干活：这时没人管的陪跑后台放满一天才关；<br>• agent 自己的 MCP、语言服务，agent 还在就不关 | [实现引入] |
+| CH-03 | 2026-11-03 | 加 AC-06（RAW-46～47）：模拟器按「谁连着它」认主人。本机实测时改了两处（[实现引入]）：<br>• 只有没人管的流连着的，不说「没人连着」，说「只有没人管的 X 连着」；<br>• 内存紧时每分钟的「谁占着」按 `top` 算：只看 ps 时 Claude App 显示 0.5 GB，实际 4 GB；<br>• 几个没人管的合成一行时写时长范围（「没人管了 · 12 分钟～23 小时」）：原来只写最老那个的，用户据此点头关掉时，其中一个其实是别的会话 12 分钟前刚起的（这次核实后没关） | [需求变更] |

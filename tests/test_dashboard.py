@@ -120,6 +120,21 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual((rows['Baguette']['reason'], rows['Baguette']['tag']), ('占满 1 个核已经 3 天 · 没人管了 · 3 天', 'auto'))
         self.assertFalse(any('在用 · 不动' in r['reason'] for r in rows.values()))
 
+    def test_a_simulator_row_says_who_uses_it(self):
+        """know-who AC-06 on the memory page: the simulator's owner and project, not only which tool is connected."""
+        now = time.time()
+        (self.home / '.fixture-simulators.json').write_text(json.dumps([dict(
+            id='U1', name='iPhone 17 Pro', rss_kib=2 * 2 ** 20, reason='simulator_in_use', attached=['baguette'], pids=[81, 82])]))
+        sim = dict(title='iOS 模拟器 · iPhone 17 Pro', tool='iOS 模拟器 · iPhone 17 Pro', count=2, projects=['shop'], bytes=2 ** 30,
+                   owner=dict(kind='agent', name='Claude Code', pid=13, via='uses', user=83), cores=1.0, age=3600,
+                   fact='Claude Code 在用 · 刚刚还在动', busy_since=now - 2400, pids=[81, 82], app=True)
+        path = self.home / '.local/state/dev-resource-guard/watch.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(who=dict(at=now, groups=[sim]))))
+        rows = [r for r in self.adapter.run('memory-page')['rows'] if r['category'] == '正在用']
+        self.assertEqual([(r['title'], r['reason']) for r in rows],
+                         [('iPhone 17 Pro 模拟器 · shop', '占满 1 个核已经 40 分钟 · Claude Code 在用 · 刚刚还在动')])   # listed once
+
     def test_memory_preserves_apps_devices_and_pending(self):
         rows = backend.rows_memory(memory(external_resources=[dict(id='gradle:1', kind='gradle', eligible=False, reason='pending_readonly_no_retry')],
             top_memory=[dict(pid=123, name='Xcode', mem='1G', argv='SECRET', policy='保留')],
