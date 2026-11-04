@@ -34,6 +34,7 @@ CALM_TO_END = 10              # minutes of no squeeze before a squeeze counts as
 NOTICE_GAP = 30 * 60          # at most one notice in this long
 PAUSE_LIMIT = 20 * 60         # nobody waits longer than this
 HEAVY_BYTES = GIB // 2        # what is still in memory; a job the Mac already swapped out shows less
+SWAPPED_GIB = 2.0             # this much in swap and ps no longer tells what each one holds (know-who AC-07)
 HELPER_IDLE_HOURS = O.AGENT_QUIET_HOURS   # a server this long without CPU of its own is abandoned
 BIG_SESSION_BYTES = 300 * 2 ** 20
 SESSION_HOURS = 3
@@ -299,9 +300,11 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         everything = why is None and len(calm) >= NORMAL_TO_RELEASE and all(s['pressure'] <= 1 for s in calm[-NORMAL_TO_RELEASE:])
         result['released'] = release(state, table, kill, now, everything=everything)
     groups = []
-    # While tight most of what each one holds is swapped or compressed, which ps does not see (11-03: the Claude App
-    # showed 0.5 GB of its 4 GB): who holds what is measured the way top counts it then.
-    sizes = footprints(run) if why and table is not None else None
+    # While tight, or with much in swap, most of what each one holds is swapped or compressed, which ps does not see
+    # (11-03: the Claude App showed 0.5 GB of its 4 GB; 11-04: pressure back to normal with 16 GB in swap, 25 Claude
+    # Code sessions showed 0.2 GB): who holds what is measured the way top counts it then.
+    swapped = (sample.get('swap_used') or 0) >= SWAPPED_GIB
+    sizes = footprints(run) if (why or swapped) and table is not None else None
     if table is not None:
         managed = E.launchd_jobs(run) if managed is None else managed
         if managed is not None:

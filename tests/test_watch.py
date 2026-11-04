@@ -233,6 +233,11 @@ class QueueTest(WatchFixture):
         self.tick(NOW + 60, run, table)   # every tight minute, not only the one that sent the notice
         [tsc] = [g for g in W.load(self.home)['who']['groups'] if g['tool'] == 'tsc']
         self.assertGreater(tsc['bytes'], 8 * 2 ** 30)
+        # Pressure back to normal but 10 GB still in swap: ps would say 0.5 GB, so top still counts (know-who AC-07).
+        calm = Readings(pressure=1, swap_used=10.0, swap_total=40.0)   # a quarter of swap, steady: not a squeeze
+        self.tick(NOW + 3600, lambda args, **kwargs: run(args, **kwargs) if args[0] == '/usr/bin/top' else calm(args, **kwargs), table)
+        [tsc] = [g for g in W.load(self.home)['who']['groups'] if g['tool'] == 'tsc']
+        self.assertGreater(tsc['bytes'], 8 * 2 ** 30)
 
     def test_apps_databases_and_light_jobs_are_never_queued(self):
         table = {1: row(1, '/Applications/Claude.app/Contents/MacOS/Claude', hours=1, cpu=900.0, gib=6.0),

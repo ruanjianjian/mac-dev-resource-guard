@@ -411,7 +411,7 @@ def verdict(row, who, where, agents, quiet_cpu, now, home=None):
 def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, home=None):
     """One line per process (AC-01): tool, project, owner, how long, what it holds, how busy."""
     hot = hot or {}
-    rows = []
+    rows, up = [], None   # up: how long each booted device has been up, from its launchd_sim
     for pid in pids:
         row = table.get(pid)
         if row is None:
@@ -421,6 +421,12 @@ def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, hom
             who = sim_owner(table, udid, managed)
             name = 'iOS 模拟器 · ' + device_name(udid, home)
             place = project(where.get(who.get('user'), (None, False))[0], home)
+            # How long it has been up is the device's, not this process's: a helper it started a minute ago said
+            # 「没人连着 · 1 分钟」 for a simulator up for 16 hours (11-04).
+            if up is None:
+                up = {found.group(1): r['age'] for r in table.values() if r['command'].startswith('launchd_sim ')
+                      for found in [DEVICE.search(r['command'])] if found}
+            row = dict(row, age=up.get(udid, row['age']))
         else:
             who = owner(table, pid, managed)
             name = tool(row['command'])

@@ -284,6 +284,10 @@ class SimulatorTest(unittest.TestCase):
         lines = [(g['title'], round(g['bytes'] / 2 ** 30, 1)) for g in O.group(rows)]
         self.assertEqual(lines, [('Claude Code ×25', 6.1), ('VTDecoderXPCService', 1.5), ('iOS 模拟器 · iPhone 17 Pro', 1.3)])
         self.assertEqual(O.tool(table[301]['command']), 'iOS 模拟器画面')
+        # A helper the device started a minute ago does not make it 「1 分钟」: the device has been up for 5 hours.
+        fresh = {**SIMS, 92: row(92, RUNTIME + '/usr/libexec/assetsd', ppid=90, hours=0.02, mb=900)}
+        [sim] = [g for g in O.group(O.describe(fresh, [92, 91], {}, {}, set(), NOW, home=self.home)) if 'iPad' in g['title']]
+        self.assertEqual(O.line(sim, NOW), 'iOS 模拟器 · iPad Air · 没人连着 · 5 小时')
 
     def test_the_agent_cannot_ask_to_stop_what_runs_inside_a_simulator(self):
         import emergency as E
