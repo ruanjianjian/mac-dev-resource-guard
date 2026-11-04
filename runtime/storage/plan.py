@@ -136,18 +136,22 @@ def cache_still_local(home, path):
 
 
 def held_back(home):
-    """{path: why} for the tasks the last tier run kept because programs hold them. On 11-04 the plan promised
-    25 GB in 「会自动做的」 for days while a 4-day-old test server and two leftover helpers held two idle tasks."""
+    """{path: why} for the tasks the last tier run kept, in words. On 11-04 the plan promised 25 GB in 「会自动做的」
+    for days while leftover processes held two idle tasks and, once they were gone, unsaved work kept them."""
     try:
         record = json.loads((auto_tier.state_root(home) / auto_tier.RECEIPT).read_text())
     except (OSError, ValueError):
         return {}
     found = {}
     for kept in record.get('kept', []):
-        pids = list(dict.fromkeys(re.findall(r'PID (\d+)', kept.get('reason', ''))))
-        if pids and kept.get('path'):
+        reason, pids = kept.get('reason', ''), list(dict.fromkeys(re.findall(r'PID (\d+)', kept.get('reason', ''))))
+        if not kept.get('path') or not reason:
+            continue
+        if pids:
             found[kept['path']] = '被 {} 个程序占着（PID {}{}），后台挪不了。是残留的就关掉，下一轮就会挪；拿不准交给 agent 看'.format(
                 len(pids), '、'.join(pids[:3]), ' 等' if len(pids) > 3 else '')
+        else:
+            found[kept['path']] = reason + '。后台不挪；要挪先保存、推送，或交给 agent 看'
     return found
 
 

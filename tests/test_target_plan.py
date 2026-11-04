@@ -91,19 +91,22 @@ class PlanTest(TierFixture):
     def test_an_idle_task_programs_hold_is_not_promised_as_automatic(self):
         """11-04: 25 GB stood in 「会自动做的」 for days while leftover processes held two idle tasks, and the tiers
         skipped them every round without the plan saying so."""
-        held, free = str(self.root / '20261031-held'), str(self.root / '20261001-idle')
+        held, dirty, free = (str(self.root / n) for n in ('20261031-held', '20261026-dirty', '20261001-idle'))
         report = self.report([dict(path=held, linked=False, bytes=13 * GIB, idle=True),
+                              dict(path=dirty, linked=False, bytes=12 * GIB, idle=True),
                               dict(path=free, linked=False, bytes=2 * GIB, idle=True)])
         auto_tier.state_root(self.home).mkdir(parents=True, exist_ok=True)
         (auto_tier.state_root(self.home) / auto_tier.RECEIPT).write_text(json.dumps(dict(kept=[
             dict(path=held, reason='open file/cwd held by PID 61119；task referenced by PID 61119；open file/cwd held by PID 40223'),
-            dict(path=free, reason='0.5 天内有改写（要求闲置 3 天）')])))
+            dict(path=dirty, reason='app：有未提交改动，只在这台电脑上，不挪')])))
         result = space_plan.build(self.home, self.cfg(), self.settings, report, dict(items=[]), 20 * GIB, True)
         sections = {s['id']: s for s in result['sections']}
         self.assertEqual([i['path'] for i in sections['auto']['items']], [free])
-        [blocked] = sections['judge']['items']
+        blocked, unsaved = sections['judge']['items']
         self.assertEqual((blocked['title'], blocked['bytes'], blocked['kind']), ('闲置的 20261031-held 没挪成', 13 * GIB, 'move-held'))
         self.assertIn('被 2 个程序占着（PID 61119、40223）', blocked['reason'])
+        self.assertEqual(unsaved['title'], '闲置的 20261026-dirty 没挪成')   # once the programs are gone, unsaved work keeps it
+        self.assertEqual(unsaved['reason'], 'app：有未提交改动，只在这台电脑上，不挪。后台不挪；要挪先保存、推送，或交给 agent 看')
 
     def test_migrated_cache_is_not_added_to_free_space_again(self):
         cache = self.home / '.npm'; cache.mkdir()
