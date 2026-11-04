@@ -24,6 +24,7 @@
 | AC-04 | [核] | 低于目标 | 打开计划页 | 分三段写，每段写能腾出多少、列出主要的几项：会自动做的、等你点头的、需要判断的（同一任务里一周以上没用过的 Xcode 构建副本，一周内用过的和最新的一份不列；容器镜像等）；最后一句写「全做完能到 N GB」 | mac原生、CLI后端 | ✅ | ui: one-click-evidence/cover/7-plan.png；auto: test_three_sections_and_how_far_they_reach；实测本机：等你点头 7.3 GB（没在用的 iOS 27.1 运行时）、需要判断 45 GB（3 个任务里多余的 Xcode 构建副本），全做完能到 94 GB；auto: test_copies_used_within_a_week_are_never_offered、test_xcode_record_of_last_use_wins_over_folder_times；实测本机 9 份副本都在一周内用过，需要判断为空 |
 | AC-05 | [边] | 三段全做完也到不了目标 | 打开计划页 | 写明还差多少，列出最大的几项和具体建议（收尾不用的任务、换更大的外接盘等），不改闲置天数、不扩大自动档 | mac原生、CLI后端 | ✅ | auto: test_shortfall_is_said_with_suggestions_not_wider_rules |
 | AC-06 | [核] | 有计划 | 本地 agent 读计划 | 有一条只读命令输出同一份计划（JSON），内容和计划页一致 | CLI后端 | ✅ | auto: BackendPlanTest；命令 resource-guard-service plan --json 与计划页同源（service.current_plan） |
+| AC-07 | [边] | 一个闲置任务够格挪到外接盘，但后台上一轮因为有程序占着它没挪 | 打开计划页，或 agent 读计划 | 它不在「会自动做的」里，在「需要判断的」里：「闲置的 X 没挪成 · 被 N 个程序占着（PID …），后台挪不了。是残留的就关掉，下一轮就会挪；拿不准交给 agent 看」 | mac原生、CLI后端 | ✅ | auto: PlanTest.test_an_idle_task_programs_hold_is_not_promised_as_automatic。红：去掉这条判断，失败 |
 
 ## 变更记录
 
@@ -38,3 +39,4 @@
 | CH-03 | 2026-10-29 | 建议目标的写法跟上 1.7.4 的实际做法：约磁盘的 20%（取整到 10 GB，至少 20 GB），新装默认就用它（RAW-41；见 one-line-install CH-03）（AC-01） | [文档对齐] |
 | CH-04 | 2026-10-30 | 低于危险线没提醒（RAW-79）：原来只有「等你确认」里有项时才提醒，这天它是空的，内置盘跌到 15 GB 一条都没发；现在跌破就马上发「磁盘快满了」，点了交给 agent，每跌破一次只发一次（AC-02） | [缺陷] |
 | CH-05 | 2026-10-31 | 出计划时复核缓存是否仍在本机，避免旧体检把已迁移缓存和实时可用空间重复相加（AC-04～06） | [缺陷] |
+| CH-06 | 2026-11-04 | 加 AC-07（资源管理 agent RAW-52～53）：11-04 计划里「会自动做的」写着挪走两个闲置任务（25 GB），实际一个 4 天前测试留下的假服务和两个 Codex 派活留下的后台占着它们，后台每轮都跳过，计划页一直没说 | [缺陷] |

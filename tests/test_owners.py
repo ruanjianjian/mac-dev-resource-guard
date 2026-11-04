@@ -266,6 +266,25 @@ class SimulatorTest(unittest.TestCase):
                 98: row(98, '/Users/dev/.local/bin/baguette stream --udid ' + OTHER, ppid=97, hours=3)}   # nohup'd, its agent gone
         self.assertEqual(O.fact(O.sim_owner(left, OTHER), SIMS[91], {}, NOW), '只有没人管的 baguette 连着 · 3 小时')
 
+    def test_the_biggest_owners_count_every_process_they_have(self):
+        """know-who AC-07, 11-04: ranked one process at a time, 25 Claude Code sessions of 250 MB showed as 「×3」 and
+        each simulator as its app alone, while one 1.5 GB decoder looked like the worst."""
+        app = '/Applications/Claude.app/Contents/MacOS/Claude'
+        sessions = {200 + i: row(200 + i, '/Users/dev/Library/Application Support/Claude/claude-code/2.1.309/x/claude.app/Contents/MacOS/claude',
+                                 ppid=199, mb=250) for i in range(25)}
+        table = {**SIMS, 199: row(199, app, mb=400), **sessions,
+                 300: row(300, '/System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc'
+                               '/Contents/MacOS/VTDecoderXPCService', mb=1500),
+                 301: row(301, '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/SimRenderingServices'
+                               '.simdeviceio/Contents/XPCServices/SimMetalHost.xpc/Contents/MacOS/SimMetalHost', mb=500)}
+        sizes = {82: 900 * 2 ** 20}   # swapped out: ps sees 700 MB of it
+        big = O.biggest(table, list(table), sizes=sizes, limit=3)
+        self.assertEqual(big, [sorted(sessions), [300], [82, 81, 80]])   # 25 × 250 MB first; every process of the device
+        rows = O.describe(table, [p for members in big for p in members], {}, {}, set(), NOW, sizes=sizes, home=self.home)
+        lines = [(g['title'], round(g['bytes'] / 2 ** 30, 1)) for g in O.group(rows)]
+        self.assertEqual(lines, [('Claude Code ×25', 6.1), ('VTDecoderXPCService', 1.5), ('iOS 模拟器 · iPhone 17 Pro', 1.3)])
+        self.assertEqual(O.tool(table[301]['command']), 'iOS 模拟器画面')
+
     def test_the_agent_cannot_ask_to_stop_what_runs_inside_a_simulator(self):
         import emergency as E
         for pid in (81, 82):

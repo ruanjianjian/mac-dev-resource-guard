@@ -134,6 +134,8 @@ def kind_of(command):
 
 def tool(command):
     """What people would call it: the App, the tool (tsc, vite…), or the interpreter with what it runs."""
+    if 'SimMetalHost' in command:
+        return 'iOS 模拟器画面'   # one per booted simulator, run by CoreSimulator, not under the device
     if 'CoreSimulator' in command or 'SimulatorRuntime' in command or 'launchd_sim' in command:
         return 'iOS 模拟器'
     agent = agent_name(command)
@@ -430,6 +432,28 @@ def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, hom
     return rows
 
 
+LOOK_PER_GROUP = 8   # lsof for this many of a group's processes: enough to name its projects
+
+
+def biggest(table, pids, managed=(), sizes=None, limit=TOP):
+    """The `limit` biggest groups, each with all its processes, biggest first (know-who AC-07). Ranked process by
+    process, 25 Claude Code sessions of 250 MB each and a simulator's dozen processes never made the top 12, and the
+    agent chased an 8 GB decoder instead (11-04). Grouped as group() does: the tool and its owner, or the device."""
+    held = lambda p: max(table[p]['rss'], (sizes or {}).get(p, 0))
+    found = {}
+    for pid in pids:
+        udid = device(table, pid)
+        if udid:
+            key = ('sim', udid)
+        else:
+            who = owner(table, pid, managed)
+            key = (tool(table[pid]['command']), who['kind'], who.get('name'))
+        entry = found.setdefault(key, [0, []])
+        entry[0] += held(pid)
+        entry[1].append(pid)
+    return [sorted(members, key=held, reverse=True) for _, members in sorted(found.values(), key=lambda g: -g[0])[:limit]]
+
+
 def group(rows):
     """Same tool, same owner: one line with how many and in which projects. An App's processes are the App."""
     groups = {}
@@ -488,7 +512,7 @@ def line(entry, now):
     return ' · '.join(p for p in parts if p)
 
 
-def footprints(run=subprocess.run, limit=80):
+def footprints(run=subprocess.run, limit=1000):
     """What each process really holds, swapped and compressed memory included ({pid: bytes}), as `top` counts it.
     `ps` only sees what is still in RAM: on 10-31 five 3 GB type checks each showed under 300 MB there."""
     try:

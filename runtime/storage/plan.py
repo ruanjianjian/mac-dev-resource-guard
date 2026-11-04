@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import time
 
@@ -134,6 +135,22 @@ def cache_still_local(home, path):
         return False
 
 
+def held_back(home):
+    """{path: why} for the tasks the last tier run kept because programs hold them. On 11-04 the plan promised
+    25 GB in 「会自动做的」 for days while a 4-day-old test server and two leftover helpers held two idle tasks."""
+    try:
+        record = json.loads((auto_tier.state_root(home) / auto_tier.RECEIPT).read_text())
+    except (OSError, ValueError):
+        return {}
+    found = {}
+    for kept in record.get('kept', []):
+        pids = list(dict.fromkeys(re.findall(r'PID (\d+)', kept.get('reason', ''))))
+        if pids and kept.get('path'):
+            found[kept['path']] = '被 {} 个程序占着（PID {}{}），后台挪不了。是残留的就关掉，下一轮就会挪；拿不准交给 agent 看'.format(
+                len(pids), '、'.join(pids[:3]), ' 等' if len(pids) > 3 else '')
+    return found
+
+
 def build(home, cfg, settings, report, pending, free_bytes, external_ready, sizer=T.size, now=None):
     """The plan from what the last checkup measured; cheap enough to run every tick."""
     now = time.time() if now is None else now
@@ -164,8 +181,11 @@ def build(home, cfg, settings, report, pending, free_bytes, external_ready, size
             ask.append(dict(item(entry['title'], entry.get('bytes'), entry['reason'], entry['id'], entry['kind']),
                             quiet=bool(entry.get('quiet'))))
     if external_ready and agent_plan.action(rules, 'idle-tasks') == 'move':
+        held = held_back(home)
         for t in whole:
-            if t.get('idle') and t.get('bytes'):
+            if t.get('idle') and t.get('bytes') and t['path'] in held:
+                judge.append(item('闲置的 {} 没挪成'.format(Path(t['path']).name), t['bytes'], held[t['path']], t['path'], 'move-held'))
+            elif t.get('idle') and t.get('bytes'):
                 auto.append(item('把闲置的 {} 挪到外接盘'.format(Path(t['path']).name), t['bytes'],
                                  '闲置满 {} 天；空间不够时整个挪过去，原路径留链接'.format(cfg['auto_idle_days']), t['path'], 'move'))
     busy = sorted((t for t in whole if not t.get('idle') and t.get('bytes')), key=lambda t: -t['bytes'])

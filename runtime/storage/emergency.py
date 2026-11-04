@@ -31,6 +31,9 @@ import plan as space_plan
 import tasks as T
 
 STATE, RUNS, MATERIAL, DECISIONS, RESULT = 'emergency.json', 'emergency', 'material.json', 'decisions.jsonl', 'result.json'
+HANDED = 'emergency-moves.json'   # moves a run could not make for want of the drive's permission (agent-investigates AC-09)
+HANDED_HOURS = 24
+HANDED_WORDS = '交给资源看板自己的那一轮去挪（它有外接盘的权限，5 分钟内）'
 SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
 CONVERSATION = 'conversation.json'   # the one conversation every run of an agent continues (CH-07)
 TITLE = '资源看板 · 资源管理'
@@ -41,7 +44,6 @@ MEMORY_QUIET_HOURS = 6        # nothing new since the agent last looked: it come
 SOONER_MINUTES = 30           # still tight and something new: it comes again this soon (agent-investigates AC-07)
 HEAVY_GIB = 1.0               # a group this big, or one burning a core, is worth a new look when it appears
 SWAP_MORE_GIB = 3.0
-DAY_LIMIT = 12                # runs in any 24 hours: a ceiling against a loop; what changed decides the rest (AC-07)
 RUN_MINUTES = 30              # a run that takes longer is stopped (AC-10)
 GIT_SECONDS = 15              # one git call while gathering the material; slower reads as unknown
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
@@ -187,18 +189,12 @@ def due(state, free, critical, pressure, now, current=None):
             reason = 'memory'
         elif now - looked.get('at', 0) >= SOONER_MINUTES * 60 and (news(looked, current) or not looked and current and current['heavy']):
             reason = 'memory'   # nothing kept from its last look (an update): what is there now is all new to it
-    if reason is None or running(state, now):
-        return None
-    starts = [t for t in state.get('starts', []) if now - t < 86400]
-    state['starts'] = starts
-    if len(starts) >= DAY_LIMIT:
-        state['capped'] = dict(at=now, reason=reason)   # the user hears it once (AC-07)
-        return None
-    return reason
+    # No count a day (RAW-53): one run at a time, and what changed decides when the next one comes.
+    return None if reason is None or running(state, now) else reason
 
 
 def undo_fired(state):
-    """A run that broke or never got going did nothing: it costs neither the quiet hours nor a start of the day
+    """A run that broke or never got going did nothing: it does not cost the quiet hours
     (proactive-watch AC-05; on 10-31 a run that died at once kept the agent away for six hours)."""
     run = state.get('run') or {}
     for key, value in (run.get('prev') or {}).items():
@@ -206,18 +202,14 @@ def undo_fired(state):
             state.pop(key, None)
         else:
             state[key] = value
-    if run.get('prev') is not None:
-        state['starts'] = [t for t in state.get('starts', []) if t != run.get('started')]
 
 
 def mark_fired(state, reason, free, critical, now):
-    """Only runs the background started count toward the daily limit; a run the user asked for does not."""
+    """A run the user asked for leaves the disk steps and the quiet hours as they were."""
     if reason == 'disk':
         state['disk_fired'] = disk_level(free, critical)
     elif reason == 'memory':
         state['memory_fired_at'] = now
-    if reason in ('disk', 'memory'):
-        state['starts'] = state.get('starts', []) + [now]
 
 
 def why_words(reason, free, critical, pressure):
@@ -788,14 +780,14 @@ def who_now(seen, table, managed, now, run=subprocess.run):
            and row['age'] >= O.BUSY_MINUTES * 60 and row['cpu'] / row['age'] >= O.BUSY_SHARE}
     hot.update({int(p): v[1] for p, v in seen.get('busy', {}).items() if int(p) in table and now - v[1] >= O.BUSY_MINUTES * 60})
     sizes = O.footprints(run)   # swapped and compressed memory too: on a tight Mac most of it is there
-    top = sorted((p for p in table if 'kernel_task' not in table[p]['command']),
-                 key=lambda p: -max(table[p]['rss'], sizes.get(p, 0)))[:O.TOP]
+    big = O.biggest(table, [p for p in table if 'kernel_task' not in table[p]['command']], managed, sizes)
+    top = [p for members in big for p in members]
     mates = [p for p, row in table.items() if O.companion(row['command']) and p not in managed
              and not any(word in row['command'] for word in NEVER)]
     wrappers = {table[p]['ppid'] for p in mates}
     mates = [p for p in mates if p not in wrappers]   # `zsh -c '… stream …'` around the stream: list the stream
-    where = O.looks(set(top) | set(hot) | set(mates) | {int(p) for p in agents if int(p) in table}
-                    | O.users(table, top + list(hot)), run)
+    where = O.looks({p for members in big for p in members[:O.LOOK_PER_GROUP]} | set(hot) | set(mates)
+                    | {int(p) for p in agents if int(p) in table} | O.users(table, top + list(hot)), run)
     groups = O.group(O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot))
     helpers = []
     for pid in mates:
@@ -859,13 +851,15 @@ def receipt(made, carried, result):
     """agent-investigates AC-04: what came back, what was written down, what was done and what was skipped."""
     handed = [e for e in made if e['action'] in ('stop', 'move', 'ask')]
     ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘')]
-    skipped = [d for d in result['done'] if d not in ok]
+    later = [d for d in result['done'] if d['result'] == HANDED_WORDS]
+    skipped = [d for d in result['done'] if d not in ok and d not in later]
     parts = []
     if carried['received']:
         parts.append('从回复里收到 {} 条，记上 {} 条'.format(carried['received'], len(carried['recorded']))
                      + ('（没记上：{}）'.format('；'.join(r['why'] for r in carried['refused'][:3])) if carried['refused'] else ''))
     if handed:
         parts.append('交回 {} 条决定，照做 {} 条'.format(len(handed), len(ok))
+                     + ('，{} 条交给资源看板自己去挪'.format(len(later)) if later else '')
                      + ('，跳过 {} 条（{}）'.format(len(skipped), '；'.join(sorted({d['result'] for d in skipped}))[:120]) if skipped else '')
                      + ('，{} 条列进「等你确认」'.format(len(result['asks'])) if result['asks'] else ''))
     learned = result.get('learned', [])
@@ -982,7 +976,12 @@ def asked_process(found, key, table=None):
     itself, a database, a container, a debugger or a simulator itself."""
     if not key.isdigit():
         raise ValueError('process-stop 后面接进程号：process-stop:<pid>')
-    table = process_table() if table is None else table
+    try:
+        table = process_table() if table is None else table
+    except (OSError, subprocess.SubprocessError):
+        table = {}
+    if not table:   # the agent's sandbox may not run ps (11-04, Codex): what the material saw, checked again later
+        return seen_process(found, int(key))
     row = table.get(int(key))
     if row is None:
         raise ValueError('进程 {} 已经不在了'.format(key))
@@ -993,6 +992,41 @@ def asked_process(found, key, table=None):
     agents = watch_state(Path.home()).get('agents', {})
     title = '{}（{}{}）'.format(O.tool(row['command']), O.fact(who, row, agents, time.time()), '，' + place['name'] if place else '')
     return dict(title=title, bytes=row['rss'], pid=int(key), lstart=row['lstart'])
+
+
+def seen_process(found, pid):
+    """A process the material listed, for an agent that cannot read the process list itself. settle_asks() checks
+    it in the background, where ps runs, before it reaches 「等你确认」."""
+    group = next((g for g in found.get('who', []) if pid in g.get('pids', [])), None)
+    mate = next((c for c in found.get('companions', []) if c['pid'] == pid), None)
+    if group is None and mate is None:
+        raise ValueError('进程 {} 不在告急材料的 who 和 companions 里（这里查不了进程表）'.format(pid))
+    if group is not None and ((group.get('owner') or {}).get('self') or group['line'].startswith('iOS 模拟器')):
+        raise ValueError('{} 是 App 本身或模拟器，不能列'.format(group['line'].split(' · ')[0]))
+    return dict(title=(mate or group)['line'], bytes=0, pid=pid, lstart=mate and mate['lstart'], seen_at=found.get('at', 0))
+
+
+def settle_asks(home, entries, table=None):
+    """Process asks written where ps could not run: still there, started before the agent looked, and not an App,
+    a database or a simulator. Only those reach 「等你确认」; the rest are dropped."""
+    loose = [e for e in entries if e.get('kind') == 'process-stop' and not e.get('lstart')]
+    if not loose:
+        return entries
+    try:
+        table = process_table() if table is None else table
+    except (OSError, subprocess.SubprocessError):
+        table = {}
+    now, kept = time.time(), [e for e in entries if e not in loose]
+    for entry in loose:
+        row = table.get(entry['pid'])
+        if row is None or now - row['age'] > entry.get('seen_at', 0) + 60:   # gone, or a new process on that number
+            continue
+        try:
+            settled = asked_process({}, str(entry['pid']), table)
+        except ValueError:
+            continue
+        kept.append(dict(entry, title=settled['title'], bytes=settled['bytes'], lstart=settled['lstart']))
+    return kept
 
 
 def carry(folder, said):
@@ -1133,6 +1167,51 @@ def move_task(home, cfg, settings, path, activity, pins):
     return None
 
 
+def hand_over(home, entry, now):
+    path = state_root(home) / HANDED
+    queue = [q for q in read_list(path) if q.get('path') != entry['path']]
+    atomic_json(path, queue + [dict(path=entry['path'], why=entry.get('why', ''), at=now)])
+
+
+def read_list(path):
+    try:
+        found = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return []
+    return found if isinstance(found, list) else []
+
+
+def handed_moves(home, cfg, settings, now=None, activity_factory=None):
+    """The App's wake (every 5 minutes) makes the moves a run handed over, each rechecked like the run would have.
+    Still refused here too: kept for the next wake, a day at most. Returns what was done, or None."""
+    now = time.time() if now is None else now
+    path = state_root(home) / HANDED
+    queue = read_list(path)
+    if not queue:
+        return None
+    activity_factory = activity_factory or (lambda: Activity.collect(settings.lease_root))
+    pins, _ = StorageManager(settings)._pins(now)
+    keep, done = [], []
+    for entry in queue:
+        if now - entry.get('at', 0) > HANDED_HOURS * 3600:
+            continue
+        activity = activity_factory()
+        result = '这会儿查不清哪些程序在用它' if activity.errors else move_task(home, cfg, settings, entry['path'], activity, pins)
+        if result == auto_tier.DENIED:
+            keep.append(entry)
+        else:
+            done.append(dict(entry, result=result or '已挪到外接盘'))
+    atomic_json(path, keep)
+    moved = [d for d in done if d['result'] == '已挪到外接盘']
+    left = [d for d in done if d not in moved]
+    if done:
+        words = ['、'.join(Path(d['path']).name for d in moved) + ' 已挪到外接盘'] if moved else []
+        words += ['{} 没挪：{}'.format(Path(d['path']).name, d['result']) for d in left[:2]]
+        agent_plan.notice(home, 'agent 定的 {} 个闲置任务挪到了外接盘'.format(len(moved)) if moved else 'agent 定的挪动没做成',
+                          '；'.join(words)[:300], tab='cover')
+    return done
+
+
 def add_asks(home, entries, now):
     """The agent's asks join 「等你确认」, marked as its own, with its reasons (AC-07)."""
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
@@ -1168,8 +1247,13 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
     for entry in (e for e in made if e['action'] == 'move'):
         activity = activity_factory()
         skipped = '这会儿查不清哪些程序在用它' if activity.errors else move_task(home, cfg, settings, entry['path'], activity, pins)
+        if skipped == auto_tier.DENIED:
+            # This run was started by the per-minute memory job, which macOS keeps off the drive; the App's own
+            # wake can reach it (11-04: a move the agent chose was dropped here and never tried again).
+            hand_over(home, entry, now)
+            skipped = HANDED_WORDS
         done.append(dict(entry, result=skipped or '已挪到外接盘'))
-    asks = add_asks(home, [e for e in made if e['action'] == 'ask'], now)
+    asks = add_asks(home, settle_asks(home, [e for e in made if e['action'] == 'ask'], table), now)
     learned = []
     for entry in (e for e in made if e['action'] == 'lesson' and e.get('when')):
         try:
@@ -1191,6 +1275,9 @@ def notice_words(result, agent_result):
         parts.append('关掉了 {} 个没人管的残留后台'.format(len(stopped)))
     if moved:
         parts.append('把 {} 个闲置任务挪到了外接盘'.format(len(moved)))
+    later = [d for d in result['done'] if d['action'] == 'move' and d['result'] == HANDED_WORDS]
+    if later:
+        parts.append('{} 个闲置任务交给资源看板自己挪到外接盘'.format(len(later)))
     if result['asks']:
         parts.append('还有 {} 项等你确认，约 {:.0f} GB'.format(len(result['asks']), sum(a['bytes'] for a in result['asks']) / GIB))
     if agent_result.get('status') == 'timeout':
@@ -1324,15 +1411,9 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     reason = due(state, free, critical, pressure, now, current)
     if asked:
         reason = None if running(state, now) else 'asked'
-    capped = state.pop('capped', None)
+    for stale in ('starts', 'capped', 'capped_told'):    # left by builds that counted runs a day
+        state.pop(stale, None)
     if reason is None:
-        if capped and now - state.get('capped_told', 0) >= 86400:
-            state['capped_told'] = now
-            last = state.get('last') or {}
-            agent_plan.notice(home, 'agent 今天已经来了 {} 次，还是紧'.format(DAY_LIMIT),
-                              '{}。{}'.format(last.get('need') or last.get('judged') or WHY.get(capped['reason']),
-                                             '点一下打开它的对话，让它接着看。' if last.get('talk') else '明天这个时候它才会自己再来。'),
-                              tab='emergency' if last.get('talk') else 'cover')
         save_state(home, state)
         return None
     prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired', 'looked')}

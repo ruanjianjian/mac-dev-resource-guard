@@ -2,7 +2,7 @@
 
 ## 原始输入
 
-原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-40～43，本轮新增 RAW-46～48。
+原话全量在 epic 的 [raw-input.md](../raw-input.md)；本 feature 依据 RAW-40～43，RAW-46～48；本轮新增 RAW-51～53。
 
 ## 意图
 
@@ -44,8 +44,10 @@
 | AC-04 | [核] | agent 处理完一次告急 | 下一次叫 agent；或用户看封面上 agent 那一行 | 有回执：<br>• agent 交回几条决定，后台记上几条，没记上的为什么；<br>• 后台照做几条，跳过几条、为什么。<br>下一次叫 agent 时，第一段就是上次的回执。封面那一行的说明里也写着 | CLI后端、mac原生 | ✅ | auto: InvestigateTest.test_a_run_that_did_not_help_says_so_and_the_next_one_hears_it。实测：这次的回执「交回 3 条决定，照做 3 条」（3 个已合入任务挪到外接盘，内置盘 35.5 → 41 GB）；出图核对封面那一行「Codex 17:53 处理过告急 · 还紧」 |
 | AC-05 | [核] | agent 上一次处理完，同一个原因还没解除 | 又叫 agent | 提示里写「这是连续第 N 次，上次处理完还紧」，要它先说上次漏了什么。连续 2 次没解除，资源看板发一条通知给用户：agent 处理了几次还紧、它说要用户做什么 | CLI后端 | ✅ | auto: 同上（第二次的提示开头是上次的回执和「这是连续第 2 次」，通知标题「agent 处理了 2 次还没缓过来」）。实测：这次记下了「还紧」，下一次因内存叫 agent 时就是第 2 次 |
 | AC-06 | [核] | agent 收尾 | 后台记下这次的结果 | 结果里另记一条后台自己的判断，看最近 10 分钟，和「主动盯着」判断「这次紧完了」用同一个标准：比如「后台看：最近 10 分钟有 7 分钟『警告』，还紧」。封面、通知、下一次的回执都用后台的判断，不用 agent 说的「恢复了」 | CLI后端 | ✅ | auto: InvestigateTest.test_the_background_judges_by_the_last_ten_minutes_not_by_one。实测：这次结果里「后台看：最近 10 分钟有 10 分钟『警告』或『严重』，还紧」；agent 自己也写着「告急未解除」 |
-| AC-07 | [核] | agent 处理完，后台看还紧 | 之后后台每一轮（每 5 分钟）看一次 | 跟 agent 上次看的时候比，有新情况就再叫它，不等 6 小时。新情况指：<br>• 新出现一个占 1 GB 以上、或长时间占满一个核的（同一个工具、同一个主人、同几个项目算同一个）；<br>• 内存压力变成「严重」；<br>• swap 比上次多了 3 GB 以上。<br>两次之间至少隔 30 分钟；没有新情况就照旧等 6 小时，免得它把同样的话再说一遍。叫它时提示开头写「跟上次（几点）比，这次新出现的：…」。24 小时里后台自己叫的最多 12 次（用户自己叫的不算）；到了上限还紧，通知用户一次 | CLI后端 | ✅ | auto: TriggerTest.test_still_tight_and_something_new_brings_the_agent_back_within_the_quiet_hours、InvestigateTest.test_something_new_brings_it_back_sooner_and_it_is_told_what、TriggerTest.test_no_second_run_while_one_is_going_and_a_ceiling_a_day。红：去掉「有新情况就再叫」，前两条失败。实测（11-03 22:53:57，本机）：装上后 4 分钟，后台因为内置盘跌破危险线（19 GB）自己叫了 agent——这是今天第 5 次，按原来每天 4 次的上限会被拦下。「有新情况 30 分钟后再叫」本机还没等到一次，只有单元测试 |
+| AC-07 | [核] | agent 处理完，后台看还紧 | 之后后台每一轮（每 5 分钟）看一次 | 跟 agent 上次看的时候比，有新情况就再叫它，不等 6 小时。新情况指：<br>• 新出现一个占 1 GB 以上、或长时间占满一个核的（同一个工具、同一个主人、同几个项目算同一个）；<br>• 内存压力变成「严重」；<br>• swap 比上次多了 3 GB 以上。<br>两次之间至少隔 30 分钟；没有新情况就照旧等 6 小时，免得它把同样的话再说一遍。叫它时提示开头写「跟上次（几点）比，这次新出现的：…」。一天叫几次不设上限（RAW-53） | CLI后端 | ✅ | auto: TriggerTest.test_still_tight_and_something_new_brings_the_agent_back_within_the_quiet_hours、InvestigateTest.test_something_new_brings_it_back_sooner_and_it_is_told_what、TriggerTest.test_no_second_run_while_one_is_going_and_no_count_a_day。红：去掉「有新情况就再叫」，前两条失败。实测（11-03 22:53:57，本机）：装上后 4 分钟，后台因为内置盘跌破危险线（19 GB）自己叫了 agent——这是今天第 5 次，按原来每天 4 次的上限会被拦下。「有新情况 30 分钟后再叫」本机还没等到一次，只有单元测试 |
 | AC-08 | [核] | agent 学到了以后用得上的经验 | 它记下来；下一次叫它 | 经验写成规则：「遇到什么情况 → 该怎么做、为什么」。只属于这一次的（写着「本轮」「这次」或几点几分）不收，要它写进收尾的总结。同一种情况再记一次，是改写那一条，不是再加一条。下一次的材料里分开给：用户的决定（decisions）、学到的规则（lessons）、以前的笔记（old_notes，它可以改写成规则，改写后旧笔记不再给）。回执写「记下 N 条经验」 | CLI后端 | ✅ | auto: InvestigateTest.test_lessons_are_rules_kept_once_and_old_notes_can_be_rewritten、RunnerTest.test_a_decision_the_sandbox_would_not_take_comes_back_in_the_reply。红：去掉「只属于这一次的不收」或「同一种情况改写那一条」，都失败。实测（11-03 22:53，本机）：agent 拿到 17 条旧笔记，记下一条规则 m25「空间计划把任务列为闲置可迁移，但最新材料显示有进程占用或没保存的改动 → 以最新证据为准，不直接挪」，改写了旧笔记 m21；回执「记下 1 条经验（1 条是改写旧的）」 |
+| AC-09 | [核] | agent 决定把一个闲置任务挪到外接盘，而跑这一次的后台进程没有外接盘的权限（macOS 只允许资源看板 App 自己的那一轮碰外接盘） | 后台照做 agent 的决定 | 不丢掉这条决定：交给资源看板 App 自己的那一轮（5 分钟内）照样复核后再挪，挪成了发通知「agent 定的 N 个闲置任务挪到了外接盘」；那一轮也没有权限就留着下次再试，一天还没挪成就放弃。回执写「N 条交给资源看板自己去挪」，不算「跳过」 | CLI后端 | ✅ | auto: ApplyTest.test_a_move_this_run_may_not_make_waits_for_the_wake_that_may。红：去掉「交给 App 那一轮」，失败 |
+| AC-10 | [核] | agent 在不能查进程的环境里（比如 Codex 的沙箱）想把一个进程列进「等你确认」 | `emergency ask process-stop:<pid>` | 照材料里看到的记下（材料的 who 或 companions 里要有它；App 本身、模拟器照旧不能列）。后台在能查进程的地方再核一遍才放进「等你确认」：进程还在、是 agent 看材料之前就开着的那一个、不是 App 本身、数据库、容器、调试器或模拟器；不符合的不列 | CLI后端 | ✅ | auto: SandboxedAskTest.test_a_process_the_material_saw_is_listed_and_settled_where_ps_runs。红：去掉「照材料记下」或「之后才开的不算」，失败 |
 
 ## 变更记录
 
@@ -54,3 +56,4 @@
 | CH-01 | 2026-11-03 | 新建（RAW-40～43）。[告急时 agent 自己来](emergency-agent.md) 的材料和步骤按本 spec 改 | [需求变更] |
 | CH-02 | 2026-11-03 | 本机实测时改了几处（[实现引入]）：<br>• 后台判断内置盘时，比的是用户的目标（`rgs target`），不是整理停止线；<br>• 材料里「谁占着内存」也算上被换出、被压缩的部分；<br>• `zsh -c` 包着的截屏流只列里面那个程序 | [实现引入] |
 | CH-03 | 2026-11-03 | 加 AC-07、AC-08（RAW-46～48），推翻非目标「冷却期和每天的次数不变」：情况变了就再叫 agent，每天上限从 4 次改成 12 次；经验写成规则、同一种情况只留一条。升级后第一次没有「上次看到的」，当作都是新的（[实现引入]）。用户要它马上处理：22:37 手动叫了一次（还是没找到能安全做的） | [需求变更] |
+| CH-04 | 2026-11-04 | RAW-51～53：11-04 内存和硬盘都紧，agent 一直没帮上忙。去掉每天的次数上限（AC-07）；加 AC-09：00:59 那次 agent 交回「挪到外接盘」，跑它的是每分钟的内存任务，没有外接盘权限，挪动被丢掉，之后再没人挪；加 AC-10：agent 两次想把开了 28 小时的截屏流列给用户，都因为 Codex 沙箱不让查进程没列上。材料里「谁在占」改成按主人把所有进程加起来（[看清是谁](know-who.md) AC-07） | [需求变更] |

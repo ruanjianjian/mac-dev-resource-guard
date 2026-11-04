@@ -210,11 +210,11 @@ def who(state, table, now, managed, run=subprocess.run, sizes=None, own=()):
     """know-who AC-01: the biggest processes and the ones that have burned a core for half an hour, each with its
     tool, project and owner. Kept in the state for the memory page, the notice and the agent's material."""
     hot = O.busy(state, table, now)
-    held_by = lambda pid: held(table[pid], sizes)
-    top = sorted((p for p in table if p not in own and 'kernel_task' not in table[p]['command']), key=held_by, reverse=True)[:O.TOP]
+    big = O.biggest(table, [p for p in table if p not in own and 'kernel_task' not in table[p]['command']], managed, sizes)
+    top = [p for members in big for p in members]
     agents = O.track(state, table, now)
-    pids = set(top) | set(hot) | set(companions(table, own, managed)) | {int(p) for p in agents}
-    pids |= O.users(table, top + list(hot))   # who is connected to a simulator tells its project (know-who AC-06)
+    pids = {p for members in big for p in members[:O.LOOK_PER_GROUP]} | set(hot) | set(companions(table, own, managed))
+    pids |= {int(p) for p in agents} | O.users(table, top + list(hot))   # who is connected to a simulator tells its project (know-who AC-06)
     where = O.seen_where(state, table, [p for p in pids if p in table], run)
     rows = O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot)
     groups = O.group(rows)

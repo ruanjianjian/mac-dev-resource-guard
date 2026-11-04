@@ -163,6 +163,11 @@ class CompanionTest(WatchFixture):
         table[13] = dict(table[13], cpu=table[13]['cpu'] + 5)                                 # a turn
         self.tick(NOW + 60, readings, table)
         self.assertIn('node server.js ×2 · 2 个项目：shop、blog · Claude Code 起的 · 刚刚还在动', W.status(self.home, NOW + 60)['who'])
+        # know-who AC-07: twenty small helpers of one owner outweigh any single big process, and are all counted.
+        many = {200 + i: row(200 + i, 'node /code/shop/worker.js', ppid=13, gib=0.3) for i in range(20)}
+        self.tick(NOW + 120, readings, self.table(more={**many, 101: table[101], 102: table[102]}))
+        groups = W.load(self.home)['who']['groups']
+        self.assertEqual((groups[0]['title'], groups[0]['count']), ('node worker.js ×20', 20))
 
 
 class QueueTest(WatchFixture):
