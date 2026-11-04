@@ -38,6 +38,9 @@ def volume_ready(path):
     return True
 
 
+DENIED = '后台任务没有访问外接盘的权限：请在系统提示里允许「资源看板」访问可移除宗卷'
+
+
 def external_access(path):
     """None when this process may write there; otherwise why not (macOS keeps removable volumes private)."""
     probe = Path(path) / '.guard-access-{}'.format(os.getpid())
@@ -47,7 +50,7 @@ def external_access(path):
         probe.unlink()
         return None
     except PermissionError:
-        return '后台任务没有访问外接盘的权限：请在系统提示里允许「资源看板」访问可移除宗卷'
+        return DENIED
     except OSError as error:
         return '外接盘无法写入：' + str(error)
 

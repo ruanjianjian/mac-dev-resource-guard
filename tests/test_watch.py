@@ -163,6 +163,11 @@ class CompanionTest(WatchFixture):
         table[13] = dict(table[13], cpu=table[13]['cpu'] + 5)                                 # a turn
         self.tick(NOW + 60, readings, table)
         self.assertIn('node server.js ×2 · 2 个项目：shop、blog · Claude Code 起的 · 刚刚还在动', W.status(self.home, NOW + 60)['who'])
+        # know-who AC-07: twenty small helpers of one owner outweigh any single big process, and are all counted.
+        many = {200 + i: row(200 + i, 'node /code/shop/worker.js', ppid=13, gib=0.3) for i in range(20)}
+        self.tick(NOW + 120, readings, self.table(more={**many, 101: table[101], 102: table[102]}))
+        groups = W.load(self.home)['who']['groups']
+        self.assertEqual((groups[0]['title'], groups[0]['count']), ('node worker.js ×20', 20))
 
 
 class QueueTest(WatchFixture):
@@ -226,6 +231,11 @@ class QueueTest(WatchFixture):
         self.assertEqual(sorted(p['pid'] for p in result['paused']), [2, 3])     # ps shows 0.18 GB each; top 3 GB
         self.assertIn('tsc ×3 8.8 GB', self.notices[0][1])   # whose they are cannot be told here: nothing made up
         self.tick(NOW + 60, run, table)   # every tight minute, not only the one that sent the notice
+        [tsc] = [g for g in W.load(self.home)['who']['groups'] if g['tool'] == 'tsc']
+        self.assertGreater(tsc['bytes'], 8 * 2 ** 30)
+        # Pressure back to normal but 10 GB still in swap: ps would say 0.5 GB, so top still counts (know-who AC-07).
+        calm = Readings(pressure=1, swap_used=10.0, swap_total=40.0)   # a quarter of swap, steady: not a squeeze
+        self.tick(NOW + 3600, lambda args, **kwargs: run(args, **kwargs) if args[0] == '/usr/bin/top' else calm(args, **kwargs), table)
         [tsc] = [g for g in W.load(self.home)['who']['groups'] if g['tool'] == 'tsc']
         self.assertGreater(tsc['bytes'], 8 * 2 ** 30)
 

@@ -334,6 +334,7 @@ def tick_storage(home, now=None):
             if not (state_root(home)/'storage-paused').exists():
                 tick_caches(home, now)
                 tick_tiers(home, now)
+                receipt['handed_moves'] = emergency_moves(home, now)
     receipt['emergency'] = emergency_result
     receipt['update'] = auto_update(home, now)
     return receipt
@@ -349,6 +350,22 @@ def emergency_tick(home, now):
             return emergency.tick(home, cfg, settings, now)
     except Busy:
         return None
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        atomic_json(state_root(home)/'emergency-error.json', dict(at=now, error=str(error) or type(error).__name__))
+        return None
+
+
+def emergency_moves(home, now):
+    """Moves an agent's run handed over because it could not reach the drive (agent-investigates AC-09). This wake
+    is the App's, which macOS lets onto the drive. Never fails the wake."""
+    try:
+        settings = configure(home)
+        cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+        lock = state_root(home)/'dashboard'/'operation.lock'
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open('a') as busy:
+            fcntl.flock(busy, fcntl.LOCK_EX)   # an agent's run may be applying its own decisions
+            return emergency.handed_moves(home, cfg, settings, now)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         atomic_json(state_root(home)/'emergency-error.json', dict(at=now, error=str(error) or type(error).__name__))
         return None

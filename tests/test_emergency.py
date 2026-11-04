@@ -14,6 +14,7 @@ from test_ask_tier import AskFixture, FakeSimctl
 from test_tiers import DAY, git
 import agent_plan
 import ask_tier
+import auto_tier
 import emergency as E
 import owners as O
 from storage import GIB, Activity
@@ -29,7 +30,6 @@ class TriggerTest(unittest.TestCase):
             reason = E.due(state, free_gib * GIB, CRITICAL, 1, NOW)
             if reason:
                 E.mark_fired(state, reason, free_gib * GIB, CRITICAL, NOW)
-                state['starts'] = []   # the daily cap has its own test
             fired.append((free_gib, reason))
         self.assertEqual(fired, [(40, None), (23, 'disk'), (22, None), (9, 'disk'), (8, None), (4, 'disk'), (3, None),
                                  (30, None), (20, 'disk')])
@@ -45,16 +45,14 @@ class TriggerTest(unittest.TestCase):
         self.assertNotIn('warn_since', state)
         self.assertEqual(E.due(state, free, CRITICAL, 4, NOW + 7 * 3600), 'memory')   # 「严重」 needs no half hour
 
-    def test_no_second_run_while_one_is_going_and_a_ceiling_a_day(self):
+    def test_no_second_run_while_one_is_going_and_no_count_a_day(self):
         state = {'run': {'pid': os.getpid(), 'started': NOW}}
         self.assertIsNone(E.due(state, 20 * GIB, CRITICAL, 1, NOW + 60))
         state = {'run': {'pid': os.getpid(), 'started': NOW - 40 * 60}}            # overstayed: no longer counts
         self.assertEqual(E.due(state, 20 * GIB, CRITICAL, 1, NOW), 'disk')
-        state = {'starts': [NOW - h * 1800 for h in range(1, E.DAY_LIMIT + 1)]}
-        self.assertIsNone(E.due(state, 20 * GIB, CRITICAL, 1, NOW))
-        self.assertEqual(state['capped'], dict(at=NOW, reason='disk'))   # the user hears it once
-        state = {'starts': [NOW - h * 1800 for h in range(1, E.DAY_LIMIT)] + [NOW - 25 * 3600]}
-        self.assertEqual(E.due(state, 20 * GIB, CRITICAL, 1, NOW), 'disk')
+        # However many times it came today, a new drop brings it again (RAW-53).
+        state = {'starts': [NOW - h * 600 for h in range(1, 40)], 'disk_fired': 1}
+        self.assertEqual(E.due(state, 9 * GIB, CRITICAL, 1, NOW), 'disk')
 
     def test_still_tight_and_something_new_brings_the_agent_back_within_the_quiet_hours(self):
         group = lambda tool, gib, owner=('agent', 'Codex'), projects=(): dict(
@@ -520,6 +518,36 @@ class ApplyTest(AskFixture):
         self.assertIn('PID 4242', E.move_task(self.home, cfg, self.settings, busy, held, {}))
         self.assertFalse(dirty.is_symlink() or busy.is_symlink())
 
+    def test_a_move_this_run_may_not_make_waits_for_the_wake_that_may(self):
+        """agent-investigates AC-09, 11-04: the run the per-minute memory job started could not reach the drive, and
+        the agent's move was dropped. It now waits for the App's own wake, rechecked there."""
+        task = self.worktree_task('done-task', 0)
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, orphans=[], companions=[], simulators=[], waiting=[], who=[],
+                                                         tasks=[dict(path=str(task), on_drive=False, gib=1)])))
+        E.decide(folder, 'move', str(task), why='PR 已合入，改动都推了')
+        with patch.object(auto_tier, 'external_access', return_value=auto_tier.DENIED):
+            result = E.apply(self.home, self.cfg(), self.settings, folder, now=NOW, table={}, activity_factory=Activity)
+        [done] = result['done']
+        self.assertEqual(done['result'], E.HANDED_WORDS)
+        self.assertFalse(task.is_symlink())
+        self.assertIn('1 条交给资源看板自己去挪', E.receipt(E.decisions(folder), dict(received=0, recorded=[], refused=[]), result)['words'])
+        self.assertIn('1 个闲置任务交给资源看板自己挪到外接盘', E.notice_words(result, dict(status='done')))
+        # The App's wake: refused there too, it stays; allowed, it moves and says so.
+        with patch.object(auto_tier, 'external_access', return_value=auto_tier.DENIED):
+            self.assertEqual(E.handed_moves(self.home, self.cfg(), self.settings, NOW + 300, activity_factory=Activity), [])
+        before = len(agent_plan.queued_notices(self.home))
+        [moved] = E.handed_moves(self.home, self.cfg(), self.settings, NOW + 600, activity_factory=Activity)
+        self.assertEqual(moved['result'], '已挪到外接盘')
+        self.assertTrue(task.is_symlink())
+        [notice] = agent_plan.queued_notices(self.home)[before:]
+        self.assertEqual(notice['title'], 'agent 定的 1 个闲置任务挪到了外接盘')
+        self.assertIsNone(E.handed_moves(self.home, self.cfg(), self.settings, NOW + 900, activity_factory=Activity))
+        # Nobody could make it for a day: it is dropped, not tried forever.
+        E.hand_over(self.home, dict(path=str(self.worktree_task('late-task', 0)), why='x'), NOW)
+        self.assertEqual(E.handed_moves(self.home, self.cfg(), self.settings, NOW + 25 * 3600, activity_factory=Activity), [])
+        self.assertEqual(E.read_list(E.state_root(self.home) / E.HANDED), [])
+
     def asked_run(self, *asks, status='done', now=NOW):
         task = self.worktree_task('merged-task', 0)
         folder = E.new_folder(self.home, now)
@@ -672,15 +700,19 @@ class InvestigateTest(AskFixture):
             E.run(self.home, cfg, self.settings, 'memory', got['folder'], 'codex', now=later)
         self.assertIn('跟上次（{}）比，这次新出现的：iOS 模拟器 · iPhone 17 Pro · shop · Claude Code 在用。先看这些。'.format(
             time.strftime('%H:%M', time.localtime(NOW))), prompts[0])
-        # At the ceiling the user hears it once, not at every wake.
+        # However many runs a day: still tight and something new again, it comes again; counters older builds
+        # kept are dropped, and no 「今天已经来了」 notice is sent (RAW-53).
         state = E.load_state(self.home)
-        state.update(starts=[later - i * 60 for i in range(E.DAY_LIMIT)], memory_fired_at=0)
+        state.update(starts=[later - i * 60 for i in range(40)], capped=dict(at=later, reason='memory'), capped_told=0)
+        state['run'] = {}
         E.save_state(self.home, state)
         before = len(agent_plan.queued_notices(self.home))
-        self.assertIsNone(start(later + 600))
-        self.assertIsNone(start(later + 900))
-        titles = [n['title'] for n in agent_plan.queued_notices(self.home)][before:]
-        self.assertEqual(titles, ['agent 今天已经来了 {} 次，还是紧'.format(E.DAY_LIMIT)])
+        again = later + 40 * 60
+        tsc2 = dict(heavy('tsc', dict(kind='agent', name='Codex')), projects=['other-project'])
+        self.watch([2] * 20, now=again, who=dict(at=again, groups=[tsc, sim, tsc2]))
+        self.assertEqual(start(again)['reason'], 'memory')
+        self.assertFalse({'starts', 'capped', 'capped_told'} & set(E.load_state(self.home)))
+        self.assertEqual([n['title'] for n in agent_plan.queued_notices(self.home)][before:], [])
 
     def test_lessons_are_rules_kept_once_and_old_notes_can_be_rewritten(self):
         diary = agent_plan.remember(self.home, 'lesson', 'emergency', note='22:30 本轮无新增孤儿，40223 仍保留')
@@ -831,6 +863,32 @@ class ProcessStopTest(AskFixture):
         self.assertIsNone(other.poll())
 
 
+class SandboxedAskTest(AskFixture):
+    """agent-investigates AC-10, 11-04: in the Codex sandbox ps is refused, and the agent could not list a process for
+    the user twice. It lists what its material saw; the background checks it before it reaches 「等你确认」."""
+    def test_a_process_the_material_saw_is_listed_and_settled_where_ps_runs(self):
+        child = subprocess.Popen(['/bin/sleep', '300'])
+        self.addCleanup(child.kill)
+        folder = E.new_folder(self.home, time.time())
+        who = [dict(line='sleep · shop · Terminal 开着', pids=[child.pid], gib=0.0, owner=dict(kind='terminal', name='Terminal')),
+               dict(line='Claude · App 本身', pids=[4242], gib=2.6, owner=dict(kind='app', name='Claude', self=True)),
+               dict(line='iOS 模拟器 · iPhone 17 Pro · Claude 在用', pids=[4343], gib=1.3, owner=dict(kind='app', name='Claude'))]
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=time.time() + 5, orphans=[], companions=[], simulators=[], tasks=[],
+                                                         waiting=[], who=who)))
+        with patch.object(E, 'process_table', side_effect=PermissionError('ps')):
+            asked = E.decide(folder, 'ask', 'process-stop:{}'.format(child.pid), why='开了两天没人看')
+            self.assertEqual((asked['title'], asked['lstart']), ('sleep · shop · Terminal 开着', None))
+            for pid in (4242, 4343, 5555):
+                with self.assertRaises(ValueError):
+                    E.decide(folder, 'ask', 'process-stop:{}'.format(pid), why='x')
+        [settled] = E.settle_asks(self.home, [asked])
+        self.assertEqual(settled['lstart'], E.process_table()[child.pid]['lstart'])
+        late = dict(asked, seen_at=time.time() - 3600)   # this pid started after the agent looked: another process
+        self.assertEqual(E.settle_asks(self.home, [late]), [])
+        gone = dict(asked, pid=999999)
+        self.assertEqual(E.settle_asks(self.home, [gone]), [])
+
+
 class CommandTest(AskFixture):
     def test_the_agent_can_only_decide_about_what_it_was_shown(self):
         folder = E.new_folder(self.home, NOW)
@@ -949,12 +1007,12 @@ class SlowMacTest(AskFixture):
             material = self.collect(task)
         self.assertEqual(material['orphans'], [])
 
-    def test_a_run_the_user_asked_for_does_not_count_toward_the_daily_limit(self):
+    def test_a_run_the_user_asked_for_leaves_the_quiet_hours_alone(self):
         state = {}
-        E.mark_fired(state, 'asked', 60 * GIB, CRITICAL, NOW)
-        self.assertEqual(state.get('starts', []), [])
+        E.mark_fired(state, 'asked', 20 * GIB, CRITICAL, NOW)
+        self.assertEqual(state, {})
         E.mark_fired(state, 'memory', 60 * GIB, CRITICAL, NOW)
-        self.assertEqual(state['starts'], [NOW])
+        self.assertEqual(state, {'memory_fired_at': NOW})
 
 
 class WakeOrderTest(AskFixture):
