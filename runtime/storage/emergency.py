@@ -50,6 +50,8 @@ COLLECT_SECONDS = 180         # the whole material; past this, the rest of the r
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
 ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop')
+MAYBE_SIM_DAYS = 1            # the disk still short and the agent listed nothing: shut-down simulators unused this long are asked about
+MAYBE_MAX = 8
 NEVER = O.NEVER
 RGS = Path.home() / '.local/bin/resource-guard-service'
 PROMPT = ('{when} 资源看板又叫你来了：{why}。用 mac-dev-resource-guard 这个 skill 处理：先运行 `{rgs} emergency show`'
@@ -79,6 +81,9 @@ STEPS = (
     '闲置任务挪到外接盘不丢东西：判断短期不会再用、改动都推了的，`emergency move <路径> --why "依据"`。',
     '会丢东西的（删模拟器、关模拟器、收尾任务）只能列给用户：`emergency ask <kind>:<id> --why "依据"`，'
     'kind 是 simulator-delete、simulator-shutdown 或 task-delete。依据写证据，比如「PR #12 已合入，改动都推了，3 天没开」。',
+    '能直接做的做完，内置盘还到不了目标，就算没有安全范围内能做的，也要把可能要清的大头列给用户点头'
+    '（关机没人用的模拟器、改动都推了的任务），不要一项都不列。「开着的模拟器不关」只管开着的，关机的照样可以列。'
+    '用户点了头就记进 decisions，以后照着做；一项都不列，后台会把关机没人用的模拟器补列进去。',
     '学到了以后也用得上的经验，记成一条规则：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；'
     '改的是已有的那条，加 `--replaces <id>`。这一次查到了什么、做了什么写进 done --summary，不要记成经验。'
     'old_notes 是以前每次的笔记，不是规则：里面以后还用得上的，也这样改写成规则（带 --replaces）。',
@@ -1212,7 +1217,30 @@ def handed_moves(home, cfg, settings, now=None, activity_factory=None):
     return done
 
 
-def add_asks(home, entries, now):
+def maybe_asks(home, folder, settings, now, free=None):
+    """The disk still short of the target and the agent listed nothing: the biggest shut-down simulators nobody is
+    using join 「等你确认」 anyway, so the user hears what could go (11-05: the agent listed nothing at 1 GB free
+    while 23 GB of simulators sat unused). Only a list: the user's yes runs it and becomes one of their decisions."""
+    free = shutil.disk_usage(str(settings.volume)).free if free is None else free
+    short = settings.warning_free_gib * GIB - free
+    if short <= 0:
+        return []
+    plan = agent_plan.load(home)
+    picked = []
+    for sim in material(folder).get('simulators', []):   # biggest first
+        key, days = 'simulator-delete:' + sim['id'], sim.get('days_since_used')
+        if (sim.get('state') != 'Shutdown' or sim.get('attached') or days is None or days < MAYBE_SIM_DAYS
+                or not sim.get('gib') or ask_tier.left_alone(plan, key, {})):
+            continue
+        picked.append(dict(id=key, kind='simulator-delete', title='{}（{}）'.format(sim['name'], sim['system']),
+                           bytes=int(sim['gib'] * GIB),
+                           why='关机 {:.0f} 天没开过，没有开发工具连着；内置盘还差 {:.0f} GB'.format(days, short / GIB)))
+        if sum(p['bytes'] for p in picked) >= short or len(picked) >= MAYBE_MAX:
+            break
+    return add_asks(home, picked, now, prefix='后台补列：')
+
+
+def add_asks(home, entries, now, prefix='agent：'):
     """The agent's asks join 「等你确认」, marked as its own, with its reasons (AC-07)."""
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
     items = {i['id']: i for i in pending['items']}
@@ -1223,7 +1251,7 @@ def add_asks(home, entries, now):
             continue   # ignored once already: the user's no stands until the object changes
         path = entry['id'].split(':', 1)[1]
         items[entry['id']] = dict(id=entry['id'], kind=entry['kind'], title=entry['title'], bytes=entry['bytes'],
-                                  reason='agent：' + entry['why'], loses=ask_tier.LOSES[entry['kind']], by='agent', at=now,
+                                  reason=prefix + entry['why'], loses=ask_tier.LOSES[entry['kind']], by='agent', at=now,
                                   fingerprint='agent:{:.0f}'.format(now), state='pending', result=None, updated=now,
                                   **({'path': path} if path.startswith('/') else {}),
                                   **({'lstart': entry['lstart']} if entry.get('lstart') else {}))
@@ -1345,6 +1373,9 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     with lock.open('a') as busy:
         fcntl.flock(busy, fcntl.LOCK_EX)   # the dashboard or the tiers may be cleaning: wait for them
         result = applier(home, cfg, settings, folder, now=time.time())
+        if reason in ('disk', 'asked') and not result['asks']:
+            result['asks'] = [dict(id=a['id'], title=a['title'], bytes=a['bytes'])
+                              for a in maybe_asks(home, folder, settings, time.time())]
     result['receipt'] = receipt(decisions(folder), carried, result)
     result['judged'] = judger(home, reason, settings)
     atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=streak, **result))
