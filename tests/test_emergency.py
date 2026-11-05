@@ -574,6 +574,40 @@ class ApplyTest(AskFixture):
         self.assertIn('还有 2 项等你确认', notice['body'])
         self.assertIn('列了两项等你确认。', notice['body'])
 
+    def test_still_short_with_nothing_listed_the_unused_simulators_are_asked_about(self):
+        simctl = self.sims()
+        for device in simctl.devices[self.IOS]:
+            device['dataPathSize'] = 3 * GIB
+        self.settings.warning_free_gib = 10 ** 6   # far below the target, whatever this disk has
+        with patch.object(self, 'sims', return_value=simctl):
+            self.asked_run()
+        pending = ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())
+        mine = {i['id']: i for i in pending['items']}
+        self.assertEqual(set(mine), {'simulator-delete:OLD', 'simulator-delete:NEW'})   # never the one that is on
+        self.assertTrue(all(i['by'] == 'agent' and i['reason'].startswith('后台补列：关机') for i in mine.values()))
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual(notice['tab'], 'pending')
+        self.assertIn('还有 2 项等你确认，约 6 GB', notice['body'])
+        # The user's yes runs it and is kept as one of their decisions.
+        [done] = ask_tier.execute(self.home, self.cfg(), self.settings, ['simulator-delete:NEW'], simctl, activity=Activity())
+        self.assertEqual(done['outcome'], '已完成')
+        self.assertIn(['delete', 'NEW'], simctl.calls)
+        [memory] = agent_plan.memories(self.home, about='simulator-delete')
+        self.assertEqual((memory['decision'], memory['path']), ('confirmed', 'NEW'))
+
+    def test_nothing_is_added_when_the_disk_is_fine_or_the_agent_listed_something(self):
+        simctl = self.sims()
+        for device in simctl.devices[self.IOS]:
+            device['dataPathSize'] = 3 * GIB
+        self.settings.warning_free_gib = 0
+        with patch.object(self, 'sims', return_value=simctl):
+            self.asked_run()
+        self.assertEqual(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())['items'], [])
+        self.settings.warning_free_gib = 10 ** 6
+        with patch.object(self, 'sims', return_value=simctl), patch.object(self, 'worktree_task', return_value=self.root / 'merged-task'):
+            self.asked_run('simulator-delete:OLD', now=NOW + 60)
+        self.assertEqual(self.ids(ask_tier.load(self.home, ask_tier.PENDING, ask_tier.empty_pending())), ['simulator-delete:OLD'])
+
     def test_agent_asks_survive_the_next_refresh(self):
         now = time.time()
         self.asked_run('simulator-delete:NEW', now=now)
