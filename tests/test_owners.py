@@ -139,6 +139,23 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual(O.busy(state, {61: dict(stream, pcpu=3.0)}, NOW + 32 * 60), {})
 
 
+    def test_a_claude_code_background_task_is_its_not_nobodys(self):
+        # Claude Code leaves its background tasks to launchd: one is a session's, not 「没人管了」 (11-05).
+        table = {39472: row(39472, '/bin/zsh -c source /Users/dev/.claude/shell-snapshots/snapshot-zsh-1-x.sh 2>/dev/null || true && '
+                                   'eval \'npx vitest related --run\'', hours=0.3),
+                 39476: row(39476, 'npm exec vitest related --run', ppid=39472, hours=0.3),
+                 39613: row(39613, 'node (vitest)', ppid=39476, hours=0.3, mb=3000)}
+        who = O.owner(table, 39613)
+        self.assertEqual(who, dict(kind='agent', name='Claude Code', pid=39472, via='background'))
+        self.assertEqual(O.fact(who, table[39613], {}, NOW), 'Claude Code 的后台任务 · 18 分钟')
+        # Whether its session still moves cannot be seen: a companion in one is judged like one nobody owns.
+        table[39480] = row(39480, 'tail -f /tmp/app.log', ppid=39472, hours=8)
+        where = {p: ('/code/shop', False) for p in table}
+        self.assertTrue(O.verdict(table[39480], O.owner(table, 39480), where, {}, None, NOW)[0])
+        table[39480] = dict(table[39480], age=2 * HOUR)
+        self.assertFalse(O.verdict(table[39480], O.owner(table, 39480), where, {}, None, NOW)[0])
+
+
 class VerdictTest(unittest.TestCase):
     def verdict(self, pid, table=TABLE, where=None, agents=None, quiet=None, now=NOW):
         where = {p: ('/code/shop', False) for p in table} if where is None else where

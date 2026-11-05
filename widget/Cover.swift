@@ -274,15 +274,15 @@ private struct Cover: View {
         let s = model.snapshot
         let tight = s.freeLevel > 0
         let soft = tight ? Ink.warmSoft : Ink.navySoft
-        let shift: CGFloat = s.memoryLevel > 0 ? 24 : 0
+        let shift: CGFloat = s.memoryWords != nil ? 24 : 0
         // With both the memory line on top and the agent line below, the ring gives up a little room.
         let ring: CGFloat = shift > 0 && (s.emergency != nil || s.watch != nil) && model.work == nil ? 92 : 104
         ZStack(alignment: .topLeading) {
             (tight ? Ink.warm : Ink.navy)
             VStack(alignment: .leading, spacing: 2) {
-                if s.memoryLevel > 0 {
+                if let words = s.memoryWords {
                     Button { store.page = .memory } label: {
-                        Text((s.memoryLevel == 2 ? "内存很紧 · " : "内存紧张 · ") + store.memorySummary + " ›")
+                        Text(words + " · " + store.memorySummary + " ›")
                             .font(.system(size: 11, weight: .medium)).foregroundColor(Color(hex: 0x7A2E16))
                             .padding(.horizontal, 10).padding(.vertical, 3).background(Capsule().fill(Ink.cream))
                     }.buttonStyle(.plain).padding(.bottom, 6)

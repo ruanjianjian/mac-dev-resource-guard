@@ -50,6 +50,9 @@ COMPANIONS = (
     ('agent 帮手', re.compile(r'app-server-broker|\bcodex app-server\b|mcp-server|mcp_server|@modelcontextprotocol/|\bnode_repl\b'
                             r'|(?:^|/)(?:ugrep|rg)\s')),
 )
+# A shell Claude Code's Bash tool started: one left to launchd is a background task of a session (11-05: a vitest
+# run of one, writing to its log, read 「没人管了」).
+CLAUDE_SHELL = re.compile(r'/\.claude/shell-snapshots/snapshot-')
 # The Mac's own services, and anything another user (root) runs.
 SYSTEM = re.compile(r'^/(?:System|usr/libexec|usr/sbin|sbin)/|^/Library/(?:Apple|SystemExtensions|Developer/PrivateFrameworks)/'
                     r'|\.xpc/Contents/MacOS/')
@@ -233,6 +236,8 @@ def owner(table, pid, managed=()):
         if parent_pid <= 1:
             if current['pid'] in managed or SYSTEM.search(current['command']) or current.get('uid', MINE) != MINE:
                 return dict(kind='service', name=tool(current['command']))
+            if CLAUDE_SHELL.search(current['command']):
+                return dict(kind='agent', name='Claude Code', pid=current['pid'], via='background')
             return dict(kind='gone')
         parent = table.get(parent_pid)
         if parent is None or parent_pid in seen:
@@ -352,6 +357,8 @@ def fact(who, row, agents, now):
     if who.get('self'):
         return 'App 本身'
     verb = '在用' if who.get('via') == 'uses' else '起的'
+    if who.get('via') == 'background':
+        return '{} 的后台任务 · {}'.format(who['name'], span(row['age']))
     if who['kind'] == 'agent':
         moved, entry = still_since(who, agents), agents.get(str(who.get('pid'))) or {}
         if moved is None or moved == entry.get('seen') and now - moved < AGENT_QUIET_HOURS * 3600:
@@ -381,6 +388,8 @@ def verdict(row, who, where, agents, quiet_cpu, now, home=None):
     if writes:
         return False, '在往文件里写'
     hours = AGENT_QUIET_HOURS * 3600
+    if who.get('via') == 'background':
+        who = dict(kind='gone')   # whether its session still moves cannot be seen: judged like one nobody owns
     if who['kind'] == 'agent':
         if label in SERVERS:
             return False, None   # its own MCP or language servers: the session needs them when someone comes back

@@ -18,13 +18,25 @@ NOW = 1_800_000_000.0
 DAY = 86400
 
 
+VM_PAGES = 24 * 2 ** 30 // 16384
+VM_STAT = ('Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               13548.\n'
+           'Pages wired down:                    {wired}.\nPages purgeable:                       {purge}.\n'
+           '"Translation faults":           46957115221.\nAnonymous pages:                       {anon}.\n'
+           'Pages occupied by compressor:          {comp}.\n')
+
+
 class Readings:
     """sysctl answers for one minute: pressure and swap in GB."""
-    def __init__(self, pressure=1, swap_used=1.0, swap_total=16.0, folders=None):
-        self.pressure, self.used, self.total = pressure, swap_used, swap_total
+    def __init__(self, pressure=1, swap_used=1.0, swap_total=16.0, folders=None, share=None):
+        self.pressure, self.used, self.total, self.share = pressure, swap_used, swap_total, share
         self.folders, self.writes = folders or {}, set()
 
     def __call__(self, args, **kwargs):
+        if args == ['/usr/bin/vm_stat'] and self.share is not None:   # 24 GB in 16 KB pages, `share` of it held
+            held = int(self.share * VM_PAGES)
+            return subprocess.CompletedProcess(args, 0, VM_STAT.format(anon=held - 2000 - 1000, purge=0, wired=2000, comp=1000), '')
+        if 'hw.memsize' in args and self.share is not None:
+            return subprocess.CompletedProcess(args, 0, '{}\n'.format(VM_PAGES * 16384), '')
         if 'kern.memorystatus_vm_pressure_level' in args:
             return subprocess.CompletedProcess(args, 0, '{}\n'.format(self.pressure), '')
         if 'vm.swapusage' in args:
@@ -68,6 +80,50 @@ class SqueezeTest(unittest.TestCase):
         climbing = [at(-11, 1, 7.0), at(-5, 1, 8.0), at(0, 1, 10.0)]
         self.assertIn('swap', W.squeeze(climbing, NOW))                       # 10 of 16 GB and up 3 GB in 10 minutes
         self.assertIsNone(W.squeeze([at(-11, 1, 9.5), at(0, 1, 10.0)], NOW))   # high but steady
+
+
+    def test_getting_tight_comes_before_the_kernel_says_warning(self):
+        at = lambda minutes, pressure=1, swap=1.0, share=None: dict(at=NOW + minutes * 60, pressure=pressure, swap_used=swap,
+                                                                   swap_total=16.0, used_share=share)
+        self.assertEqual(W.soon([at(0, share=0.83)], NOW), '内存已经用了 83%')
+        self.assertIsNone(W.soon([at(0, share=0.7)], NOW))
+        self.assertEqual(W.soon([at(0, 2)], NOW), '内存压力「警告」')                 # one minute is enough here
+        self.assertIn('swap 10 分钟里涨了 1.5 GB', W.soon([at(-11, swap=3.0), at(0, swap=4.5)], NOW))   # far from 60% of swap
+        self.assertIsNone(W.soon([at(-11, swap=3.0), at(0, swap=3.5)], NOW))
+
+    def test_the_share_is_what_apps_the_kernel_and_the_compressor_hold(self):
+        out = VM_STAT.format(anon=428216, purge=302, wired=360550, comp=524698)
+        run = lambda args, **kw: subprocess.CompletedProcess(args, 0, out if args == ['/usr/bin/vm_stat'] else '25769803776\n', '')
+        self.assertEqual(W.used_share(run), 0.835)                                   # 11-05 on a 24 GB Mac: 21.5 GB held
+        self.assertIsNone(W.used_share(lambda args, **kw: subprocess.CompletedProcess(args, 0, '', '')))
+
+
+class EarlyTest(WatchFixture):
+    def test_the_watch_warns_and_acts_once_memory_is_getting_tight(self):
+        jobs = {pid: row(pid, 'node /w{}/node_modules/.bin/vitest run'.format(pid), ppid=pid + 10, hours=0.2, cpu=100.0 * pid, gib=2.0)
+                for pid in (1, 2)}
+        jobs.update({pid + 10: row(pid + 10, 'npm test', ppid=99, hours=0.2) for pid in (1, 2)})
+        result = self.tick(NOW, Readings(pressure=1, share=0.85), jobs)
+        self.assertIsNone(result['tight'])
+        self.assertEqual(result['early'], '内存已经用了 85%')
+        self.assertEqual([p['pid'] for p in result['paused']], [1])                  # two heavy jobs: one waits its turn
+        [(title, body, tab)] = self.notices
+        self.assertEqual((title, tab), ('内存快紧了：内存已经用了 85%', 'memory'))
+        self.assertIn('2 个重活同时在跑', body)
+        self.assertEqual(W.status(self.home, NOW)['early'], '内存已经用了 85%')
+        result = self.tick(NOW + 60, Readings(pressure=1, share=0.6), jobs)
+        self.assertIsNone(result['early'])
+        self.assertEqual(len(self.notices), 1)
+
+    def test_the_agent_comes_after_five_minutes_of_it(self):
+        for minute in range(6):
+            self.tick(NOW + minute * 60, Readings(pressure=1, share=0.85), {})
+        seen = E.watch_state(self.home)
+        state = {}
+        self.assertIsNone(E.due(state, 100 * GIB, 25 * GIB, 1, NOW + 4 * 60, E.view(seen, 1, NOW + 4 * 60)))
+        self.assertEqual(E.due(state, 100 * GIB, 25 * GIB, 1, NOW + 5 * 60, E.view(seen, 1, NOW + 5 * 60)), 'memory')
+        self.assertIsNone(E.due({}, 100 * GIB, 25 * GIB, 1, NOW + 20 * 60, E.view(seen, 1, NOW + 20 * 60)))   # eased since
+        self.assertEqual(E.why_words('memory', 100 * GIB, 25 * GIB, 1), '内存吃紧（系统内存压力：还没报警，但内存快用满了）')
 
 
 class LeftoverTest(WatchFixture):

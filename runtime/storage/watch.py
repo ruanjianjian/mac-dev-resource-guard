@@ -29,6 +29,9 @@ STATE = 'watch.json'
 KEEP_SECONDS = 3600
 WARN_MINUTES = 3              # 「警告」 this many minutes in a row is a squeeze (AC-01)
 SWAP_SHARE, SWAP_CLIMB_GIB, SWAP_WINDOW = 0.6, 2.0, 600
+# 「快紧了」 comes before any of that (11-05: by the kernel's 「警告」 the Mac was already too slow to use): apps,
+# the kernel and the compressor holding this share of the memory, swap up this much in 10 minutes, or one minute of 「警告」.
+USED_SHARE, SWAP_EARLY_GIB = 0.8, 1.0
 NORMAL_TO_RELEASE = 2         # minutes of normal pressure before every queued job goes again (AC-03)
 CALM_TO_END = 10              # minutes of no squeeze before a squeeze counts as over (pressure flickers: 4 notices in 6 minutes on 10-31)
 NOTICE_GAP = 30 * 60          # at most one notice in this long
@@ -39,7 +42,7 @@ HELPER_IDLE_HOURS = O.AGENT_QUIET_HOURS   # a server this long without CPU of it
 BIG_SESSION_BYTES = 300 * 2 ** 20
 SESSION_HOURS = 3
 # Build, type-check, bundle and test tools: heavy for a while, then done. Never an App, a database or a debugger.
-HEAVY = re.compile(r'node_modules/\.bin/(?:tsc|vue-tsc|vitest|jest|webpack|next|vite|esbuild|eslint|tsx)\b'
+HEAVY = re.compile(r'node_modules/\.bin/(?:tsc|vue-tsc|vitest|jest|webpack|next|vite|esbuild|eslint|tsx)\b|^node \((?:vitest|jest)\b'
                    r'|(?:^|/)(?:swift-frontend|swiftc|swift-build|xcodebuild|clang|clang\+\+|cargo|rustc|kotlinc|javac)(?:\s|$)'
                    r'|GradleWorkerMain|KotlinCompileDaemon|(?:^|/)go (?:build|test|vet)\b')
 
@@ -78,6 +81,35 @@ def squeeze(samples, now):
     return None
 
 
+def soon(samples, now):
+    """Why memory is getting tight, before the Mac slows down, or None. Everything squeeze() counts counts here too."""
+    if not samples:
+        return None
+    last = samples[-1]
+    if last['pressure'] >= 2:
+        return '内存压力「{}」'.format('严重' if last['pressure'] >= 4 else '警告')
+    if (last.get('used_share') or 0) >= USED_SHARE:
+        return '内存已经用了 {:.0f}%'.format(last['used_share'] * 100)
+    before = [s for s in samples if now - s['at'] >= SWAP_WINDOW - 60]
+    if before and last['swap_used'] - before[-1]['swap_used'] >= SWAP_EARLY_GIB:
+        return 'swap 10 分钟里涨了 {:.1f} GB'.format(last['swap_used'] - before[-1]['swap_used'])
+    return squeeze(samples, now)
+
+
+def used_share(run=subprocess.run):
+    """What apps, the kernel and the compressor hold, as a share of the memory (Activity Monitor's 「已使用内存」)."""
+    try:
+        out = run(['/usr/bin/vm_stat'], capture_output=True, text=True, timeout=10).stdout
+        total = int(run(['/usr/sbin/sysctl', '-n', 'hw.memsize'], capture_output=True, text=True, timeout=10).stdout)
+        page = int(re.search(r'page size of (\d+) bytes', out).group(1))
+        pages = {k: int(v) for k, v in re.findall(r'^"?([^":\n]+)"?:\s+(\d+)\.', out, re.M)}
+        held = (pages['Anonymous pages'] - pages.get('Pages purgeable', 0) + pages['Pages wired down']
+                + pages['Pages occupied by compressor'])
+        return round(held * page / total, 3)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, AttributeError, ZeroDivisionError):
+        return None
+
+
 def reading(home, run=subprocess.run):
     pressure = E.memory_pressure(run)
     swap = E.swap_usage(run) or {}
@@ -85,7 +117,8 @@ def reading(home, run=subprocess.run):
         free = shutil.disk_usage(str(home)).free / GIB
     except OSError:
         free = None
-    return dict(pressure=pressure, swap_used=swap.get('used_gib', 0.0), swap_total=swap.get('total_gib', 0.0), free_gib=free)
+    return dict(pressure=pressure, swap_used=swap.get('used_gib', 0.0), swap_total=swap.get('total_gib', 0.0), free_gib=free,
+                used_share=used_share(run))
 
 
 def alive_same(table, entry):
@@ -293,8 +326,10 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
         return dict(on=False)
     sample = dict(at=now, **reading(home, run))
     state['samples'] = [s for s in state.get('samples', []) if now - s['at'] <= KEEP_SECONDS] + [sample]
-    why = squeeze(state['samples'], now)
-    result = dict(on=True, tight=why, stopped=[], paused=[], released=[])
+    # Everything below starts at 「快紧了」 (`why`); `tight` is the squeeze proper.
+    tight = squeeze(state['samples'], now)
+    why = soon(state['samples'], now)
+    result = dict(on=True, tight=tight, early=why, stopped=[], paused=[], released=[])
     if table is not None:
         calm = [s for s in state['samples'] if now - s['at'] <= NORMAL_TO_RELEASE * 60 + 30]
         everything = why is None and len(calm) >= NORMAL_TO_RELEASE and all(s['pressure'] <= 1 for s in calm[-NORMAL_TO_RELEASE:])
@@ -322,7 +357,8 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
             state['episode'] = dict(since=now, why=why)
             if quiet:
                 body = words(result['stopped'], result['paused'], top_users(groups), big_sessions(home, now), hot_users(groups, now))
-                notice(home, '内存在变紧：' + why, body or '正在盯着，暂时没有能安全处理的。', tab='memory')
+                notice(home, ('内存在变紧：' if tight else '内存快紧了：') + why,
+                       body or '正在盯着，暂时没有能安全处理的。', tab='memory')
                 state['noticed_at'] = now
         elif (result['stopped'] or result['paused']) and quiet:
             notice(home, '内存还紧，又处理了一些', words(result['stopped'], result['paused'], [], []), tab='memory')
@@ -362,6 +398,7 @@ def status(home, now=None):
     state = load(home)
     last = (state.get('samples') or [{}])[-1]
     return dict(on=tiers_config.load(home).get('proactive_watch', True), tight=squeeze(state.get('samples', []), now),
+                early=soon(state.get('samples', []), now), used_share=last.get('used_share'),
                 pressure={1: '正常', 2: '警告', 4: '严重'}.get(last.get('pressure'), '未知'), swap_gib=last.get('swap_used'),
                 queued=[dict(name=p['name'], gib=p['gib'], minutes=round((now - p['since']) / 60)) for p in state.get('paused', [])],
                 acted=state.get('acted', [])[-5:], who=(state.get('who') or {}).get('lines', [])[:8])

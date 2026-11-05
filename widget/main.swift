@@ -20,6 +20,10 @@ struct Snapshot {
     var memorySince: Double? = nil
     /// 0 fine, 1 tight (pressure 2), 2 very tight (pressure 4): shown in the menu bar and on the cover.
     var memoryLevel: Int { memorySince == nil ? 0 : pressure == 4 ? 2 : pressure == 2 ? 1 : 0 }
+    /// proactive-watch: memory getting tight before the kernel says so (watch.json `episode`, seen within the last minutes).
+    var memoryEarly = false
+    /// What the menu bar and the cover say about memory, or nil when it is fine.
+    var memoryWords: String? { memoryLevel == 2 ? "内存很紧" : memoryLevel == 1 ? "内存紧张" : memoryEarly ? "内存快紧了" : nil }
     var pending = 0
     var notice: (count: Int, critical: Bool)? = nil
     var agentReason: String? = nil
@@ -72,6 +76,12 @@ struct WatchLine: Equatable {
         if paused > 0 { parts.append("让 \(paused) 个重活排队") }
         return parts.joined(separator: "、")
     }
+}
+
+/// The watch saw memory getting tight in the last two and a half minutes (watch.json `episode`).
+func earlyMemory(_ state: [String: Any], now: Double = Date().timeIntervalSince1970) -> Bool {
+    guard let last = ((state["episode"] as? [String: Any])?["last_tight"] as? NSNumber)?.doubleValue else { return false }
+    return now - last <= 150
 }
 
 /// The last thing the per-minute watch did by itself (watch.json `acted`), if within two hours.
@@ -154,7 +164,9 @@ func sample() -> Snapshot {
     let tiers = stateHome().appendingPathComponent(".local/state/dev-resource-guard")
     s.pending = pendingCount(readJSON(tiers.appendingPathComponent("pending.json")))
     s.emergency = emergencyLine(readJSON(tiers.appendingPathComponent("emergency.json")))
-    s.watch = watchLine(readJSON(tiers.appendingPathComponent("watch.json")))
+    let watched = readJSON(tiers.appendingPathComponent("watch.json"))
+    s.watch = watchLine(watched)
+    s.memoryEarly = earlyMemory(watched)
     let request = tiers.appendingPathComponent("notify-request.json")
     let notice = readJSON(request)
     if let count = notice["count"] as? Int {
@@ -378,8 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
                                               attributes: [.foregroundColor: colour, .font: font])
         // Memory under pressure stays visible next to the number until it eases.
         let memory = model.snapshot.memoryLevel
-        if memory > 0 {
-            title.append(NSAttributedString(string: memory == 2 ? " 内存很紧" : " 内存紧张",
+        if let words = model.snapshot.memoryWords {
+            title.append(NSAttributedString(string: " " + words,
                                             attributes: [.font: font, .foregroundColor: memory == 2 ? NSColor.systemRed : NSColor.systemOrange]))
         }
         if busy {
@@ -538,6 +550,11 @@ if CommandLine.arguments.contains("--run-tick") {
     var memory = Snapshot(); memory.pressure = 2; require(memory.memoryLevel == 0)   // no episode recorded yet
     memory.memorySince = 1; require(memory.memoryLevel == 1); memory.pressure = 4; require(memory.memoryLevel == 2)
     memory.pressure = 1; require(memory.memoryLevel == 0)
+    require(memory.memoryWords == nil); memory.memoryEarly = true; require(memory.memoryWords == "内存快紧了")
+    memory.pressure = 4; require(memory.memoryWords == "内存很紧")
+    let minute = Date().timeIntervalSince1970
+    require(earlyMemory(["episode": ["since": minute - 600, "last_tight": minute - 60]], now: minute))
+    require(!earlyMemory(["episode": ["since": minute - 900, "last_tight": minute - 600]], now: minute) && !earlyMemory([:], now: minute))
     require(pendingCount(["items": [["state": "pending"], ["state": "ignored"], ["state": "pending", "unreachable": true], ["state": "failed"]]]) == 1)
     require(pendingCount([:]) == 0)
     var space = Snapshot(); space.free = 80; space.warning = 69; space.critical = 46; require(space.freeLevel == 0)
