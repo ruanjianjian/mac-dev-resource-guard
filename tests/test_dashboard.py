@@ -120,6 +120,17 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual((rows['Baguette']['reason'], rows['Baguette']['tag']), ('占满 1 个核已经 3 天 · 没人管了 · 3 天', 'auto'))
         self.assertFalse(any('在用 · 不动' in r['reason'] for r in rows.values()))
 
+    def test_the_memory_page_says_getting_tight_before_the_kernel_does(self):
+        now = time.time()
+        path = self.home / '.local/state/dev-resource-guard/watch.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(episode=dict(since=now - 300, last_tight=now - 30, why='内存已经用了 85%'))))
+        [status] = [r for r in self.adapter.run('memory-page')['rows'] if r['category'] == '状态']
+        self.assertEqual((status['title'], status['reason']), ('快紧了', '内存已经用了 85%，已持续 5 分钟'))
+        path.write_text(json.dumps(dict(episode=dict(since=now - 900, last_tight=now - 600, why='内存已经用了 85%'))))
+        [status] = [r for r in self.adapter.run('memory-page')['rows'] if r['category'] == '状态']
+        self.assertEqual(status['title'], '正常')                                 # eased ten minutes ago
+
     def test_a_simulator_row_says_who_uses_it(self):
         """know-who AC-06 on the memory page: the simulator's owner and project, not only which tool is connected."""
         now = time.time()

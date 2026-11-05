@@ -788,6 +788,12 @@ class Adapter:
         rows = [dict(id='status', title={2: '紧张', 4: '很紧'}.get(pressure, '正常'), category='状态', bytes=None, eligible=False,
                      command=None, detail='', outcome=str(pressure),
                      reason='已持续 {} 分钟'.format(max(1, round((now - since) / 60))) if pressure in (2, 4) and since else '')]
+        watched = self.home / '.local/state/dev-resource-guard/watch.json'
+        seen = (read_json(watched) if watched.is_file() else None) or {}
+        episode = seen.get('episode') or {}
+        if pressure not in (2, 4) and now - episode.get('last_tight', 0) <= 150:
+            # proactive-watch: 「快紧了」 before the kernel's 「警告」, by when the Mac is already too slow to use (11-05).
+            rows[0].update(title='快紧了', reason='{}，已持续 {} 分钟'.format(episode.get('why', ''), max(1, round((now - episode['since']) / 60))))
         names = dict(simulator='关掉没被开发工具连着的模拟器', gradle='停掉闲置的 Gradle 编译后台', mcp='停掉闲置的 MCP 服务', tail='收尾托管的后台进程')
         last = read_json(root / 'last-cleanup.json') if (root / 'last-cleanup.json').is_file() else {}
         for index, action in enumerate(last.get('actions', []) if now - last.get('at', 0) < 2 * 3600 else []):
@@ -801,8 +807,6 @@ class Adapter:
             simulators = (json.loads(fixture.read_text()) if fixture.is_file() else []) if self.isolated else memory_external.simulator_inspect()
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             simulators = []
-        watched = self.home / '.local/state/dev-resource-guard/watch.json'
-        seen = (read_json(watched) if watched.is_file() else None) or {}
         picture = seen.get('who') or {}
         groups = picture.get('groups') if now - picture.get('at', 0) <= 300 else None
         sys.path.insert(0, str(engine_root() / 'runtime/storage'))

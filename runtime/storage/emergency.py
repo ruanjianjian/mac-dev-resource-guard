@@ -40,6 +40,7 @@ TITLE = '资源看板 · 资源管理'
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
 WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
+EARLY_MINUTES = 5             # or the watch's 「快紧了」 this long: by 「警告」 the Mac is already too slow to use (11-05)
 MEMORY_QUIET_HOURS = 6        # nothing new since the agent last looked: it comes again only after this
 SOONER_MINUTES = 30           # still tight and something new: it comes again this soon (agent-investigates AC-07)
 HEAVY_GIB = 1.0               # a group this big, or one burning a core, is worth a new look when it appears
@@ -160,7 +161,9 @@ def view(seen, pressure, now):
     groups = who.get('groups', []) if now - who.get('at', 0) <= 600 else []
     heavy = {sign(g): O.line(g, now) for g in groups if g['bytes'] >= HEAVY_GIB * GIB or g.get('busy_since')}
     swap = ((seen.get('samples') or [{}])[-1]).get('swap_used')
-    return dict(at=now, pressure=pressure, swap=swap, heavy=heavy)
+    episode = seen.get('episode') or {}
+    early = episode.get('since') if now - episode.get('last_tight', 0) <= 150 else None   # still 「快紧了」 a minute ago
+    return dict(at=now, pressure=pressure, swap=swap, heavy=heavy, early_since=early)
 
 
 def news(looked, current):
@@ -188,7 +191,8 @@ def due(state, free, critical, pressure, now, current=None):
     reason = None
     if level > state.get('disk_fired', 0):
         reason = 'disk'
-    elif pressure >= 4 or pressure >= 2 and now - state.get('warn_since', now) >= WARN_MINUTES * 60:
+    elif (pressure >= 4 or pressure >= 2 and now - state.get('warn_since', now) >= WARN_MINUTES * 60
+          or (current or {}).get('early_since') and now - current['early_since'] >= EARLY_MINUTES * 60):
         looked = state.get('looked') or {}
         if now - state.get('memory_fired_at', 0) >= MEMORY_QUIET_HOURS * 3600:
             reason = 'memory'
@@ -221,7 +225,7 @@ def why_words(reason, free, critical, pressure):
     if reason == 'disk':
         return '内置盘只剩 {:.1f} GB，低于危险线 {:.0f} GB'.format(free / GIB, critical / GIB)
     if reason == 'memory':
-        return '内存吃紧（系统内存压力：{}）'.format('严重' if pressure >= 4 else '警告，已超过半小时')
+        return '内存吃紧（系统内存压力：{}）'.format({4: '严重', 2: '警告'}.get(pressure, '还没报警，但内存快用满了'))
     return '用户要求处理一次'
 
 
