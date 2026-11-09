@@ -797,7 +797,10 @@ def who_now(seen, table, managed, now, run=subprocess.run):
     mates = [p for p in mates if p not in wrappers]   # `zsh -c '… stream …'` around the stream: list the stream
     where = O.looks({p for members in big for p in members[:O.LOOK_PER_GROUP]} | set(hot) | set(mates)
                     | {int(p) for p in agents if int(p) in table} | O.users(table, top + list(hot)), run)
-    groups = O.group(O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot))
+    served = {int(p): (v['clients'], v['since']) for p, v in seen.get('served', {}).items()
+              if int(p) in table and table[int(p)]['lstart'] == v['lstart']}   # the watch's: who is connected to each server
+    groups = O.group(O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot,
+                                links=served), now)
     helpers = []
     for pid in mates:
         quiet = seen.get('seen', {}).get(str(pid))
