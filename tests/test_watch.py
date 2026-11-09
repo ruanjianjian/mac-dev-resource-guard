@@ -30,6 +30,7 @@ class Readings:
     def __init__(self, pressure=1, swap_used=1.0, swap_total=16.0, folders=None, share=None):
         self.pressure, self.used, self.total, self.share = pressure, swap_used, swap_total, share
         self.folders, self.writes = folders or {}, set()
+        self.sockets = ''   # what `lsof -iTCP` says: who waits for connections, who is connected
 
     def __call__(self, args, **kwargs):
         if args == ['/usr/bin/vm_stat'] and self.share is not None:   # 24 GB in 16 KB pages, `share` of it held
@@ -44,6 +45,8 @@ class Readings:
                 self.total * 1024, self.used * 1024), '')
         if args[:2] == ['/bin/launchctl', 'list']:
             return subprocess.CompletedProcess(args, 0, 'PID\tStatus\tLabel\n987\t0\tcn.example.service\n', '')
+        if args[0] == '/usr/sbin/lsof' and '-iTCP' in args:
+            return subprocess.CompletedProcess(args, 0, self.sockets, '')
         if args[0] == '/usr/sbin/lsof':   # every process works in its folder, output to nowhere
             pids = args[args.index('-p') + 1].split(',')
             return subprocess.CompletedProcess(args, 0, ''.join('p{0}\nfcwd\ntDIR\nn{1}\nf1\nt{2}\nn{3}\n'.format(
@@ -124,6 +127,60 @@ class EarlyTest(WatchFixture):
         self.assertEqual(E.due(state, 100 * GIB, 25 * GIB, 1, NOW + 5 * 60, E.view(seen, 1, NOW + 5 * 60)), 'memory')
         self.assertIsNone(E.due({}, 100 * GIB, 25 * GIB, 1, NOW + 20 * 60, E.view(seen, 1, NOW + 20 * 60)))   # eased since
         self.assertEqual(E.why_words('memory', 100 * GIB, 25 * GIB, 1), '内存吃紧（系统内存压力：还没报警，但内存快用满了）')
+
+
+def sockets(*entries):
+    """lsof -FpnT for (pid, [(name, state)])"""
+    return ''.join('p{}\n'.format(pid) + ''.join('f2{}\nn{}\nTST={}\nTQR=0\n'.format(i, name, st) for i, (name, st) in enumerate(files))
+                   for pid, files in entries)
+
+
+class IdleServerTest(WatchFixture):
+    """11-09: of four vite servers read 「没人管了」, two were open in a browser, two had nobody connected for days."""
+    def servers(self, cpu=60.0):
+        return {101: row(101, 'npm exec vite --host 127.0.0.1 --port 5253', hours=200),
+                102: row(102, 'node /w/a/web/node_modules/.bin/vite --host 127.0.0.1 --port 5253', ppid=101, hours=200, cpu=cpu, gib=1.0),
+                201: row(201, 'npm exec vite --host 127.0.0.1 --port 5233', hours=70),
+                202: row(202, 'node /w/b/web/node_modules/.bin/vite --host 127.0.0.1 --port 5233', ppid=201, hours=70, gib=1.0),
+                301: row(301, 'mongod --port 27017', hours=200, gib=0.5)}
+
+    def readings(self):
+        readings = Readings(pressure=1, share=0.85)                     # memory getting tight
+        readings.sockets = sockets((102, [('127.0.0.1:5253', 'LISTEN')]),
+                                   (202, [('127.0.0.1:5233', 'LISTEN'), ('127.0.0.1:5233->127.0.0.1:61234', 'ESTABLISHED')]),
+                                   (301, [('127.0.0.1:27017', 'LISTEN')]))
+        return readings
+
+    def test_a_server_nobody_connects_to_goes_after_twelve_hours(self):
+        readings = self.readings()
+        first = self.tick(NOW, readings, self.servers())
+        self.assertEqual(first['stopped'], [])                          # nobody has been watched that long yet
+        lines = W.load(self.home)['who']['lines']
+        self.assertTrue(any(line.startswith('vite') and '有人连着' in line for line in lines), lines)
+        later = self.tick(NOW + 3 * 3600, readings, self.servers())
+        self.assertEqual(later['stopped'], [])
+        self.assertTrue(any(line.startswith('vite') and '3 小时没人连' in line for line in W.load(self.home)['who']['lines']))
+        self.kills.clear()
+        done = self.tick(NOW + 12 * 3600, readings, self.servers())
+        self.assertEqual([s['pid'] for s in done['stopped']], [102])
+        self.assertEqual(sorted({pid for pid, _ in self.kills}), [101, 102])   # with the npm that started it
+        self.assertIn('关掉了 1 个12 小时以上没人连的开发服务（vite）', ''.join(n[1] for n in self.notices))
+
+    def test_one_with_someone_connected_or_working_or_owned_stays(self):
+        readings = self.readings()
+        self.tick(NOW, readings, self.servers())
+        self.tick(NOW + 6 * 3600, readings, self.servers(cpu=200.0))   # it did some work: the clock starts again
+        done = self.tick(NOW + 13 * 3600, readings, self.servers(cpu=200.0))
+        self.assertEqual(done['stopped'], [])
+        calm = Readings(pressure=1, share=0.5)
+        calm.sockets = readings.sockets
+        done = self.tick(NOW + 19 * 3600, calm, self.servers(cpu=200.0))
+        self.assertEqual(done['stopped'], [])                           # memory is fine: nothing needs the room
+        owned = {**self.servers(cpu=200.0), 101: row(101, 'npm exec vite', ppid=13, hours=200),
+                 13: row(13, '/opt/homebrew/bin/node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js', hours=300)}
+        done = self.tick(NOW + 20 * 3600, readings, owned)
+        self.assertEqual(done['stopped'], [])                           # a Claude Code session still holds it
+        self.assertNotIn(301, {pid for pid, _ in self.kills})           # a database never
 
 
 class LeftoverTest(WatchFixture):

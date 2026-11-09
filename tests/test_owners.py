@@ -156,6 +156,16 @@ class ActivityTest(unittest.TestCase):
         self.assertFalse(O.verdict(table[39480], O.owner(table, 39480), where, {}, None, NOW)[0])
 
 
+    def test_a_server_counts_who_it_accepted_not_who_it_called(self):
+        out = ('p102\nf20\nn127.0.0.1:5253\nTST=LISTEN\nTQR=0\n'
+               'p202\nf20\nn[::1]:5233\nTST=LISTEN\nf21\nn[::1]:5233->[::1]:61234\nTST=ESTABLISHED\n'
+               'f22\nn[::1]:5233->[::1]:61240\nTST=ESTABLISHED\nf23\nn127.0.0.1:61300->127.0.0.1:443\nTST=ESTABLISHED\n'
+               'p77\nf5\nn127.0.0.1:61234->127.0.0.1:5223\nTST=ESTABLISHED\n')   # a client of someone else's server
+        run = lambda args, **kw: subprocess.CompletedProcess(args, 0, out, '')
+        self.assertEqual(O.serving(run), {102: 0, 202: 2})
+        self.assertIsNone(O.serving(lambda args, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(args, 20))))
+
+
 class VerdictTest(unittest.TestCase):
     def verdict(self, pid, table=TABLE, where=None, agents=None, quiet=None, now=NOW):
         where = {p: ('/code/shop', False) for p in table} if where is None else where

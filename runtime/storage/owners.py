@@ -18,6 +18,7 @@ ORPHAN_ANYWHERE_HOURS = 24  # while an agent that may work in any folder moves (
 BUSY_SHARE = 0.8              # of a core: 「占满」 (AC-04)
 BUSY_MINUTES = 30
 COMPANION_SHARE = 0.5         # a companion this busy is worth stopping while memory is fine (AC-03)
+QUIET_SHOWN = 3600            # a server nobody has connected to this long says so on its line
 TOP = 12
 MINE = os.getuid()
 # Never stopped, whatever its owner: this tool itself, and the user's databases, containers and debuggers
@@ -417,9 +418,45 @@ def verdict(row, who, where, agents, quiet_cpu, now, home=None):
     return True, '{}（{}）：没人管了 {}，同一个项目里也没有 agent 在动'.format(label, tool(row['command']), span(row['age']))
 
 
-def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, home=None):
-    """One line per process (AC-01): tool, project, owner, how long, what it holds, how busy."""
-    hot = hot or {}
+def serving(run=subprocess.run):
+    """{pid: clients connected now} for each process waiting for connections on a TCP port, or None when it cannot
+    be read. Whether a dev server is used shows here, not in who started it (11-09: of four vite servers that read
+    「没人管了」, two were open in a browser and two had had nobody connected for days)."""
+    try:
+        out = run(['/usr/sbin/lsof', '-nP', '-iTCP', '-sTCP:LISTEN,ESTABLISHED', '-FpnT'], capture_output=True, text=True,
+                  errors='surrogateescape', timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    ports, links, pid, name = {}, {}, None, None
+    for line in out.splitlines():
+        tag, value = line[:1], line[1:]
+        if tag == 'p' and value.isdigit():
+            pid, name = int(value), None
+        elif tag == 'f':
+            name = None
+        elif tag == 'n':
+            name = value
+        elif tag == 'T' and pid is not None and name:
+            if value == 'ST=LISTEN':
+                ports.setdefault(pid, set()).add(name.rsplit(':', 1)[-1])
+            elif value == 'ST=ESTABLISHED' and '->' in name:
+                links.setdefault(pid, []).append(name.split('->')[0].rsplit(':', 1)[-1])   # its own end
+    # A connection it accepted has its own end on a port it listens on; the ones it made itself do not.
+    return {p: sum(1 for local in links.get(p, []) if local in mine) for p, mine in ports.items()}
+
+
+def link_state(link, now):
+    """'linked' with someone connected, 'quiet' with nobody connected (and no CPU of its own) for a while, else None."""
+    if link is None:
+        return None
+    clients, since = link
+    return 'linked' if clients else 'quiet' if now - since >= QUIET_SHOWN else None
+
+
+def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, home=None, links=None):
+    """One line per process (AC-01): tool, project, owner, how long, what it holds, how busy. `links`: {pid:
+    (clients, quiet since)} for the servers among them."""
+    hot, links = hot or {}, links or {}
     rows, up = [], None   # up: how long each booted device has been up, from its launchd_sim
     for pid in pids:
         row = table.get(pid)
@@ -443,7 +480,8 @@ def describe(table, pids, where, agents, managed, now, sizes=None, hot=None, hom
         rows.append(dict(pid=pid, lstart=row['lstart'], tool=name, project=place and place['path'], sim=udid,
                          owner=who, fact=fact(who, row, agents, now), age=row['age'],
                          bytes=max(row['rss'], (sizes or {}).get(pid, 0)), cores=round(row.get('pcpu', 0) / 100, 1),
-                         busy_since=hot.get(pid), companion=companion(row['command'])))
+                         busy_since=hot.get(pid), companion=companion(row['command']),
+                         link=link_state(links.get(pid), now), quiet=links.get(pid, (0, None))[1]))
     return rows
 
 
@@ -469,12 +507,13 @@ def biggest(table, pids, managed=(), sizes=None, limit=TOP):
     return [sorted(members, key=held, reverse=True) for _, members in sorted(found.values(), key=lambda g: -g[0])[:limit]]
 
 
-def group(rows):
-    """Same tool, same owner: one line with how many and in which projects. An App's processes are the App."""
+def group(rows, now=None):
+    """Same tool, same owner: one line with how many and in which projects. An App's processes are the App.
+    Servers someone is connected to and ones nobody has been for a while are told apart."""
     groups = {}
     for row in rows:
         who = row['owner']
-        key = (row['tool'], who['kind'], who.get('name'))
+        key = (row['tool'], who['kind'], who.get('name'), row.get('link'))
         entry = groups.setdefault(key, dict(tool=row['tool'], owner=who, count=0, projects=[], bytes=0, cores=0.0,
                                             age=0, fact=row['fact'], busy_since=None, pids=[],
                                             app=bool(who.get('self') or row.get('sim'))))   # one simulator is one thing
@@ -486,6 +525,8 @@ def group(rows):
         entry['pids'].append(row['pid'])
         if row['project'] and row['project'] not in entry['projects']:
             entry['projects'].append(row['project'])   # paths here; names once all are in
+        if row.get('link') == 'quiet':
+            entry['quiet'] = max(entry.get('quiet') or 0, row['quiet'])   # the shortest quiet speaks for the group
         if row['busy_since'] and (entry['busy_since'] is None or row['busy_since'] < entry['busy_since']):
             entry['busy_since'] = row['busy_since']
         if '刚刚' in row['fact'] or '前还在动' in row['fact']:
@@ -495,6 +536,11 @@ def group(rows):
         young, old = span(entry.pop('youngest')), span(entry['age'])
         if entry['owner']['kind'] == 'gone' and entry['owner'].get('via') != 'sim' and young != old:
             entry['fact'] = '没人管了 · {}～{}'.format(young, old)   # 11-03: one of 12 minutes read as 「23 小时」
+        link = next((r['link'] for r in rows if r['pid'] in entry['pids'] and r.get('link')), None)
+        if link == 'linked':
+            entry['fact'] += ' · 有人连着'
+        elif link == 'quiet' and now is not None:
+            entry['fact'] += ' · {}没人连'.format(span(now - entry['quiet']))
         entry['projects'] = names(entry['projects'])
     return sorted(groups.values(), key=lambda g: -g['bytes'])
 

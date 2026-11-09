@@ -39,6 +39,7 @@ PAUSE_LIMIT = 20 * 60         # nobody waits longer than this
 HEAVY_BYTES = GIB // 2        # what is still in memory; a job the Mac already swapped out shows less
 SWAPPED_GIB = 2.0             # this much in swap and ps no longer tells what each one holds (know-who AC-07)
 HELPER_IDLE_HOURS = O.AGENT_QUIET_HOURS   # a server this long without CPU of its own is abandoned
+SERVER_IDLE_HOURS = 12        # a dev server nobody connected to, with no CPU of its own, this long after its starter left
 BIG_SESSION_BYTES = 300 * 2 ** 20
 SESSION_HOURS = 3
 # Build, type-check, bundle and test tools: heavy for a while, then done. Never an App, a database or a debugger.
@@ -213,6 +214,54 @@ def observe(state, found, now):
     state['seen'] = fresh
 
 
+def served(state, table, clients, now):
+    """Every minute: since when each server has had nobody connected and used no CPU of its own (with what it
+    started). Returns {pid: (clients now, quiet since)}."""
+    fresh = {}
+    for pid, count in clients.items():
+        row = table.get(pid)
+        if row is None:
+            continue
+        cpu = sum(table[c]['cpu'] for c in E.descendants(table, pid) if c in table)
+        before = state.get('served', {}).get(str(pid))
+        still = before and before['lstart'] == row['lstart'] and not count and cpu - before['cpu'] <= E.ORPHAN_CPU_SECONDS
+        fresh[str(pid)] = dict(lstart=row['lstart'], cpu=cpu, clients=count, since=before['since'] if still else now)
+    state['served'] = fresh
+    return links(state, table)
+
+
+def links(seen, table):
+    return {int(p): (v['clients'], v['since']) for p, v in seen.get('served', {}).items()
+            if int(p) in table and table[int(p)]['lstart'] == v['lstart']}
+
+
+def idle_servers(state, table, kill, sleep, now, managed, own=()):
+    """Dev servers whose starter is gone and that nobody has connected to, using no CPU of their own, for
+    SERVER_IDLE_HOURS: stopped with the job that started them, while memory is getting tight (11-09: two vite
+    servers had waited 3 and 9 days with nobody connected). Never a database or a service launchd runs, never one
+    whose job still serves someone."""
+    stopped, ended = [], set()
+    served_ = state.get('served', {})
+    idle = lambda p: str(p) in served_ and now - served_[str(p)]['since'] >= SERVER_IDLE_HOURS * 3600
+    for key, entry in served_.items():
+        pid, row = int(key), table.get(int(key))
+        if (row is None or pid in own or pid in ended or row['lstart'] != entry['lstart'] or not idle(pid)
+                or O.owner(table, pid, managed)['kind'] != 'gone'):
+            continue
+        root = pid
+        while table[root]['ppid'] > 1 and table[root]['ppid'] in table:
+            root = table[root]['ppid']
+        tree = E.descendants(table, root)
+        if any(any(word in table[p]['command'] for word in E.NEVER) for p in tree if p in table) \
+                or any(str(p) in served_ and not idle(p) for p in tree):
+            continue
+        if E.stop_tree(table, root, table[root]['lstart'], kill=kill, sleep=sleep) is None:
+            ended.update(tree)
+            stopped.append(dict(pid=pid, name=O.tool(row['command']), mb=round(row['rss'] / 2 ** 20), server=True,
+                                why='{}：没人管、{}没人连'.format(O.tool(row['command']), O.span(now - entry['since']))))
+    return stopped
+
+
 def companions(table, own=(), managed=()):
     return [pid for pid, row in table.items() if O.companion(row['command']) and pid not in own and pid not in managed
             and not any(word in row['command'] for word in E.NEVER)]
@@ -240,7 +289,7 @@ def short_name(command):
     return O.tool(command)
 
 
-def who(state, table, now, managed, run=subprocess.run, sizes=None, own=()):
+def who(state, table, now, managed, run=subprocess.run, sizes=None, own=(), served_now=None):
     """know-who AC-01: the biggest processes and the ones that have burned a core for half an hour, each with its
     tool, project and owner. Kept in the state for the memory page, the notice and the agent's material."""
     hot = O.busy(state, table, now)
@@ -250,8 +299,9 @@ def who(state, table, now, managed, run=subprocess.run, sizes=None, own=()):
     pids = {p for members in big for p in members[:O.LOOK_PER_GROUP]} | set(hot) | set(companions(table, own, managed))
     pids |= {int(p) for p in agents} | O.users(table, top + list(hot))   # who is connected to a simulator tells its project (know-who AC-06)
     where = O.seen_where(state, table, [p for p in pids if p in table], run)
-    rows = O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot)
-    groups = O.group(rows)
+    rows = O.describe(table, top + [p for p in hot if p not in top], where, agents, managed, now, sizes=sizes, hot=hot,
+                      links=served_now)
+    groups = O.group(rows, now)
     state['who'] = dict(at=now, groups=groups, lines=[O.line(g, now) for g in groups])
     return groups, where
 
@@ -292,8 +342,10 @@ def big_sessions(home, now):
 
 def words(stopped, paused, users, sessions, hot=()):
     parts = []
-    if stopped:
-        parts.append('关掉了 {} 个没人管的陪跑后台（{}）'.format(len(stopped), '、'.join(sorted({s['name'] for s in stopped}))))
+    for kind, these in (('没人管的陪跑后台', [s for s in stopped if not s.get('server')]),
+                        ('{} 小时以上没人连的开发服务'.format(SERVER_IDLE_HOURS), [s for s in stopped if s.get('server')])):
+        if these:
+            parts.append('关掉了 {} 个{}（{}）'.format(len(these), kind, '、'.join(sorted({s['name'] for s in these}))))
     if paused:
         parts.append('{} 个重活同时在跑，已让 {} 个排队（{}），一个跑完再放下一个'.format(
             len(paused) + 1, len(paused), '、'.join(sorted({p['name'] for p in paused}))))
@@ -343,13 +395,17 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
     if table is not None:
         managed = E.launchd_jobs(run) if managed is None else managed
         if managed is not None:
+            clients = O.serving(run)
+            served_now = served(state, table, clients, now) if clients is not None else links(state, table)
             try:
-                groups, where = who(state, table, now, managed, run, sizes=sizes, own=[os.getpid()])
+                groups, where = who(state, table, now, managed, run, sizes=sizes, own=[os.getpid()], served_now=served_now)
             except (OSError, subprocess.SubprocessError):
                 groups, where = [], {}
             observe(state, [dict(pid=p, lstart=table[p]['lstart'], cpu_seconds=sum(table[c]['cpu'] for c in E.descendants(table, p) if c in table))
                             for p in companions(table, [os.getpid()], managed) if O.companion(table[p]['command']) in O.SERVERS], now)
             result['stopped'] = leftovers(state, table, kill, sleep, now, managed, where, bool(why), own=[os.getpid()])
+            if why and clients is not None:
+                result['stopped'] += idle_servers(state, table, kill, sleep, now, managed, own=[os.getpid()])
     if why and table is not None:
         result['paused'] = queue(state, table, kill, now, own=[os.getpid()], sizes=sizes)
         quiet = now - state.get('noticed_at', 0) >= NOTICE_GAP
