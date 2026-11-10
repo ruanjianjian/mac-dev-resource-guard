@@ -36,7 +36,12 @@ HANDED_HOURS = 24
 HANDED_WORDS = '交给资源看板自己的那一轮去挪（它有外接盘的权限，5 分钟内）'
 SESSION = 'session.json'      # which conversation this run is, so the panel can open it (emergency-agent AC-11)
 CONVERSATION = 'conversation.json'   # the one conversation every run of an agent continues (CH-07)
-TITLE = '资源看板 · 资源管理'
+TITLE = '资源看板 · 资源管理'   # the main agent's one conversation
+SUB_TITLE = '资源看板 · 告急 {}'   # one emergency's own conversation, archived when it is done
+DAILY_HOUR = 9                # the main agent looks over the day's runs once a day, from this hour on
+DAILY_GAP_HOURS = 20
+KEEP_RUNS = 48                # run folders kept: a busy day's runs, for the main agent to look over
+SWAP_DISK_GIB = 4             # swap this big is worth saying when the disk is short: it is on the same disk
 DIR_ENV = 'RESOURCE_GUARD_EMERGENCY_DIR'
 DEEPER_GIB = (10, 5)          # after the danger line, one more run at each of these (AC-01)
 WARN_MINUTES = 15             # memory still 「警告」 this long after the watch's own work: the agent comes (proactive-watch AC-05)
@@ -50,18 +55,35 @@ GIT_SECONDS = 15              # one git call while gathering the material; slowe
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
-ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop')
+ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop', 'path-delete')
+# What the agent reads beside the material: the raw facts its sandbox may not read itself (Codex's keeps ps, top
+# and simctl from it), taken by the background as the run starts.
+SNAPSHOTS = (('ps.txt', ['/bin/ps', '-axww', '-o', 'pid,ppid,user,rss,%cpu,etime,lstart,command']),
+             ('top.txt', ['/usr/bin/top', '-l', '1', '-o', 'mem', '-n', '80', '-stats', 'pid,ppid,command,mem,cmprs,cpu,time']),
+             ('simctl.json', ['/usr/bin/xcrun', 'simctl', 'list', 'devices', '-j']),
+             ('vm_stat.txt', ['/usr/bin/vm_stat']))
+READ_ONLY = ('ps', 'top', 'lsof', 'du', 'df', 'ls', 'stat', 'vm_stat', 'sysctl -n', 'memory_pressure', 'xcrun simctl list',
+             'footprint')
 MAYBE_SIM_DAYS = 1            # the disk still short and the agent listed nothing: shut-down simulators unused this long are asked about
 MAYBE_MAX = 8
 NEVER = O.NEVER
 RGS = Path.home() / '.local/bin/resource-guard-service'
 PROMPT = ('{when} 资源看板又叫你来了：{why}。用 mac-dev-resource-guard 这个 skill 处理：先运行 `{rgs} emergency show`'
           '（这次的材料在 {folder}），照里面的 steps 做。这次是资源看板自己把你叫来的，用户不在场；全程用简体中文。')
-FIRST = ('这段对话是资源看板专用的：以后每次告急都接着这里叫你，前面做过什么、用户回过什么、学到了什么都在上文，'
-         '你自己记着用。\n\n')
-AGAIN = '\n\n前面几次的处理都在上文：哪些上次就在、哪些是新的，接着用。'
+# 11-10: the one conversation every run continued had, 40 runs on, the agent copying its own old answers (「先说明
+# 上轮漏项」 for 18 hours) and handing back no decision while the disk ran out. Now a main agent keeps the one
+# conversation and looks over the runs once a day; each emergency goes to a sub-agent in a conversation of its own.
+FIRST = ('这段对话是资源看板的主 agent 专用的：每天叫你来一次，看各轮告急处理（每轮交给一个一次性的子 agent）做得对不对，'
+         '把以后用得上的记成经验。前几天看过什么都在上文，你自己记着用。\n\n')
+AGAIN = '\n\n前几天看过的都在上文，接着用。'
+SUB = ('这次告急交给你一次处理完：这段对话只用这一次，做完就归档。用户以前的决定和学到的经验在材料的 decisions、'
+       'lessons 里，照着用。\n\n')
+DAILY_PROMPT = ('{when} 资源看板每天叫你来一次，你是它的主 agent。用 mac-dev-resource-guard 这个 skill：先运行 `{rgs} emergency show`'
+                '（这次的材料在 {folder}），照里面的 steps 做。用户不在场；全程用简体中文。')
+IDLE = ('上次一个决定都没交回，后台什么也没做，所以还这么紧。这次别照抄上次的结论：材料里每个大头，要么交回决定'
+        '（stop、move、ask），要么在 done --summary 里写清它为什么不能动、要谁做什么。\n\n')
 LAST = '上次（{when}）的回执：{receipt}。{judged}\n\n'                       # agent-investigates AC-04, AC-06
-STREAK = '这是连续第 {n} 次因为{why}叫你：上次处理完，后台看还紧。先说清上次漏了什么，再处理。\n\n'   # AC-05
+STREAK = '这是连续第 {n} 次因为{why}叫你：上次处理完，后台看还紧。\n\n'   # AC-05
 NEW = '跟上次（{when}）比，这次新出现的：{what}。先看这些。\n\n'                         # AC-07
 STREAK_HOURS = 12
 WHY = {'disk': '磁盘快满了', 'memory': '内存吃紧', 'asked': '用户让你现在处理一次'}
@@ -69,28 +91,45 @@ QUEUE_POLL_SECONDS = 10       # how often to look whether the Codex App finished
 CARRY = 'RG-DECISION '        # a decision the agent could not write comes back in its reply after this (CH-08)
 UNWRITABLE = ('这一轮写不进去（只读）。不要申请权限：把下面这一行原样放进你最后的回复，资源看板会照它处理。\n')
 STEPS = (
-    '目标是这台 Mac 不卡：内置盘回到目标以上，内存不再吃紧。计划里的规则是起点，不是边界：规则没碰到的大头，你来判断。',
-    '先回答「为什么紧」，再动手：前几名是谁、各属于哪个项目、谁起的、该不该还在跑。证据在 who（谁占着内存和 CPU，'
-    '主人还在不在动）、trend（最近 60 分钟的趋势）、watch_did（后台这次自己已经做了什么）里；不够就自己用只读命令查'
-    '（ps、top、lsof、vm_stat、du）。别只看 orphans。',
-    '再看 decisions 和 lessons：decisions 是用户以前确认过、忽略过、在对话里说过的，lessons 是以前学到的规则，'
-    '都是这台 Mac 的偏好和经验。照着它出单；用户说过别动的，不要列。',
-    '能直接关的：companions 里 may_stop 为真的陪跑后台（主人走了，或起它的 agent 6 小时没动），和 orphans 里没人管的残留'
-    '后台（看它开在哪个任务里、PR 合没合、改动推没推）。判断没人用了，就 `emergency stop <pid> --why "依据"`。',
-    '主人还在、但你判断该关的（比如开了几天还占满一个核的流），列给用户点头：`emergency ask process-stop:<pid> --why "依据"`。'
-    'App 本身、数据库、容器、调试器、模拟器本身都不碰。',
-    '闲置任务挪到外接盘不丢东西：判断短期不会再用、改动都推了的，`emergency move <路径> --why "依据"`。',
-    '会丢东西的（删模拟器、关模拟器、收尾任务）只能列给用户：`emergency ask <kind>:<id> --why "依据"`，'
-    'kind 是 simulator-delete、simulator-shutdown 或 task-delete。依据写证据，比如「PR #12 已合入，改动都推了，3 天没开」。',
-    '能直接做的做完，内置盘还到不了目标，就算没有安全范围内能做的，也要把可能要清的大头列给用户点头'
-    '（关机没人用的模拟器、改动都推了的任务），不要一项都不列。「开着的模拟器不关」只管开着的，关机的照样可以列。'
-    '用户点了头就记进 decisions，以后照着做；一项都不列，后台会把关机没人用的模拟器补列进去。',
+    # 11-10: the steps had grown into a rulebook (what to look at, what never to touch), and Codex's sandbox kept
+    # ps and simctl from it; for 18 hours it only restated old conclusions. Now: the goal, the facts, what it can
+    # hand back, and the floor the background keeps. How to find the cause is the model's to work out.
+    '目标只有一个：这台 Mac 不卡、不爆盘——内置盘回到目标以上，内存不再吃紧。为什么紧、先动哪个，你自己判断：'
+    '每台 Mac、每一次的原因都不一样，别套以前的结论，从这次的现场重新看。',
+    '现场：材料（emergency show）是后台整理的线索；同一个目录里还有原始数据：ps.txt（全部进程，含父进程、内存、CPU、'
+    '启动时间、完整命令）、top.txt（按内存排，含压缩内存）、simctl.json（全部模拟器）、vm_stat.txt。磁盘用 du、ls、'
+    'lsof 这些只读命令自己查，哪里都可以看；交换文件在 /System/Volumes/VM，内存一紧它会连磁盘一起吃掉。',
+    'decisions 是用户以前确认过、忽略过、在对话里说过的，lessons 是学到的经验：照着用；用户说过别动的不要列。',
+    '你能交回的决定，后台会在你结束后逐项复核再做：`emergency stop <pid> --why "依据"` 关掉没人用的后台（orphans，'
+    '或 companions 里 may_stop 的）；`emergency move <任务路径> --why` 把闲置任务整个挪到外接盘（不丢东西）；'
+    '`emergency ask <kind>:<id> --why` 列给用户点头，kind 是 simulator-delete、simulator-shutdown、task-delete、'
+    'process-stop（主人还在的进程）、path-delete（你查到的任何大目录或大文件：缓存、日志、旧构建、容器数据……'
+    '写清是什么、为什么能删、删了会怎样）；`emergency rule <规则> --decision <做法> --why` 改计划；'
+    '`emergency lesson` 记经验。',
+    '还紧就一定要交回决定：能做的做，不能做的列给用户点头；什么都不交回，这一轮就白来了。确实没有能动的，'
+    '在 done --summary 里逐个写清每个大头为什么不能动、要谁做什么。',
+    '底线，后台会拒绝：正在用的、有没提交或没推送改动的、被用户保护的不动；App 本身、数据库、容器、调试器不关；'
+    '会丢东西的只能列给用户。',
     '学到了以后也用得上的经验，记成一条规则：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；'
     '改的是已有的那条，加 `--replaces <id>`。这一次查到了什么、做了什么写进 done --summary，不要记成经验。'
     'old_notes 是以前每次的笔记，不是规则：里面以后还用得上的，也这样改写成规则（带 --replaces）。',
     '说「恢复了」之前看 trend 的最近 10 分钟：一分钟正常不算恢复。后台收尾时也会自己再看一次。',
-    '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。'
-    '你的命令只记下决定，后台会在你结束后逐项复核安全底线再做：正在用的、有没推送改动的、被保护的，一律不动。',
+    '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。',
+    '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
+)
+
+
+DAILY_STEPS = (
+    '你是资源看板的主 agent，每天来一次。rounds 是上次以来每轮告急处理（每轮是一个一次性的子 agent）的回执，'
+    'user_decisions 是用户在看板上点过的、在对话里说过的，plan_changes 是计划怎么变了。',
+    '先判断子 agent 有没有照预期做事：还紧的轮次交回决定了没有（handed）；有没有一轮轮照抄同样的话；'
+    '说「等后台复核」「排队」的事后台真做了没有（看 done）。',
+    '用户反复同意、从没忽略的同一类事，后台会自己改成「你同意过，直接做」（plan_changes 里 by 是 learned）；'
+    '看它改得对不对，不对就写进 --need 告诉用户。',
+    '以后用得上的写成经验：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；已有的那条不对，'
+    '加 `--replaces <id>` 改写。old_notes 是以前的流水笔记，不是规则：有用的改写成规则（带 --replaces）。',
+    '最后 `emergency done --cause "这段时间为什么紧（或不紧）" --summary "子 agent 做得怎样、记了什么经验"`。'
+    '只有要用户拍板，或子 agent 明显没干活时才写 --need；没问题就不写，不打扰用户。',
     '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
 )
 
@@ -300,9 +339,9 @@ def note_session(folder, **session):
 
 
 def conversation(home, agent):
-    """The conversation every run of this agent continues (CH-07): one place for its context and memory, not one
-    more 「告急处理」 in the list each time. The ones from before ran inside a run's own folder, where the agent
-    would read that old run's material, so they are not taken over."""
+    """The main agent's one conversation (CH-07, 11-10): its context and memory, not one more 「告急处理」 in the
+    list each time. The ones from before ran inside a run's own folder, where the agent would read that old run's
+    material, so they are not taken over. One without `since` is the one every run continued before 11-10."""
     try:
         return json.loads((state_root(home) / RUNS / CONVERSATION).read_text()).get(agent)
     except (OSError, ValueError):
@@ -310,12 +349,18 @@ def conversation(home, agent):
 
 
 def keep_conversation(home, agent, **ids):
+    """Remember the main agent's conversation; with no ids, forget it."""
     path = state_root(home) / RUNS / CONVERSATION
     try:
         known = json.loads(path.read_text())
     except (OSError, ValueError):
         known = {}
-    known[agent] = dict(ids, agent=agent, at=time.time())
+    if not ids:
+        known.pop(agent, None)
+    else:
+        old = known.get(agent) or {}
+        same = old.get('since') and all(old.get(k) == v for k, v in ids.items() if k in ('thread', 'session'))
+        known[agent] = dict(ids, agent=agent, at=time.time(), since=old['since'] if same else time.time())
     atomic_json(path, known)
 
 
@@ -326,20 +371,23 @@ def conversation_root(home):
     return root
 
 
-def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen):
-    """Claude Code headless, allowed only the emergency commands and reading (AC-04). Every run continues the one
-    session (CH-07); its id is chosen up front, so the panel can open it in Terminal afterwards (AC-11)."""
+def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen, main=False):
+    """Claude Code headless, allowed only the emergency commands and reading (AC-04). An emergency gets a session
+    of its own; the main agent (`main`) continues its one session (CH-07). The id is chosen up front, so the panel
+    can open it in Terminal afterwards (AC-11)."""
     binary = claude_binary(home)
     cwd = conversation_root(home)
-    known = conversation(home, 'claude')
-    if known and any((Path(home) / '.claude/projects').glob('*/{}.jsonl'.format(known['session']))):
+    known = conversation(home, 'claude') if main else None
+    if known and known.get('since') and any((Path(home) / '.claude/projects').glob('*/{}.jsonl'.format(known['session']))):
         session, words, start = known['session'], prompt + AGAIN, '--resume'
-    else:   # first run, or the user deleted the session
-        session, words, start = str(uuid.uuid4()), FIRST + prompt, '--session-id'
-    keep_conversation(home, 'claude', session=session, binary=str(binary), cwd=str(cwd))
+    else:   # an emergency, the main agent's first run, or the user deleted its session
+        session, words, start = str(uuid.uuid4()), (FIRST if main else SUB) + prompt, '--session-id'
+    if main:
+        keep_conversation(home, 'claude', session=session, binary=str(binary), cwd=str(cwd))
     note_session(folder, agent='claude', session=session, binary=str(binary), cwd=str(cwd))
     command = [str(binary), '-p', words, start, session, '--output-format', 'json', '--permission-mode', 'dontAsk',
-               '--allowedTools', 'Bash({} emergency:*)'.format(RGS), 'Read', 'Skill', '--max-turns', '60']
+               '--allowedTools', 'Bash({} emergency:*)'.format(RGS), 'Read', 'Skill', 'Glob', 'Grep',
+               *['Bash({}:*)'.format(c) for c in READ_ONLY], '--max-turns', '80']
     process = popen(command, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, start_new_session=True)
     try:
@@ -371,9 +419,10 @@ def said_in(turn):
     return '\n'.join(item.get('text') or '' for item in (turn or {}).get('items') or [] if item.get('type') == 'agentMessage')
 
 
-def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=subprocess.run):
-    """The one Codex thread the user can open in the Codex App (AC-04, CH-07), sandboxed to the runs' folder
-    (CH-02). Once the user has opened it, the App owns it until it quits: then the App runs the turn (CH-08)."""
+def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=subprocess.run, main=False):
+    """An emergency gets a Codex thread of its own, archived once its turn is done, so nothing piles up in the
+    App (11-10). The main agent (`main`) keeps the one thread the user can open (AC-04, CH-07). Both are sandboxed
+    to the runs' folder (CH-02); once the user has opened the main one, the App owns it until it quits (CH-08)."""
     cwd = conversation_root(home)
     process = popen([str(codex_binary(home)), 'app-server'], cwd=str(cwd), env=env, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
@@ -415,6 +464,10 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
                     return turn
         return None
 
+    def archive(thread):
+        asked = send('thread/archive', dict(threadId=thread))
+        wait(lambda m: m.get('id') == asked)   # an error here only means it stays in the list
+
     thread = None
     try:
         asked = send('initialize', dict(clientInfo=dict(name='resource-guard', title='资源看板', version='1'),
@@ -423,7 +476,12 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
         send('initialized', {}, notify=True)
         words = prompt + AGAIN
         known = conversation(home, 'codex')
-        if known:
+        if known and not known.get('since'):
+            # The one thread every run continued before 11-10: archived, and the main agent starts afresh.
+            archive(known['thread'])
+            keep_conversation(home, 'codex')
+            known = None
+        if main and known:
             asked = send('thread/resume', dict(threadId=known['thread'], cwd=str(cwd), approvalPolicy='never',
                                                sandbox='workspace-write', excludeTurns=True))
             resumed = wait(lambda m: m.get('id') == asked)
@@ -440,8 +498,8 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
                                     said=said_in(turn))
                     if late.wait(QUEUE_POLL_SECONDS):
                         raise TimeoutError
-        if thread is None:   # first run, or the user deleted the thread
-            words = FIRST + prompt
+        if thread is None:   # an emergency, the main agent's first run, or the user deleted its thread
+            words = (FIRST if main else SUB) + prompt
             params = dict(cwd=str(cwd), approvalPolicy='never', sandbox='workspace-write', ephemeral=False, threadSource='user')
             asked = send('thread/start', params)
             started = wait(lambda m: m.get('id') == asked)
@@ -453,13 +511,17 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
             if 'error' in started:
                 return dict(agent='codex', status='error', reply=str(started['error'])[:2000])
             thread = started['result']['thread']['id']
-        keep_conversation(home, 'codex', thread=thread)
+        if main:
+            keep_conversation(home, 'codex', thread=thread)
         note_session(folder, agent='codex', thread=thread)
-        send('thread/name/set', dict(threadId=thread, name=TITLE))
+        send('thread/name/set', dict(threadId=thread, name=TITLE if main else SUB_TITLE.format(time.strftime('%m-%d %H:%M'))))
         asked = send('turn/start', dict(threadId=thread, input=[dict(type='text', text=words, text_elements=[])]))
         done = wait(lambda m: m.get('method') == 'turn/completed' and (m.get('params') or {}).get('threadId') == thread)
+        said = said_in(turn_of(thread, words))
+        if not main:
+            archive(thread)
         return dict(agent='codex', status='done', thread=thread, turn=((done.get('params') or {}).get('turn') or {}).get('status'),
-                    said=said_in(turn_of(thread, words)))
+                    said=said)
     except TimeoutError:
         return dict(agent='codex', status='timeout', thread=thread)
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -837,7 +899,7 @@ def watch_did(seen, now):
                 queued=[q['name'] for q in seen.get('paused', [])])
 
 
-def judge(home, reason, settings, now=None, free=None, samples=None):
+def judge(home, reason, settings, now=None, free=None, samples=None, swap=None):
     """agent-investigates AC-06: the background's own look when the agent is done, by the watch's measure."""
     now = time.time() if now is None else now
     found = []
@@ -853,7 +915,12 @@ def judge(home, reason, settings, now=None, free=None, samples=None):
     if reason in ('disk', 'asked'):
         free = shutil.disk_usage(str(settings.volume)).free if free is None else free
         short = settings.warning_free_gib - free / GIB   # the user's target (`rgs target`); target_free_gib is where tidying stops
-        found.append((short > 0, '后台看：内置盘还剩 {:.0f} GB，{}'.format(free / GIB, '比目标少 {:.0f} GB'.format(short) if short > 0 else '到目标了')))
+        words = '后台看：内置盘还剩 {:.0f} GB，{}'.format(free / GIB, '比目标少 {:.0f} GB'.format(short) if short > 0 else '到目标了')
+        swap = swap_usage() if swap is None else swap
+        if short > 0 and swap and swap['total_gib'] >= SWAP_DISK_GIB:
+            # 11-10: 24 GB of the disk was swap, which the notices never said; it comes back once memory eases.
+            words += '（其中 {:.0f} GB 是交换文件：内存不够时系统写在磁盘上的，内存松下来会还回来）'.format(swap['total_gib'])
+        found.append((short > 0, words))
     if reason == 'asked' and len(found) == 2 and not found[1][0]:
         found = found[:1]   # asked by the user, disk fine: say only how memory is
     return dict(tight=any(t for t, _ in found), words='；'.join(w for _, w in found))
@@ -861,8 +928,8 @@ def judge(home, reason, settings, now=None, free=None, samples=None):
 
 def receipt(made, carried, result):
     """agent-investigates AC-04: what came back, what was written down, what was done and what was skipped."""
-    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask')]
-    ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘')]
+    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask', 'rule')]
+    ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘', '已改')]
     later = [d for d in result['done'] if d['result'] == HANDED_WORDS]
     skipped = [d for d in result['done'] if d not in ok and d not in later]
     parts = []
@@ -920,7 +987,7 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
     folder = Path(folder)
     found = material(folder)
     entry = dict(at=time.time(), action=action)
-    if action in ('stop', 'move', 'ask') and not why.strip():
+    if action in ('stop', 'move', 'ask', 'rule') and not why.strip():
         raise ValueError('要写依据：--why "…"')
     if action == 'stop':
         orphan = next((o for o in found['orphans'] if str(o['pid']) == str(target)), None)
@@ -943,6 +1010,8 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             raise ValueError('只能列这几类：' + '、'.join(ASK_KINDS))
         if kind == 'process-stop':
             entry.update(asked_process(found, key), id=target, kind=kind, why=why)
+        elif kind == 'path-delete':
+            entry.update(asked_path(key), id='path-delete:' + str(Path(key).expanduser()), kind=kind, why=why)
         elif kind.startswith('simulator'):
             sim = next((s for s in found['simulators'] if s['id'] == key), None)
             if sim is None:
@@ -955,6 +1024,13 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
                 raise ValueError('告急材料里没有这个任务：' + key)
             entry.update(id=target, kind=kind, title=Path(key).name + ('（在外接盘上）' if task['on_drive'] else ''),
                          bytes=int((task['gib'] or 0) * GIB), why=why)
+    elif action == 'rule':
+        spec = agent_plan.RULES.get(str(target))
+        if spec is None:
+            raise ValueError('没有这条规则：{}；可选：{}'.format(target, '、'.join(agent_plan.RULES)))
+        if note not in spec['actions']:
+            raise ValueError('「{}」只能设成：{}（用 --decision 写）'.format(spec['title'], '、'.join(spec['actions'])))
+        entry.update(rule=str(target), to=note, why=why)
     elif action == 'lesson':
         when, then, replaces = when.strip(), then.strip(), replaces.strip()
         if not (when and then):
@@ -981,6 +1057,21 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
     except OSError:   # the Codex App ran this turn read-only (CH-08)
         raise ValueError(UNWRITABLE + CARRY + line)
     return entry
+
+
+def asked_path(key, home=None):
+    """path-delete (11-10): anything big the agent found, for the user to say yes to. Only inside the home folder
+    and never the home folder's own top level, never a code repository; how big, measured now."""
+    home = Path.home() if home is None else Path(home)
+    path = Path(os.path.abspath(os.path.expanduser(key)))
+    inside = path.relative_to(home) if path.is_relative_to(home) else None
+    if inside is None or len(inside.parts) < 2:
+        raise ValueError('path-delete 只能列主目录里、至少两层深的路径（{} 不行）'.format(path))
+    if not path.exists() and not path.is_symlink():
+        raise ValueError('不存在：{}'.format(path))
+    if (path / '.git').exists():
+        raise ValueError('{} 是代码仓库：任务用 task-delete，挪走用 move'.format(path))
+    return dict(title='{}（在 {}）'.format(path.name, path.parent), bytes=T.size(path) or 0, path=str(path))
 
 
 def asked_process(found, key, table=None):
@@ -1288,6 +1379,12 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
             hand_over(home, entry, now)
             skipped = HANDED_WORDS
         done.append(dict(entry, result=skipped or '已挪到外接盘'))
+    for entry in (e for e in made if e['action'] == 'rule'):
+        try:
+            agent_plan.set_rule(home, entry['rule'], entry['to'], by='agent', why=entry['why'])
+            done.append(dict(entry, result='已改'))
+        except (OSError, ValueError) as error:
+            done.append(dict(entry, result=str(error).split('\n')[0][:120]))
     asks = add_asks(home, settle_asks(home, [e for e in made if e['action'] == 'ask'], table), now)
     learned = []
     for entry in (e for e in made if e['action'] == 'lesson' and e.get('when')):
@@ -1353,25 +1450,29 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     """Hand the agent its material, let it decide, then do what passes the floor (AC-04~10)."""
     now = time.time() if now is None else now
     folder = Path(folder)
+    main = reason == 'daily'
     if not (folder / MATERIAL).is_file():
-        atomic_json(folder / MATERIAL, collector(home, cfg, settings, reason, now))
+        atomic_json(folder / MATERIAL, daily_material(home, settings, now) if main else collector(home, cfg, settings, reason, now))
+        if not main:
+            snapshots(folder, popen)
     env = dict(os.environ, **{DIR_ENV: str(folder)})
     before = load_state(home)
     streak = (before.get('run') or {}).get('streak', 1)
-    prompt = PROMPT.format(when=time.strftime('%m-%d %H:%M', time.localtime(now)), why=WHY.get(reason, reason),
-                           rgs=RGS, folder=folder)
+    when = time.strftime('%m-%d %H:%M', time.localtime(now))
+    prompt = (DAILY_PROMPT.format(when=when, rgs=RGS, folder=folder) if main else
+              PROMPT.format(when=when, why=WHY.get(reason, reason), rgs=RGS, folder=folder))
     last = before.get('last') or {}
     run_now = before.get('run') or {}
-    if run_now.get('new') and run_now.get('looked_at'):
+    if not main and run_now.get('new') and run_now.get('looked_at'):
         prompt = NEW.format(when=time.strftime('%H:%M', time.localtime(run_now['looked_at'])), what='；'.join(run_now['new'])) + prompt
-    if streak >= 2:
-        prompt = STREAK.format(n=streak, why=WHY.get(reason, reason)) + prompt
-    if last.get('receipt'):
+    if not main and streak >= 2:
+        prompt = STREAK.format(n=streak, why=WHY.get(reason, reason)) + (IDLE if last.get('handed') == 0 else '') + prompt
+    if not main and last.get('receipt'):
         prompt = LAST.format(when=time.strftime('%m-%d %H:%M', time.localtime(last['at'])), receipt=last['receipt'],
                              judged=last.get('judged', '')) + prompt
     launcher = run_claude if runner == 'claude' else run_codex
     try:
-        agent_result = launcher(home, folder, prompt, env, RUN_MINUTES * 60, popen=popen)
+        agent_result = launcher(home, folder, prompt, env, RUN_MINUTES * 60, popen=popen, **({'main': True} if main else {}))
     except Exception as error:   # whatever went wrong starting it, what it already decided is still handled
         agent_result = dict(agent=runner, status='error', reply=str(error) or type(error).__name__)
     carried = carry(folder, agent_result.pop('said', ''))
@@ -1384,6 +1485,8 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
             result['asks'] = [dict(id=a['id'], title=a['title'], bytes=a['bytes'])
                               for a in maybe_asks(home, folder, settings, time.time())]
     result['receipt'] = receipt(decisions(folder), carried, result)
+    if main:
+        return _after_daily(home, folder, reason, agent_result, result)
     result['judged'] = judger(home, reason, settings)
     atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=streak, **result))
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
@@ -1405,10 +1508,88 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     state['last'] = dict(at=time.time(), reason=reason, folder=str(folder), agent=agent_result.get('status'),
                          runner=runner, summary=result['summary'], brief=brief, asks=len(result['asks']), talk=talk,
                          receipt=result['receipt']['words'], judged=result['judged']['words'], tight=result['judged']['tight'],
-                         streak=streak, cause=result['cause'], need=result['need'])
+                         streak=streak, cause=result['cause'], need=result['need'],
+                         handed=result['receipt']['handed'] + result['receipt']['learned'])
     save_state(home, state)
     ask_tier.launch_app()
     return dict(agent=agent_result, **result)
+
+
+def snapshots(folder, popen=subprocess.Popen):
+    """The raw facts beside the material (SNAPSHOTS); one that cannot be taken is left out."""
+    if popen is not subprocess.Popen:
+        return   # a test's stand-in for the agent: no real readings
+    for name, command in SNAPSHOTS:
+        try:
+            out = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            if out.returncode == 0 and out.stdout:
+                # A whole command line is enough to tell what it is; past 500 characters it is mostly arguments.
+                (Path(folder) / name).write_text('\n'.join(line[:500] for line in out.stdout.splitlines()) + '\n')
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+
+def _after_daily(home, folder, reason, agent_result, result):
+    """The main agent's look is said only when the user has something to decide (it found a problem)."""
+    result['judged'] = dict(tight=False, words='')
+    atomic_json(Path(folder) / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=1, **result))
+    if result['need']:
+        agent_plan.notice(home, '资源看板的主 agent 看了这一天', ('要你做：' + result['need'] + '。' + result['summary'])[:300])
+    state = load_state(home)
+    state.pop('run', None)
+    state['daily'] = dict(at=time.time(), folder=str(folder), agent=agent_result.get('status'), summary=result['summary'],
+                          need=result['need'], learned=len(result['learned']))
+    save_state(home, state)
+    return dict(agent=agent_result, **result)
+
+
+def past_rounds(home, since=0):
+    """Each emergency run's receipt since `since`, for the main agent's daily look."""
+    found = []
+    for folder in sorted((state_root(home) / RUNS).glob('2*')):
+        try:
+            got = json.loads((folder / RESULT).read_text())
+        except (OSError, ValueError):
+            continue
+        at = got.get('at')
+        if got.get('reason') == 'daily' or not isinstance(at, (int, float)) or at < since:
+            continue
+        told = got.get('receipt') or {}
+        found.append(dict(when=time.strftime('%m-%d %H:%M', time.localtime(at)), reason=got.get('reason'),
+                          agent=(got.get('agent') or {}).get('status'), handed=told.get('handed', 0), learned=told.get('learned', 0),
+                          done=[dict(what=d.get('pid') or d.get('path'), result=d.get('result')) for d in got.get('done') or []][:8],
+                          asks=len(got.get('asks') or []), summary=(got.get('summary') or '')[:240],
+                          need=(got.get('need') or '')[:160], judged=(got.get('judged') or {}).get('words', '')))
+    return found
+
+
+def daily_material(home, settings, now):
+    """What the main agent looks over: the runs since its last look, the user's decisions and the plan's changes."""
+    since = (load_state(home).get('daily') or {}).get('at') or now - 86400
+    free = shutil.disk_usage(str(settings.volume)).free
+    return dict(
+        schema=1, at=now, reason='daily', rgs=str(RGS), why='每天一次：看各轮告急处理做得对不对', since=since,
+        rounds=past_rounds(home, since),
+        user_decisions=[m for m in agent_plan.memories(home) if m.get('kind') == 'decision' and (m.get('at') or 0) >= since][-60:],
+        plan_changes=[c for c in agent_plan.changes(home) if (c.get('at') or 0) >= since][-30:],
+        disk=dict(free_gib=round(free / GIB, 1), target_gib=settings.target_free_gib, danger_gib=settings.critical_free_gib),
+        memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
+        decisions=[m for m in agent_plan.memories(home) if m.get('kind') == 'decision'][-40:],
+        lessons=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then']) for m in agent_plan.lessons(home)],
+        old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
+        rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
+        orphans=[], companions=[], tasks=[], simulators=[], waiting=[], steps=list(DAILY_STEPS))
+
+
+def daily_due(home, state, now):
+    """The main agent's daily look (11-10): once a day from DAILY_HOUR, and only when there are runs or decisions of
+    the user's since its last look."""
+    last = state.get('daily_fired') or 0
+    if running(state, now) or now - last < DAILY_GAP_HOURS * 3600 or time.localtime(now).tm_hour < DAILY_HOUR:
+        return False
+    since = (state.get('daily') or {}).get('at') or now - 86400
+    return bool(past_rounds(home, since)) or any((m.get('at') or 0) >= since for m in agent_plan.memories(home)
+                                                 if m.get('kind') == 'decision')
 
 
 def new_folder(home, now):
@@ -1417,7 +1598,7 @@ def new_folder(home, now):
     return folder
 
 
-def prune_runs(home, keep=20):
+def prune_runs(home, keep=KEEP_RUNS):
     runs = sorted(p for p in (state_root(home) / RUNS).glob('*') if p.is_dir())
     for old in runs[:-keep]:
         shutil.rmtree(old, ignore_errors=True)
@@ -1451,12 +1632,20 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
         reason = None if running(state, now) else 'asked'
     for stale in ('starts', 'capped', 'capped_told'):    # left by builds that counted runs a day
         state.pop(stale, None)
+    if reason is None and daily_due(home, state, now):
+        reason = 'daily'
     if reason is None:
         save_state(home, state)
         return None
     prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired', 'looked')}
-    mark_fired(state, reason, free, critical, now)
+    if reason == 'daily':
+        state['daily_fired'] = now
+    else:
+        mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
+    if not ready and reason == 'daily':
+        save_state(home, state)   # nobody to look: tried again tomorrow
+        return None
     if not ready:
         # Nobody can start by itself: hand it to the user instead (the disk drop already has its own notice),
         # and say once a day what is missing, e.g. one sign-in to Claude Code (AC-12).
@@ -1477,6 +1666,10 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     prune_runs(home)
     pid = starter(reason, folder, ready[0])
     last = state.get('last') or {}
+    if reason == 'daily':
+        state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev, streak=1)
+        save_state(home, state)
+        return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
     again = last.get('tight') and last.get('reason') == reason and now - last.get('at', 0) <= STREAK_HOURS * 3600
     state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev,
                         streak=last.get('streak', 1) + 1 if again else 1, new=news(state.get('looked'), current)[:5],

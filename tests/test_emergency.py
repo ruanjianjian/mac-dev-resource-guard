@@ -134,13 +134,19 @@ class RunnerTest(AskFixture):
         command = seen['command']
         self.assertEqual(command[command.index('--permission-mode') + 1], 'dontAsk')
         allowed = command[command.index('--allowedTools') + 1:command.index('--max-turns')]
-        self.assertEqual(allowed, ['Bash({} emergency:*)'.format(E.RGS), 'Read', 'Skill'])
+        # 11-10: it may look at anything, read-only; it changes things only by handing back decisions.
+        self.assertEqual(allowed, ['Bash({} emergency:*)'.format(E.RGS), 'Read', 'Skill', 'Glob', 'Grep',
+                                   *['Bash({}:*)'.format(c) for c in E.READ_ONLY]])
+        self.assertIn('Bash(ps:*)', allowed)
+        commands = [a[5:].split()[0] for a in allowed if a.startswith('Bash(')]
+        self.assertFalse(set(commands) & {'rm', 'kill', 'find', 'git', 'mv', 'simctl'})
         root = str(E.state_root(self.home) / E.RUNS)
         self.assertEqual(seen['cwd'], root)   # not the run's folder: those get pruned, the conversation stays
         session = json.loads((self.folder / E.SESSION).read_text())   # chosen up front: openable afterwards (AC-11)
         self.assertEqual(command[command.index('--session-id') + 1], session['session'])
         self.assertEqual((session['agent'], session['cwd']), ('claude', root))
-        self.assertTrue(command[command.index('-p') + 1].startswith(E.FIRST))
+        self.assertTrue(command[command.index('-p') + 1].startswith(E.SUB))   # an emergency: a sub-agent of its own
+        self.assertIsNone(E.conversation(self.home, 'claude'))
 
     def test_every_claude_run_continues_the_one_session(self):
         commands = []
@@ -152,18 +158,22 @@ class RunnerTest(AskFixture):
             def communicate(self, timeout=None):
                 return json.dumps({'is_error': False, 'result': 'ok', 'session_id': 's'}) + '\n', None
 
-        E.run_claude(self.home, self.folder, 'p1', {}, 60, popen=Process)
+        E.run_claude(self.home, self.folder, 'p1', {}, 60, popen=Process, main=True)
         first = commands[-1][commands[-1].index('--session-id') + 1]
+        self.assertTrue(commands[-1][commands[-1].index('-p') + 1].startswith(E.FIRST))
         transcript = self.home / '.claude/projects/-runs' / (first + '.jsonl')
         transcript.parent.mkdir(parents=True); transcript.write_text('{}')
-        E.run_claude(self.home, self.folder, 'p2', {}, 60, popen=Process)
+        E.run_claude(self.home, self.folder, 'e1', {}, 60, popen=Process)   # an emergency in between: its own session
+        self.assertNotEqual(commands[-1][commands[-1].index('--session-id') + 1], first)
+        self.assertNotIn('--resume', commands[-1])
+        E.run_claude(self.home, self.folder, 'p2', {}, 60, popen=Process, main=True)
         again = commands[-1]
         self.assertEqual(again[again.index('--resume') + 1], first)
         self.assertNotIn('--session-id', again)
         self.assertEqual(again[again.index('-p') + 1], 'p2' + E.AGAIN)
         self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['session'], first)
         transcript.unlink()   # the user deleted it: a new one, not a run that cannot start
-        E.run_claude(self.home, self.folder, 'p3', {}, 60, popen=Process)
+        E.run_claude(self.home, self.folder, 'p3', {}, 60, popen=Process, main=True)
         self.assertNotEqual(commands[-1][commands[-1].index('--session-id') + 1], first)
 
     def test_codex_starts_a_visible_thread_in_the_run_folder(self):
@@ -204,15 +214,20 @@ class RunnerTest(AskFixture):
 
         result = E.run_codex(self.home, self.folder, 'emergency show 那句', {}, 60, popen=Process)
         self.assertEqual(result, dict(agent='codex', status='done', thread='t1', turn='completed', said=''))
+        self.assertIsNone(E.conversation(self.home, 'codex'))   # an emergency's thread is not the main agent's
         self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 't1')
         self.assertFalse(any(m.get('method') == 'thread/resume' for m in sent))
         start = next(m for m in sent if m.get('method') == 'thread/start')['params']
         self.assertEqual(start, dict(cwd=str(E.state_root(self.home) / E.RUNS), approvalPolicy='never',
                                      sandbox='workspace-write', ephemeral=False, threadSource='user'))
         named = next(m for m in sent if m.get('method') == 'thread/name/set')['params']
-        self.assertEqual(named['name'], '资源看板 · 资源管理')
+        self.assertTrue(named['name'].startswith('资源看板 · 告急 '))
         turn = next(m for m in sent if m.get('method') == 'turn/start')['params']
-        self.assertEqual(turn['input'][0]['text'], E.FIRST + 'emergency show 那句')
+        self.assertEqual(turn['input'][0]['text'], E.SUB + 'emergency show 那句')
+        # 11-10: done, it is archived, so the App's list does not fill with one thread per emergency.
+        self.assertEqual([m['params'] for m in sent if m.get('method') == 'thread/archive'], [dict(threadId='t1')])
+        self.assertGreater(sent.index(next(m for m in sent if m.get('method') == 'thread/archive')), sent.index(next(
+            m for m in sent if m.get('method') == 'turn/start')))
         refused = next(m for m in sent if m.get('id') == 99)
         self.assertIn('error', refused)   # the server's question is never approved
 
@@ -277,16 +292,21 @@ class RunnerTest(AskFixture):
 
         # The threads from before ran inside an old run's folder: not taken over, one new thread is started.
         E.note_session(E.new_folder(self.home, NOW - 86400), agent='codex', thread='old')
-        go = lambda: E.run_codex(self.home, self.folder, 'p', {E.DIR_ENV: str(self.folder)}, 60, popen=Process, run=run)
+        # The one every run continued before 11-10 (no `since`): archived, not continued.
+        path = E.state_root(self.home) / E.RUNS / E.CONVERSATION
+        path.write_text(json.dumps({'codex': {'thread': 'every-run', 'agent': 'codex', 'at': NOW - 3600}}))
+        go = lambda: E.run_codex(self.home, self.folder, 'p', {E.DIR_ENV: str(self.folder)}, 60, popen=Process, run=run, main=True)
         self.assertEqual(go()['thread'], 'one')
         self.assertFalse(any(m.get('method') == 'thread/resume' for m in sent))
+        self.assertEqual([m['params']['threadId'] for m in sent if m.get('method') == 'thread/archive'], ['every-run'])
+        self.assertEqual(next(m for m in sent if m.get('method') == 'turn/start')['params']['input'][0]['text'], E.FIRST + 'p')
         sent.clear()
         result = go()   # the next run continues it
         self.assertEqual((result['thread'], result['said']), ('one', '处理完了'))
         resume = next(m for m in sent if m.get('method') == 'thread/resume')['params']
         self.assertEqual(resume, dict(threadId='one', cwd=str(E.state_root(self.home) / E.RUNS), approvalPolicy='never',
                                       sandbox='workspace-write', excludeTurns=True))
-        self.assertFalse(any(m.get('method') == 'thread/start' for m in sent))
+        self.assertFalse(any(m.get('method') in ('thread/start', 'thread/archive') for m in sent))
         turn = next(m for m in sent if m.get('method') == 'turn/start')['params']
         self.assertEqual((turn['threadId'], turn['input'][0]['text']), ('one', 'p' + E.AGAIN))
         named = next(m for m in sent if m.get('method') == 'thread/name/set')['params']
@@ -670,8 +690,10 @@ class InvestigateTest(AskFixture):
         self.assertTrue(trend['calm'])
         self.assertEqual((trend['swap_from'], trend['swap_to']), (8.0, 13.9))
         self.assertEqual(material['watch_did'], dict(stopped=1, paused=2, names=['tail', 'tsc', 'tsc'], queued=['tsc']))
-        self.assertIn('先回答「为什么紧」', material['steps'][1])
-        self.assertIn('别只看 orphans', material['steps'][1])
+        # 11-10: the goal and the raw facts, not a rulebook of how to look.
+        self.assertIn('你自己判断', material['steps'][0])
+        self.assertIn('ps.txt', material['steps'][1])
+        self.assertTrue(any('path-delete' in step for step in material['steps']))
 
     def test_show_says_when_the_material_was_made_and_whether_it_is_this_runs(self):
         folder = E.new_folder(self.home, NOW)
@@ -828,8 +850,13 @@ class InvestigateTest(AskFixture):
         flicker = calm[:-1] + [dict(calm[-1], pressure=2)]
         self.assertTrue(E.judge(self.home, 'memory', self.settings, NOW, samples=flicker)['tight'])
         short = self.settings.warning_free_gib - 2
-        self.assertEqual(E.judge(self.home, 'disk', self.settings, NOW, free=short * GIB),
+        self.assertEqual(E.judge(self.home, 'disk', self.settings, NOW, free=short * GIB, swap=dict(used_gib=1, total_gib=2)),
                          dict(tight=True, words='后台看：内置盘还剩 {:.0f} GB，比目标少 2 GB'.format(short)))
+        # 11-10: 24 GB of the disk was swap and no notice said so.
+        self.assertIn('（其中 24 GB 是交换文件：内存不够时系统写在磁盘上的，内存松下来会还回来）',
+                      E.judge(self.home, 'disk', self.settings, NOW, free=short * GIB, swap=dict(used_gib=23, total_gib=24))['words'])
+        self.assertNotIn('交换文件', E.judge(self.home, 'disk', self.settings, NOW, free=(short + 9) * GIB,
+                                         swap=dict(used_gib=23, total_gib=24))['words'])   # disk fine: not worth saying
 
 
 class ConfirmTest(AskFixture):

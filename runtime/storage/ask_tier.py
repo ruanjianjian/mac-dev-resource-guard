@@ -28,6 +28,7 @@ LOSES = {
     'device-support-delete': '下次连这台设备调试时，Xcode 要花几分钟重新准备',
     'archive-delete': '这个版本的安装包和查崩溃用的符号文件',
     'process-stop': '它这次运行的状态，要用时得重新启动它',
+    'path-delete': '里面的全部内容（缓存、日志、构建产物这类下次用到会重新生成，别的就没了）',
 }
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
@@ -214,7 +215,9 @@ def _tasks(cfg, activity, pins, now, add, only, found):
             where = '（在外接盘上）' if task.linked else ''
             add('task-delete', str(task.path), task.path.name + where, T.size(task.real),
                 '闲置 {:.0f} 天，改动都已提交并推送'.format((now - latest) / T.DAY), 'latest:{:.0f}'.format(latest))
-    return found if only is None else {key: value for key, value in found.items() if key in only}
+    # In `only`, 「kind:」 stands for every one of that kind (learned-yes looks at all of one kind).
+    return found if only is None else {key: value for key, value in found.items()
+                                       if key in only or key.split(':', 1)[0] + ':' in only}
 
 
 def other_candidates(home, activity, now, add, mounted=None, kinds=None):
@@ -292,6 +295,8 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
                 del items[key]
             elif item['kind'] == 'process-stop' and same_process(item) is None:
                 del items[key]
+            elif item['kind'] == 'path-delete' and not Path(key.split(':', 1)[1]).exists():
+                del items[key]
             continue
         path = Path(key.split(':', 1)[1])
         # A moved task whose drive is unplugged stays listed but cannot run (ask AC-09).
@@ -339,6 +344,20 @@ def agent_floor(home, cfg, item, activity, pins, simctl):
         if O.kind_of(command) and O.kind_of(command)[0] != 'agent' or any(word in command for word in O.NEVER):
             return None, '它是 App 本身、数据库、容器、调试器或模拟器'
         return dict(bytes=item['bytes'], reason=item['reason']), None
+    if kind == 'path-delete':   # 11-10: anything else the agent found; the user said yes, the floor still holds
+        path = Path(target)
+        if not path.exists() and not path.is_symlink():
+            return None, '已经不在了'
+        if (path / '.git').exists():
+            return None, '它是代码仓库'
+        reasons = activity.reasons(path)
+        if reasons:
+            return None, '有程序正在用它：' + '；'.join(sorted(set(reasons))[:2])
+        if T.pin_reason(pins, T.Task(path, path, path)):
+            return None, '已被标记保护'
+        if time.time() - path.lstat().st_mtime < 86400:
+            return None, '最近一天还在改，先不删'
+        return dict(bytes=T.size(path) or item['bytes'], reason=item['reason']), None
     if kind.startswith('simulator'):
         try:
             listing = json.loads(simctl(['list', 'devices', '--json']))
@@ -453,9 +472,10 @@ def remove_task(path, cfg, archive=None):
         T.remove_tree(real)
 
 
-def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash):
+def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash, source='confirm'):
     """Run only the confirmed ids, each re-checked just before (ask AC-02/06/07). Only those ids are looked
-    at again, so confirming takes seconds instead of a full scan of every task and simulator."""
+    at again, so confirming takes seconds instead of a full scan of every task and simulator. `source` 'auto':
+    run by a rule the user's yes made (learned-yes), remembered as that and not as one more yes of theirs."""
     now = time.time() if now is None else now
     activity = activity if activity is not None else Activity.collect(settings.lease_root)
     if activity.errors:
@@ -516,7 +536,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 skipped = emergency.stop_tree(emergency.process_table(), int(target), item['lstart'])
                 if skipped:
                     raise RuntimeError(skipped)
-            elif item['kind'] in ('installer-delete', 'device-support-delete', 'archive-delete'):
+            elif item['kind'] in ('installer-delete', 'device-support-delete', 'archive-delete', 'path-delete'):
                 path = Path(target)
                 if path.is_dir() and not path.is_symlink():
                     T.remove_tree(path)
@@ -526,7 +546,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 remove_task(target, cfg, archive=fresh[key].get('archive'))
             item.update(state='done', result=None, updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='已完成', reason=item['reason'], bytes=item['bytes']))
-            remember_choice(home, item, 'confirmed')
+            remember_choice(home, item, 'confirmed', source)
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             item.update(state='failed', result=str(error), updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='失败', reason=str(error)))
@@ -546,11 +566,51 @@ def ignore(home, ids):
     return pending
 
 
-def remember_choice(home, item, decision):
+def remember_choice(home, item, decision, source='confirm'):
     """Each yes or no in 「等你确认」 is one of the user's decisions the agent learns from (RAW-04)."""
+    what = '照你同意过的直接处理' if source == 'auto' else '确认处理' if decision == 'confirmed' else '忽略'
     try:
         agent_plan.remember(home, 'decision', item['kind'], decision=decision, path=item['id'].split(':', 1)[1],
-                            source='confirm', note='{}「{}」：{}'.format('确认处理' if decision == 'confirmed' else '忽略',
-                                                                    item['title'], item['reason']))
+                            source=source, note='{}「{}」：{}'.format(what, item['title'], item['reason']))
     except (OSError, ValueError):
         pass   # memory is a record; it never stops the cleanup the user asked for
+
+
+AUTO_PARAM = {'simulator-delete': ('min_days', 'simulator_unused_days'), 'simulator-shutdown': ('min_hours', 'simulator_unattached_hours')}
+
+
+def auto_run(home, cfg, settings, simctl, kind, now=None, short_bytes=None, activity=None):
+    """learned-yes: what a 「你同意过，直接做」 rule covers is done without asking, each rechecked like a yes in
+    「等你确认」: shut-down simulators unused at least the rule's days (biggest first, only as many as the disk is
+    short of), or open ones nobody connected to for its hours. Said once afterwards. Returns what was done."""
+    now = time.time() if now is None else now
+    rule = agent_plan.load(home)['rules'].get(kind) or {}
+    name, waits = AUTO_PARAM[kind]
+    least = (rule.get('params') or {}).get(name) or 0
+    if rule.get('action') != 'auto' or least <= 0 or short_bytes is not None and short_bytes <= 0:
+        return []
+    lowered = dict(cfg, ask=dict(cfg['ask'], **{waits: least}))
+    activity = activity if activity is not None else Activity.collect(settings.lease_root)
+    if activity.errors:
+        return []
+    pins, _ = StorageManager(settings)._pins(now)
+    found = candidates(home, lowered, activity, pins, simctl, now, dict(load(home, ASK_STATE, {})), only={kind + ':'})
+    plan = agent_plan.load(home)
+    picked, total = [], 0
+    for item in sorted((f for k, f in found.items() if f['kind'] == kind and not left_alone(plan, k, f)), key=lambda f: -f['bytes']):
+        if short_bytes is not None and total >= short_bytes:
+            break
+        picked.append(item['id'])
+        total += item['bytes']
+    if not picked:
+        return []
+    done = [r for r in execute(home, lowered, settings, picked, simctl, activity, now, source='auto') if r['outcome'] == '已完成']
+    if done:
+        names = '、'.join(r['title'] for r in done[:4]) + (' 等' if len(done) > 4 else '')
+        if kind == 'simulator-delete':
+            agent_plan.notice(home, '按你同意过的，删了 {} 个模拟器'.format(len(done)),
+                              '关机 {:g} 天以上没开过，腾出约 {:.0f} GB：{}'.format(least, sum(r.get('bytes') or 0 for r in done) / GIB, names))
+        else:
+            agent_plan.notice(home, '内存紧，按你同意过的关了 {} 个模拟器'.format(len(done)),
+                              '开着 {:g} 小时以上没有开发工具连着：{}。数据都在，要用再开。'.format(least, names), tab='memory')
+    return done

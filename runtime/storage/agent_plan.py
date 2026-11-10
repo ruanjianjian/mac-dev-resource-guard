@@ -24,18 +24,31 @@ RULES = {
     'task-builds': dict(title='任务里的构建产物', actions=('move', 'off'), default='move'),
     'xcode-intermediates': dict(title='7 天没用的 Xcode 编译中间缓存', actions=('clean', 'off'), default='clean'),
     'idle-tasks': dict(title='闲置且改动都已推送的任务', actions=('move', 'off'), default='move'),
-    'simulator-shutdown': dict(title='开着却没人用的模拟器', actions=('ask', 'quiet', 'off'), default='ask',
-                               # A simulator held only by a screen or log stream this many hours counts as unused.
-                               params={'stream_hours': 12}),
-    'simulator-delete': dict(title='不可用或很久没开的模拟器', actions=('ask', 'quiet', 'off'), default='ask'),
+    'simulator-shutdown': dict(title='开着却没人用的模拟器', actions=('ask', 'auto', 'quiet', 'off'), default='ask',
+                               # A simulator held only by a screen or log stream this many hours counts as unused;
+                               # with 「auto」, one open this many hours with nobody connected is shut when memory is tight.
+                               params={'stream_hours': 12, 'min_hours': 0}),
+    'simulator-delete': dict(title='不可用或很久没开的模拟器', actions=('ask', 'auto', 'quiet', 'off'), default='ask',
+                             # with 「auto」: shut down and unused this many days, it goes when the disk is short.
+                             params={'min_days': 0}),
     'runtime-delete': dict(title='没有模拟器在用的运行时', actions=('ask', 'quiet', 'off'), default='ask'),
     'task-delete': dict(title='闲置很久的任务', actions=('ask', 'quiet', 'off'), default='ask'),
     'installer-delete': dict(title='下载里的大安装包', actions=('ask', 'quiet', 'off'), default='ask'),
     'trash-empty': dict(title='废纸篓', actions=('ask', 'quiet', 'off'), default='ask'),
     'device-support-delete': dict(title='旧版本的设备支持文件', actions=('ask', 'quiet', 'off'), default='ask'),
     'archive-delete': dict(title='旧的归档', actions=('ask', 'quiet', 'off'), default='ask'),
+    'path-delete': dict(title='agent 查到的其他大目录', actions=('ask', 'quiet', 'off'), default='ask'),
 }
-ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'quiet': '只列出、不催', 'off': '不管'}
+ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管'}
+# learned-yes (11-10): a yes the user gave again and again becomes the rule. 11-05 the user asked that their yes
+# 「变成记忆的一部分就能清理了」; still, by 11-10 they had said yes to the same kind of simulator 26 times on 4 days and
+# was asked again each time while the disk ran out. Only these kinds, each with the age the user's yes covered
+# (read from what they were shown), never below the floor; one 「忽略」 of that kind and it is never learned.
+LEARN_DAYS = 3
+LEARNED = {'simulator-delete': ('min_days', re.compile(r'关机 ?(\d+(?:\.\d+)?) ?天'), 1, 7),
+           'simulator-shutdown': ('min_hours', re.compile(r'开着 ?(\d+(?:\.\d+)?) ?小时'), 4, 4)}
+AUTO_WORDS = {'simulator-delete': '磁盘不够时直接删关机 {:g} 天以上没开过的',
+              'simulator-shutdown': '内存紧时直接关开着 {:g} 小时以上没人连的'}
 # Switches and numbers the user sets in 「帮你管着」; the agent may change them unless locked (RAW-07).
 SETTINGS = {'target': '空间目标', 'caches': '共享构建缓存', 'clean': '自动清理', 'external': '外接盘',
             'update': '自动更新', 'ask': '等你确认'}
@@ -263,6 +276,8 @@ def _user_reopens(home, plan, why):
 def rule_words(rid, entry):
     """The action as people read it, with its setting where there is one, so a change of hours is visible too."""
     words = ACTION_WORDS[entry['action']]
+    if entry['action'] == 'auto' and rid in LEARNED:
+        return '你同意过，' + AUTO_WORDS[rid].format(entry['params'].get(LEARNED[rid][0]) or LEARNED[rid][3])
     hours = entry['params'].get('stream_hours')
     if rid == 'simulator-shutdown' and hours:
         words += '（看画面或日志超过 {:g} 小时算没人用）'.format(hours)
@@ -286,6 +301,8 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
             raise ValueError('{} 必须是正数'.format(key))
     if by == 'agent':
         _check_agent(entry, spec['title'], why, plan)
+        if new_action == 'auto' and rid == 'simulator-delete':
+            raise ValueError('删模拟器要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
     else:
         _check_user(words)
         _user_reopens(home, plan, '用户自己把「{}」改成{}'.format(spec['title'], ACTION_WORDS[new_action]))
@@ -294,9 +311,46 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
     before = rule_words(rid, entry)
     entry.update(action=new_action, set_by=by, why=why or words, evidence=list(evidence), at=time.time())
     entry['params'].update(params or {})
+    if new_action == 'auto' and rid in LEARNED and not entry['params'].get(LEARNED[rid][0]):
+        entry['params'][LEARNED[rid][0]] = LEARNED[rid][3]   # set by hand: the rules' own waiting time
     save(home, plan)
     _changed(home, by, 'rule', rid, spec['title'], before, rule_words(rid, entry), why or words, evidence)
     return entry
+
+
+@_writes
+def learn_yes(home, now=None):
+    """learned-yes: a kind the user said yes to on LEARN_DAYS different days, and never 「忽略」, goes from 「先问」
+    to 「你同意过，直接做」, for things at least as old as the youngest one they said yes to. Not when the user set or
+    locked the rule themselves. Said once, with the evidence; returns the rules it changed."""
+    plan = load(home)
+    found = memories(home)
+    made = []
+    for rid, (name, pattern, floor, _) in LEARNED.items():
+        entry = plan['rules'][rid]
+        if entry['action'] != 'ask' or entry['locked'] or entry['set_by'] == 'user':
+            continue
+        said = [m for m in found if m.get('about') == rid and m.get('kind') == 'decision' and m.get('source') in ('confirm', 'chat')]
+        if any(m.get('decision') == 'ignored' for m in said):
+            continue
+        yes = [m for m in said if m.get('decision') == 'confirmed']
+        days = {time.strftime('%Y-%m-%d', time.localtime(m['at'])) for m in yes if _number(m.get('at'))}
+        ages = [float(g.group(1)) for g in (pattern.search(m.get('note') or '') for m in yes) if g]
+        if len(days) < LEARN_DAYS or not ages:
+            continue
+        before = rule_words(rid, entry)
+        why = '你在 {} 天里 {} 次都同意了，一次没忽略'.format(len(days), len(yes))
+        entry.update(action='auto', set_by='learned', why=why, evidence=[m['id'] for m in yes][-12:], at=time.time() if now is None else now)
+        entry['params'][name] = max(min(ages), floor)
+        made.append((rid, before, entry))
+    if made:
+        save(home, plan)
+    for rid, before, entry in made:
+        after = rule_words(rid, entry)
+        _changed(home, 'learned', 'rule', rid, RULES[rid]['title'], before, after, entry['why'], entry['evidence'])
+        notice(home, '以后这类直接做：' + RULES[rid]['title'],
+               '{}。以后{}，做完告诉你；想改回先问，跟你的 agent 说一声。'.format(entry['why'], after[len('你同意过，'):]))
+    return [rid for rid, _, _ in made]
 
 
 @_writes

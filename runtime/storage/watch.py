@@ -435,11 +435,51 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
     return result
 
 
+AUTO_GAP = 600   # learned-yes: what the user's yes covers is looked for at most this often from the minute's watch
+
+
+def auto_after(home, cfg, settings, now, auto_run=None, free=None):
+    """learned-yes: memory getting tight shuts the open simulators the user's yes covers, a short disk deletes the
+    shut-down ones; each kind at most once in AUTO_GAP, and never while someone is cleaning in the panel."""
+    import ask_tier, auto_tier
+    auto_run = auto_run or ask_tier.auto_run
+    plan = agent_plan.load(home)
+    free = shutil.disk_usage(str(settings.volume)).free if free is None else free
+    short = settings.warning_free_gib * GIB - free
+    due = [('simulator-shutdown', None) if soon(load(home).get('samples', []), now) else None,
+           ('simulator-delete', short) if short > 0 else None]
+    marks_path = state_root(home) / 'auto-run.json'
+    try:
+        marks = json.loads(marks_path.read_text())
+    except (OSError, ValueError):
+        marks = {}
+    todo = [d for d in due if d and plan['rules'][d[0]]['action'] == 'auto' and now - marks.get(d[0], 0) >= AUTO_GAP]
+    if not todo:
+        return []
+    lock = state_root(home) / 'dashboard' / 'operation.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    done = []
+    with lock.open('a') as busy:
+        try:
+            fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return []
+        for kind, short_bytes in todo:
+            marks[kind] = now
+            atomic_json(marks_path, marks)
+            try:
+                done += auto_run(home, cfg, settings, auto_tier.default_simctl, kind, now=now, short_bytes=short_bytes)
+            except Exception:   # one unreadable minute never stops the watch
+                continue
+    return done
+
+
 def emergency_after(home, now):
     """AC-05: whatever is still tight after the minute's own work goes to the agent, by the emergency rules."""
     import portable_config
     settings = portable_config.configure(home)
     cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    auto_after(home, cfg, settings, now)
     lock = state_root(home) / 'emergency.lock'
     with lock.open('a') as handle:
         try:

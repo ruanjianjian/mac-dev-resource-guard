@@ -25,7 +25,8 @@ class RulesTest(AskFixture):
         self.assertEqual({rid: rule['action'] for rid, rule in plan['rules'].items()}, {
             'tool-caches': 'move', 'task-builds': 'move', 'xcode-intermediates': 'clean', 'idle-tasks': 'move',
             'simulator-shutdown': 'ask', 'simulator-delete': 'ask', 'runtime-delete': 'ask', 'task-delete': 'ask',
-            'installer-delete': 'ask', 'trash-empty': 'ask', 'device-support-delete': 'ask', 'archive-delete': 'ask'})
+            'installer-delete': 'ask', 'trash-empty': 'ask', 'device-support-delete': 'ask', 'archive-delete': 'ask',
+            'path-delete': 'ask'})
         self.assertTrue(all(rule['set_by'] == 'default' and not rule['locked'] for rule in plan['rules'].values()))
         agent_plan.plan_path(self.home).parent.mkdir(parents=True, exist_ok=True)
         agent_plan.plan_path(self.home).write_text('{broken')
@@ -159,7 +160,7 @@ class CommandTest(CommandFixture):
         self.assertEqual((code, lesson['id']), (0, 'm1'))
         code, rule = self.rgs('rule', 'simulator-shutdown', 'ask', '--why', '看画面的程序挂 6 小时就算没人用', '--evidence', 'm1',
                               '--stream-hours', '6')
-        self.assertEqual((code, rule['params'], rule['evidence']), (0, {'stream_hours': 6.0}, ['m1']))
+        self.assertEqual((code, rule['params'], rule['evidence']), (0, {'stream_hours': 6.0, 'min_hours': 0}, ['m1']))
         code, said = self.rgs('keep', 'add', str(self.root / 'x'), '--by', 'user', '--words', '这个先别动')
         self.assertEqual(code, 0)
         code, rules = self.rgs('rules')
