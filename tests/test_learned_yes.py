@@ -365,6 +365,50 @@ class ProposeTest(AskFixture):
         self.assertEqual(E.proposals(self.home, NOW + E.PROPOSAL_DAYS * 86400), [])   # nobody answered in a week
 
 
+class ReviewTest(AskFixture):
+    """11-10: 「你让资源管理主agent回顾下我的近两周开发任务里，有哪些是影响了运行内存占用的但是不必要的。出个新方案」."""
+
+    def test_the_users_question_brings_the_main_agent_with_two_weeks_of_evidence_and_its_answer_is_said(self):
+        old = E.new_folder(self.home, NOW - 10 * 86400)
+        (old / E.RESULT).write_text(json.dumps(dict(at=NOW - 10 * 86400, reason='memory', agent=dict(status='done'), done=[], asks=[],
+                                                    summary='三台模拟器开着没人连', receipt=dict(handed=0, learned=0))))
+        events = self.home / '.local/state/dev-memory/events.jsonl'; events.parent.mkdir(parents=True); events.write_text('{}\n')
+        cfg = self.cfg(task_roots=[])
+        started = []
+        with patch.object(E, 'runners', return_value=['codex']):
+            got = E.tick(self.home, cfg, self.settings, NOW, asked=True, words='近两周哪些占内存但不必要', free=500 * GIB,
+                         starter=lambda reason, folder, runner: started.append(reason) or 4242)
+        self.assertEqual((got['reason'], started), ('review', ['review']))
+        state = E.load_state(self.home)
+        self.assertEqual(state['run']['words'], '近两周哪些占内存但不必要')
+        self.assertEqual((state.get('disk_fired', 0), state.get('short_fired_at')), (0, None))   # costs no emergency step
+        seen = []
+
+        def codex(home, folder, prompt, env, timeout, popen=None, main=False):
+            seen.append((prompt, main, timeout, json.loads((Path(folder) / E.MATERIAL).read_text())))
+            E.decide(folder, 'propose', note='模拟器开着没人连就关', summary='开着 2 小时没人连的模拟器自动关，约省 6 GB 内存',
+                     why='10 天里 who 里三台模拟器开着没人连')
+            E.decide(folder, 'done', summary='不必要的：三台没人连的模拟器约 6 GB；方案：自动关', cause='who 和事件时间线')
+            return dict(agent='codex', status='done', thread='main', said='')
+
+        with patch.object(E, 'run_codex', codex), patch.object(ask_tier, 'launch_app'):
+            E.run(self.home, cfg, self.settings, 'review', got['folder'], 'codex', now=NOW)
+        prompt, main, timeout, material = seen[0]
+        self.assertTrue(main)
+        self.assertEqual(timeout, E.REVIEW_MINUTES * 60)
+        self.assertIn('「近两周哪些占内存但不必要」', prompt)
+        self.assertEqual(material['question'], '近两周哪些占内存但不必要')
+        self.assertEqual(material['steps'], list(E.REVIEW_STEPS))
+        self.assertEqual([r['summary'] for r in material['rounds']], ['三台模拟器开着没人连'])   # ten days back
+        self.assertIn(str(events), [h['path'] for h in material['history']])
+        notices = agent_plan.queued_notices(self.home)
+        self.assertEqual([n['title'] for n in notices], ['新的整理方案：模拟器开着没人连就关', '主 agent 回答了你的问题'])
+        self.assertIn('三台没人连的模拟器约 6 GB', notices[1]['body'])
+        state = E.load_state(self.home)
+        self.assertEqual(state['review']['words'], '近两周哪些占内存但不必要')
+        self.assertNotIn('run', state)
+
+
 class MainAgentTest(AskFixture):
     def round(self, at, handed=0):
         folder = E.new_folder(self.home, at)

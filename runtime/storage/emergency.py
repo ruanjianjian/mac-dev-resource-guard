@@ -85,6 +85,11 @@ SUB = ('这次告急交给你一次处理完：这段对话只用这一次，做
        'lessons 里，照着用。\n\n')
 DAILY_PROMPT = ('{when} 资源看板每天叫你来一次，你是它的主 agent。用 mac-dev-resource-guard 这个 skill：先运行 `{rgs} emergency show`'
                 '（这次的材料在 {folder}），照里面的 steps 做。用户不在场；全程用简体中文。')
+# 11-10, the user: 「你让资源管理主agent回顾下我的近两周开发任务里，有哪些是影响了运行内存占用的但是不必要的。出个新方案」.
+REVIEW_PROMPT = ('{when} 用户请你（资源看板的主 agent）专门看一个问题：「{words}」。用 mac-dev-resource-guard 这个 skill：'
+                 '先运行 `{rgs} emergency show`（这次的材料在 {folder}），照里面的 steps 做。全程用简体中文。')
+REVIEW_DAYS = 14       # how far back a question looks by default
+REVIEW_MINUTES = 45    # a look back over weeks takes longer than one emergency
 IDLE = ('上次一个决定都没交回，后台什么也没做，所以还这么紧。这次别照抄上次的结论：材料里每个大头，要么交回决定'
         '（stop、move、ask），要么在 done --summary 里写清它为什么不能动、要谁做什么。\n\n')
 LAST = '上次（{when}）的回执：{receipt}。{judged}\n\n'                       # agent-investigates AC-04, AC-06
@@ -147,6 +152,22 @@ DAILY_STEPS = (
     '加 `--replaces <id>` 改写。old_notes 是以前的流水笔记，不是规则：有用的改写成规则（带 --replaces）。',
     '最后 `emergency done --cause "这段时间为什么紧（或不紧）" --summary "子 agent 做得怎样、记了什么经验"`。'
     '只有要用户拍板，或子 agent 明显没干活时才写 --need；没问题就不写，不打扰用户。',
+    '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
+)
+
+
+REVIEW_STEPS = (
+    '用户专门问你一个问题（question），这一轮就是回答它。你是资源看板的主 agent：用证据回答，不凭印象。',
+    '证据在 history 列的文件里：内存压力和交换文件的时间线、每轮告急时谁占着内存（material.json 的 who：什么工具、哪个项目、'
+    '谁起的、主人还在不在动）、后台关过和暂停过什么、各会话当时在做什么任务。都是只读的，用 grep、jq、python 自己算；'
+    'rounds 和 user_decisions 是这段时间的回执和用户的决定。',
+    '找「占了内存却不必要」的：说清是什么、出在哪些任务、大概占多少、持续多久、为什么不必要（比如没人用还开着、同样的服务'
+    '开了好几套、编译测试并发太多、常驻却很少用）。必要的也说一句为什么必要，别全算成浪费。',
+    '再出新方案：agent 能改的规则用 `emergency rule <规则> --decision <做法> --why` 直接改；要改做法、要用户拍板的用 '
+    '`emergency propose --note "标题" --summary "要怎么改、能省多少、代价" --why "证据"`，一个做法一条。',
+    '学到以后也用得上的，记成经验：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`。',
+    '最后 `emergency done --summary "给用户的回答：哪些不必要、各占多少、方案是什么" --cause "证据从哪来"`；'
+    '要用户拍板的写 --need。',
     '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
 )
 
@@ -1069,7 +1090,7 @@ def done_check(folder, found):
     disk is still short and nothing would free it, or nothing was handed back at all, it is refused once, so the
     agent can add what it meant or confirm. Returns the words, or None."""
     folder = Path(folder)
-    if found.get('reason') == 'daily' or (folder / CHECKED).exists():
+    if found.get('reason') in ('daily', 'review') or (folder / CHECKED).exists():
         return None
     made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')]
     disk = found.get('disk') or {}
@@ -1604,16 +1625,19 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     """Hand the agent its material, let it decide, then do what passes the floor (AC-04~10)."""
     now = time.time() if now is None else now
     folder = Path(folder)
-    main = reason == 'daily'
+    main = reason in ('daily', 'review')
+    words = ((load_state(home).get('run') or {}).get('words') or '') if reason == 'review' else ''
     if not (folder / MATERIAL).is_file():
-        atomic_json(folder / MATERIAL, daily_material(home, settings, now) if main else collector(home, cfg, settings, reason, now))
+        atomic_json(folder / MATERIAL, daily_material(home, settings, now, question=words, cfg=cfg) if main
+                    else collector(home, cfg, settings, reason, now))
         if not main:
             snapshots(folder, popen)
     env = dict(os.environ, **{DIR_ENV: str(folder)})
     before = load_state(home)
     streak = (before.get('run') or {}).get('streak', 1)
     when = time.strftime('%m-%d %H:%M', time.localtime(now))
-    prompt = (DAILY_PROMPT.format(when=when, rgs=RGS, folder=folder) if main else
+    prompt = (REVIEW_PROMPT.format(when=when, words=words, rgs=RGS, folder=folder) if reason == 'review' else
+              DAILY_PROMPT.format(when=when, rgs=RGS, folder=folder) if main else
               PROMPT.format(when=when, why=WHY.get(reason, reason), rgs=RGS, folder=folder))
     last = before.get('last') or {}
     run_now = before.get('run') or {}
@@ -1626,7 +1650,8 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
                              judged=last.get('judged', '')) + prompt
     launcher = run_claude if runner == 'claude' else run_codex
     try:
-        agent_result = launcher(home, folder, prompt, env, RUN_MINUTES * 60, popen=popen, **({'main': True} if main else {}))
+        minutes = REVIEW_MINUTES if reason == 'review' else RUN_MINUTES
+        agent_result = launcher(home, folder, prompt, env, minutes * 60, popen=popen, **({'main': True} if main else {}))
     except Exception as error:   # whatever went wrong starting it, what it already decided is still handled
         agent_result = dict(agent=runner, status='error', reply=str(error) or type(error).__name__)
     carried = carry(folder, agent_result.pop('said', ''))
@@ -1640,7 +1665,7 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
                               for a in maybe_asks(home, folder, settings, time.time())]
     result['receipt'] = receipt(decisions(folder), carried, result)
     if main:
-        return _after_daily(home, folder, reason, agent_result, result)
+        return _after_daily(home, folder, reason, agent_result, result, words)
     result['judged'] = judger(home, reason, settings)
     atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=streak, **result))
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
@@ -1688,18 +1713,38 @@ def snapshots(folder, popen=subprocess.Popen):
             continue
 
 
-def _after_daily(home, folder, reason, agent_result, result):
-    """The main agent's look is said only when the user has something to decide (it found a problem)."""
+def _after_daily(home, folder, reason, agent_result, result, words=''):
+    """The main agent's daily look is said only when the user has something to decide (it found a problem); its
+    answer to a question of the user's is always said."""
     result['judged'] = dict(tight=False, words='')
-    atomic_json(Path(folder) / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=1, **result))
-    if result['need']:
+    atomic_json(Path(folder) / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=1, words=words, **result))
+    if reason == 'review':
+        body = result['summary'] or ('主 agent 没答完：' + str(agent_result.get('status')))
+        if result['need']:
+            body = '要你做：' + result['need'] + '。' + body
+        agent_plan.notice(home, '主 agent 回答了你的问题', body[:300], tab='emergency')
+    elif result['need']:
         agent_plan.notice(home, '资源看板的主 agent 看了这一天', ('要你做：' + result['need'] + '。' + result['summary'])[:300])
     state = load_state(home)
     state.pop('run', None)
-    state['daily'] = dict(at=time.time(), folder=str(folder), agent=agent_result.get('status'), summary=result['summary'],
-                          need=result['need'], learned=len(result['learned']))
+    state['review' if reason == 'review' else 'daily'] = dict(
+        at=time.time(), folder=str(folder), agent=agent_result.get('status'), summary=result['summary'],
+        need=result['need'], learned=len(result['learned']), **({'words': words} if words else {}))
     save_state(home, state)
     return dict(agent=agent_result, **result)
+
+
+def history(home, cfg=None):
+    """Where a look back over weeks finds its evidence (REVIEW_STEPS): only what exists on this Mac."""
+    home = Path(home)
+    found = [(home / '.local/state/dev-memory/events.jsonl', '每分钟一条：内存压力（1 正常、2 警告、4 严重）、交换文件、压缩内存，从安装起'),
+             (state_root(home) / RUNS, '每轮告急一个文件夹：material.json 的 who 写着当时谁占内存、属于哪个项目、谁起的；result.json 是那轮的结论'),
+             (state_root(home) / 'watch.json', '最近一小时的读数；acted 是后台最近关过、暂停过什么'),
+             (home / '.codex/archived_sessions', '归档的 Codex 对话；资源看板以前的告急对话也在这里（每轮的材料和结论）'),
+             (home / '.codex/sessions', 'Codex 的会话记录：当时在做哪些任务'),
+             (home / '.claude/projects', 'Claude Code 每个会话的完整记录：在哪个任务、跑了什么命令、开了哪些服务和模拟器')]
+    found += [(Path(r['path']), '任务目录（外接盘上的也在这里，是链接）') for r in (cfg or {}).get('task_roots', [])]
+    return [dict(path=str(path), what=what) for path, what in found if path.exists()]
 
 
 def past_rounds(home, since=0):
@@ -1722,12 +1767,15 @@ def past_rounds(home, since=0):
     return found
 
 
-def daily_material(home, settings, now):
-    """What the main agent looks over: the runs since its last look, the user's decisions and the plan's changes."""
-    since = (load_state(home).get('daily') or {}).get('at') or now - 86400
+def daily_material(home, settings, now, question='', cfg=None):
+    """What the main agent looks over: the runs since its last look, the user's decisions and the plan's changes.
+    With the user's `question`: the last REVIEW_DAYS, where the evidence is, and the steps to answer it."""
+    since = now - REVIEW_DAYS * 86400 if question else (load_state(home).get('daily') or {}).get('at') or now - 86400
     free = shutil.disk_usage(str(settings.volume)).free
     return dict(
-        schema=1, at=now, reason='daily', rgs=str(RGS), why='每天一次：看各轮告急处理做得对不对', since=since,
+        schema=1, at=now, reason='review' if question else 'daily', rgs=str(RGS),
+        why='用户问你：' + question if question else '每天一次：看各轮告急处理做得对不对', since=since,
+        **({'question': question, 'history': history(home, cfg)} if question else {}),
         rounds=past_rounds(home, since),
         user_decisions=[m for m in agent_plan.memories(home) if m.get('kind') == 'decision' and (m.get('at') or 0) >= since][-60:],
         plan_changes=[c for c in agent_plan.changes(home) if (c.get('at') or 0) >= since][-30:],
@@ -1738,7 +1786,7 @@ def daily_material(home, settings, now):
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         proposals=[dict(title=p['title'], plan=p['plan'][:300]) for p in proposals(home, now)],
-        orphans=[], companions=[], tasks=[], simulators=[], waiting=[], steps=list(DAILY_STEPS))
+        orphans=[], companions=[], tasks=[], simulators=[], waiting=[], steps=list(REVIEW_STEPS if question else DAILY_STEPS))
 
 
 def daily_due(home, state, now):
@@ -1776,7 +1824,7 @@ def spawn(reason, folder, runner):
     return process.pid
 
 
-def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=None, starter=spawn, free=None):
+def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=None, starter=spawn, free=None, words=''):
     """Each wake of the background (every 5 minutes): when this Mac is about to choke, start the user's agent
     (AC-01~04). `asked`: the user asked for a run now. Returns what happened, or None."""
     now = time.time() if now is None else now
@@ -1790,7 +1838,7 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     reason = due(state, free, critical, pressure, now, current, goal=settings.warning_free_gib * GIB)
     remind(home, state, free, settings.warning_free_gib * GIB, now)
     if asked:
-        reason = None if running(state, now) else 'asked'
+        reason = None if running(state, now) else 'review' if words else 'asked'
     for stale in ('starts', 'capped', 'capped_told'):    # left by builds that counted runs a day
         state.pop(stale, None)
     if reason is None and daily_due(home, state, now):
@@ -1801,12 +1849,12 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     prev = {key: state.get(key) for key in ('memory_fired_at', 'disk_fired', 'looked')}
     if reason == 'daily':
         state['daily_fired'] = now
-    else:
+    elif reason != 'review':
         mark_fired(state, reason, free, critical, now)
     ready = runners(home, cfg['agent_app'], env, run)
-    if not ready and reason == 'daily':
-        save_state(home, state)   # nobody to look: tried again tomorrow
-        return None
+    if not ready and reason in ('daily', 'review'):
+        save_state(home, state)   # nobody to look: tried again tomorrow, or the user hears there is no agent
+        return None if reason == 'daily' else dict(reason=reason, agent=None)
     if not ready:
         # Nobody can start by itself: hand it to the user instead (the disk drop already has its own notice),
         # and say once a day what is missing, e.g. one sign-in to Claude Code (AC-12).
@@ -1827,8 +1875,9 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     prune_runs(home)
     pid = starter(reason, folder, ready[0])
     last = state.get('last') or {}
-    if reason == 'daily':
-        state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev, streak=1)
+    if reason in ('daily', 'review'):
+        state['run'] = dict(pid=pid, started=now, reason=reason, folder=str(folder), agent=ready[0], prev=prev, streak=1,
+                            **({'words': words} if words else {}))
         save_state(home, state)
         return dict(reason=reason, agent=ready[0], folder=str(folder), pid=pid)
     again = last.get('tight') and last.get('reason') == reason and now - last.get('at', 0) <= STREAK_HOURS * 3600
@@ -1869,7 +1918,9 @@ def open_session(home, now=None, run=subprocess.run):
     now = time.time() if now is None else now
     state = load_state(home)
     current = state.get('run') if running(state, now) else None
-    folder = (current or state.get('last') or {}).get('folder')
+    # The newest of the last emergency, the main agent's daily look and its answer to the user's question.
+    latest = max((state.get(k) or {} for k in ('last', 'daily', 'review')), key=lambda e: e.get('at') or 0)
+    folder = (current or latest).get('folder')
     try:
         session = json.loads((Path(folder) / SESSION).read_text()) if folder else None
     except (OSError, ValueError):

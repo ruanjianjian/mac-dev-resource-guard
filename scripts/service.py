@@ -398,9 +398,14 @@ def emergency_command(home, a):
     cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
     if what == 'now':
         return emergency.tick(home, cfg, settings, asked=True) or {'status': 'busy', 'message': '上一次告急处理还没结束'}
+    if what == 'review':   # the user's question for the main agent (11-10)
+        if not str(a.words or '').strip():
+            raise ValueError('用法：emergency review --words "用户的问题"')
+        return (emergency.tick(home, cfg, settings, asked=True, words=a.words.strip())
+                or {'status': 'busy', 'message': '上一次处理还没结束，过一会儿再问'})
     if what == 'run':
         if target not in ('claude', 'codex') or not a.path:
-            raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked|daily --path <这次的目录>')
+            raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked|daily|review --path <这次的目录>')
         return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
     raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / open / login / on / off')
 
@@ -1061,7 +1066,7 @@ def main():
     p.add_argument('--when', default='', help='emergency lesson: the situation the rule is for')
     p.add_argument('--do', dest='then', default='', help='emergency lesson: what to do then, and why')
     p.add_argument('--replaces', default='', help='emergency lesson: the id of the lesson or old note it rewrites')
-    p.add_argument('--reason', choices=['disk', 'memory', 'asked', 'daily'], help='emergency run: why the agent was started')
+    p.add_argument('--reason', choices=['disk', 'memory', 'asked', 'daily', 'review'], help='emergency run: why the agent was started')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):
         result = plan_command(home, a)

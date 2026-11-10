@@ -88,6 +88,7 @@ description: Mac 开发者的磁盘空间管家（资源看板）。安装资源
 用户点通知交给你时（没能自己启动，或者是「有新占用需要判断」），照第 2 节处理，并说明这次多出来的是什么。
 
 - 用户在对话里说了告急时的偏好（例如「开着但 3 小时没人连的，不要关机」），马上记一条：`rgs memory add --kind decision --about emergency --words "原话" --note "告急时不关开着的模拟器"`。
+- 用户想让主 agent 专门看一个问题（比如「近两周哪些任务占了内存却不必要」）：`rgs emergency review --words "用户原话"`。主 agent 会带着近两周的证据来：内存时间线、每轮告急时谁在占用、各会话做过的任务。它用证据回答，用 propose 出新方案，答完一定会通知用户。
 - 用户不想让你告急时自己来：`rgs emergency off`（`on` 打开）。最近一次怎么样：`rgs emergency status`。用户想看你上次是怎么处理的：`rgs emergency open`（Codex 在它的 App 里打开那段对话，Claude 在终端里接着聊），封面那一行和通知也能直接点开。
 - Claude Code 要在终端登录过，后台才能自己跑（桌面 App 的登录不给后台用）。没登录时资源看板改用 Codex；两个都不行，就退回成通知，并一天一次提醒用户登录。想让 Claude 自己来，用户同意后运行 `rgs emergency login`，你不能替用户登录。
 
