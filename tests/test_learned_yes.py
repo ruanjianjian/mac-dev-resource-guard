@@ -309,6 +309,8 @@ class WorkDriveTest(AskFixture):
         self.assertTrue(quiet.is_symlink())
         self.assertEqual((quiet / 'app/main.swift').read_text(), 'changed\n')       # nothing lost
         self.assertFalse(busy.is_symlink()); self.assertFalse(held.is_symlink())
+        kept = {Path(k['path']).name: k['reason'] for k in receipt['kept']}
+        self.assertRegex(kept['busy'], r'^\d+ 分钟内有改写（要求 60 分钟没人动）$')
         self.assertFalse(self.root.is_symlink())                                       # two tasks still here
 
     def test_a_root_left_with_only_links_becomes_a_link_so_new_tasks_are_made_on_the_drive(self):

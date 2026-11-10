@@ -154,7 +154,10 @@ def idle_check(task, activity, pins, days, cfg, now=None):
     except Unreadable as error:
         return reasons + [str(error) + '（可能缺少访问权限），保留'], now
     if now - latest < days * DAY:
-        reasons.append('{:.1f} 天内有改写（要求闲置 {} 天）'.format(max(0.0, (now - latest) / DAY), days))
+        if days < 1:   # work-drive waits minutes, not days: 「要求闲置 0.041666… 天」 said nothing (11-10)
+            reasons.append('{:.0f} 分钟内有改写（要求 {:.0f} 分钟没人动）'.format(max(0.0, (now - latest) / 60), days * 1440))
+        else:
+            reasons.append('{:.1f} 天内有改写（要求闲置 {:g} 天）'.format(max(0.0, (now - latest) / DAY), days))
     return reasons, latest
 
 
