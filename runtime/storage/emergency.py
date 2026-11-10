@@ -55,7 +55,10 @@ GIT_SECONDS = 15              # one git call while gathering the material; slowe
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
-ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop', 'path-delete')
+ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop', 'path-delete', 'task-move')
+# 11-10 (the user set the target to 100 GB): 「没达到目标的话，agent 要自己去想办法出方案，然后强提醒用户去看」.
+SHORT_HOURS = 6        # below the user's target, above the danger line or not: the agent works out a plan this often
+REMIND_HOURS = 2       # its plan waiting and the disk still short: the user is told again this often
 # What the agent reads beside the material: the raw facts its sandbox may not read itself (Codex's keeps ps, top
 # and simctl from it), taken by the background as the run starts.
 SNAPSHOTS = (('ps.txt', ['/bin/ps', '-axww', '-o', 'pid,ppid,user,rss,%cpu,etime,lstart,command']),
@@ -103,18 +106,22 @@ STEPS = (
     '你能交回的决定，后台会在你结束后逐项复核再做：`emergency stop <pid> --why "依据"` 关掉没人用的后台（orphans，'
     '或 companions 里 may_stop 的）；`emergency move <任务路径> --why` 把闲置任务整个挪到外接盘（不丢东西）；'
     '`emergency ask <kind>:<id> --why` 列给用户点头，kind 是 simulator-delete、simulator-shutdown、task-delete、'
+    'task-move（有没保存改动、所以后台不挪的闲置任务，整个挪到外接盘，不丢东西）、'
     'process-stop（主人还在的进程）、path-delete（你查到的任何大目录或大文件：缓存、日志、旧构建、容器数据……'
     '写清是什么、为什么能删、删了会怎样）；`emergency rule <规则> --decision <做法> --why` 改计划；'
     '`emergency lesson` 记经验。',
     '还紧就一定要交回决定：能做的做，不能做的列给用户点头；什么都不交回，这一轮就白来了。确实没有能动的，'
     '在 done --summary 里逐个写清每个大头为什么不能动、要谁做什么。',
+    '内置盘没到用户的目标（disk.goal_gib）就要出一份够数的方案：先想能放到外接盘的（disk.external_free_gib 是外接盘'
+    '还空多少，挪过去不丢东西），再想能删的；凑不够也照实说还差多少、还能怎么办。你交回的方案后台会提醒用户去看。',
     '底线，后台会拒绝：正在用的、有没提交或没推送改动的、被用户保护的不动；App 本身、数据库、容器、调试器不关；'
     '会丢东西的只能列给用户。',
     '学到了以后也用得上的经验，记成一条规则：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；'
     '改的是已有的那条，加 `--replaces <id>`。这一次查到了什么、做了什么写进 done --summary，不要记成经验。'
     'old_notes 是以前每次的笔记，不是规则：里面以后还用得上的，也这样改写成规则（带 --replaces）。',
     '说「恢复了」之前看 trend 的最近 10 分钟：一分钟正常不算恢复。后台收尾时也会自己再看一次。',
-    '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。',
+    '最后 `emergency done --cause "为什么紧" --summary "做了什么、还差什么" --need "要用户做什么"`（没有要用户做的就不写 --need）。'
+    'done 会念一遍你交回了哪些决定：总结里只写交回了的；磁盘还差却没有腾磁盘的决定时，它会先请你再看一眼。',
     '命令说「写不进去」时，照它说的把那一行原样放进你最后的回复，后台从回复里取。',
 )
 
@@ -217,9 +224,10 @@ def news(looked, current):
     return found
 
 
-def due(state, free, critical, pressure, now, current=None):
+def due(state, free, critical, pressure, now, current=None, goal=None):
     """Why the agent should come now ('disk' or 'memory'), or None. Updates `state` in place (AC-01~03).
-    `current` is view() now: still tight and something new, the agent comes before the quiet hours are over."""
+    `current` is view() now: still tight and something new, the agent comes before the quiet hours are over.
+    `goal`: the user's target; below it the agent comes every SHORT_HOURS to work out a plan."""
     level = disk_level(free, critical)
     if level == 0:
         state['disk_fired'] = 0     # back above the line: the next drop counts again
@@ -237,8 +245,32 @@ def due(state, free, critical, pressure, now, current=None):
             reason = 'memory'
         elif now - looked.get('at', 0) >= SOONER_MINUTES * 60 and (news(looked, current) or not looked and current and current['heavy']):
             reason = 'memory'   # nothing kept from its last look (an update): what is there now is all new to it
+    if reason is None and goal and free < goal and now - state.get('short_fired_at', 0) >= SHORT_HOURS * 3600:
+        reason = 'disk'
     # No count a day (RAW-53): one run at a time, and what changed decides when the next one comes.
     return None if reason is None or running(state, now) else reason
+
+
+def remind(home, state, free, goal, now):
+    """Below the user's target with the agent's plan still waiting: said again every REMIND_HOURS, until the
+    user answers or the disk is back (11-10 「强提醒用户去看」)."""
+    if free >= goal:
+        state.pop('reminded_at', None)
+        return None
+    last = state.get('last') or {}
+    if now - max(state.get('reminded_at', 0), last.get('at', 0)) < REMIND_HOURS * 3600:
+        return None
+    pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
+    waiting = [i for i in pending['items'] if i['state'] in ('pending', 'failed') and not i.get('quiet') and not i.get('unreachable')]
+    if not waiting and not last.get('need'):
+        return None
+    body = ('{} 项等你确认，约 {:.0f} GB'.format(len(waiting), sum(i.get('bytes') or 0 for i in waiting) / GIB) if waiting else '')
+    if last.get('need'):
+        body += ('；' if body else '') + 'agent 说要你做：' + last['need']
+    agent_plan.notice(home, '离目标还差 {:.0f} GB：agent 的方案还等你看'.format((goal - free) / GIB), body[:300],
+                      tab='pending' if waiting else 'emergency')
+    state['reminded_at'] = now
+    return body
 
 
 def undo_fired(state):
@@ -256,6 +288,7 @@ def mark_fired(state, reason, free, critical, now):
     """A run the user asked for leaves the disk steps and the quiet hours as they were."""
     if reason == 'disk':
         state['disk_fired'] = disk_level(free, critical)
+        state['short_fired_at'] = now
     elif reason == 'memory':
         state['memory_fired_at'] = now
 
@@ -818,9 +851,11 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
     return dict(
         schema=1, at=now, reason=reason, rgs=str(RGS),
         why=why_words(reason, free, settings.critical_free_gib * GIB, memory_pressure()),
-        disk=dict(free_gib=round(free / GIB, 1), target_gib=settings.target_free_gib, danger_gib=settings.critical_free_gib,
+        disk=dict(free_gib=round(free / GIB, 1), goal_gib=settings.warning_free_gib, target_gib=settings.target_free_gib,
+                  danger_gib=settings.critical_free_gib,
                   external=str(cfg['external_root']) if cfg['external_root'] else None,
-                  external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root'])),
+                  external_ready=bool(cfg['external_root']) and auto_tier.volume_ready(cfg['external_root']),
+                  external_free_gib=external_free(cfg)),
         memory=dict(pressure={0: '读不到', 1: '正常', 2: '警告', 4: '严重'}.get(memory_pressure(), '未知'), swap=swap_usage()),
         who=[dict(line=O.line(g, now), pids=g['pids'][:8], gib=round(g['bytes'] / GIB, 1), cores=g['cores'], owner=g['owner'])
              for g in groups[:10]],
@@ -834,6 +869,20 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         steps=list(STEPS))
+
+
+def external_free(cfg):
+    """How much the drive still has, so the agent thinks of it first; None when it is not set or not there."""
+    root = cfg.get('external_root')
+    if not root or not auto_tier.volume_ready(root):
+        return None
+    probe = Path(root)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        return round(shutil.disk_usage(str(probe)).free / GIB, 1)
+    except OSError:
+        return None
 
 
 def watch_state(home):
@@ -982,8 +1031,55 @@ LESSON_HOW = '经验要写成以后也用得上的规则：--when "遇到什么�
 ONCE = re.compile(r'本轮|这一轮|上一轮|上轮|这次|上次|(?<!\d)\d{1,2}:\d{2}(?!\d)')
 
 
-def decide(folder, action, target=None, why='', note='', summary='', cause='', need='', when='', then='', replaces=''):
-    """One decision of the agent's, checked against the material it was given."""
+DISK_KINDS = ('simulator-delete', 'task-delete', 'path-delete')
+CHECKED = 'done-checked'   # the first `done` of a run was read back to the agent (done_check)
+
+
+def said(entry):
+    """One handed-back decision in a few words, as the agent is told it."""
+    if entry['action'] == 'stop':
+        return '关掉 PID {}'.format(entry.get('pid'))
+    if entry['action'] == 'move':
+        return '挪走 ' + Path(entry.get('path') or '').name
+    if entry['action'] == 'rule':
+        return '把规则 {} 改成 {}'.format(entry.get('rule'), entry.get('to'))
+    return '列给用户：' + str(entry.get('title') or entry.get('id'))
+
+
+def done_check(folder, found):
+    """11-10: a summary said two services went to the background that never did, and a run 23 GB short of the
+    target never looked at the disk. The first `done` of a run reads back what was really handed back; when the
+    disk is still short and nothing would free it, or nothing was handed back at all, it is refused once, so the
+    agent can add what it meant or confirm. Returns the words, or None."""
+    folder = Path(folder)
+    if found.get('reason') == 'daily' or (folder / CHECKED).exists():
+        return None
+    made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule')]
+    disk = found.get('disk') or {}
+    goal = disk.get('goal_gib') or disk.get('target_gib')
+    short = goal - disk['free_gib'] if goal and isinstance(disk.get('free_gib'), (int, float)) else 0
+    gaps = []
+    if short > 0 and not any(e['action'] == 'move' or e.get('kind') in DISK_KINDS for e in made):
+        gaps.append('内置盘还差 {:.0f} GB 到目标，你这轮没有交回任何腾磁盘的决定（move，或 ask simulator-delete、task-delete、'
+                    'path-delete）。用 du 查查是什么在占，比如 `du -xhd1 ~ ~/Library ~/Library/Developer 2>/dev/null | sort -h | tail -20`；'
+                    '能挪的挪，能删的列给用户；确实没有，就在 summary 里写清查了哪里、为什么都不能动。'.format(short))
+    if not made and found.get('reason') in ('disk', 'memory'):
+        gaps.append('你这轮一个决定都没交回，后台什么也不会做。')
+    if not gaps:
+        return None
+    try:
+        (folder / CHECKED).write_text('')
+    except OSError:
+        return None   # a read-only turn: the done itself goes back in the reply
+    return ('先别收尾。后台只照你交回的决定做，你这轮交回的是：{}。总结里说要关、要挪、要列给用户的，不在这里就都不会发生。'
+            .format('；'.join(said(e) for e in made) or '没有') + ''.join(gaps)
+            + '要补就现在补，补完再运行一次 done；确认就是这些，原样再运行一次 done。')
+
+
+def decide(folder, action, target=None, why='', note='', summary='', cause='', need='', when='', then='', replaces='',
+           checked=False):
+    """One decision of the agent's, checked against the material it was given. `checked`: a decision carried
+    back in a reply, after the run (done_check has nothing more to ask by then)."""
     folder = Path(folder)
     found = material(folder)
     entry = dict(at=time.time(), action=action)
@@ -1022,6 +1118,8 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             task = next((t for t in found['tasks'] if t['path'] == key), None)
             if task is None:
                 raise ValueError('告急材料里没有这个任务：' + key)
+            if kind == 'task-move' and task['on_drive']:
+                raise ValueError('{} 已经在外接盘上了'.format(key))
             entry.update(id=target, kind=kind, title=Path(key).name + ('（在外接盘上）' if task['on_drive'] else ''),
                          bytes=int((task['gib'] or 0) * GIB), why=why)
     elif action == 'rule':
@@ -1047,6 +1145,9 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             raise ValueError('要写结论：--summary "…"')
         if not cause.strip():
             raise ValueError('要先写为什么紧：--cause "…"（查下来不紧，就写不紧的依据）')
+        nudge = None if checked else done_check(folder, found)
+        if nudge:
+            raise ValueError(nudge)
         entry.update(summary=summary, cause=cause, **({'need': need} if need.strip() else {}))
     else:
         raise ValueError('没有这个动作：' + str(action))
@@ -1056,6 +1157,8 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             out.write(line + '\n')
     except OSError:   # the Codex App ran this turn read-only (CH-08)
         raise ValueError(UNWRITABLE + CARRY + line)
+    if action == 'done':   # what the background will do, said back once more
+        return dict(entry, handed=[said(e) for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule')])
     return entry
 
 
@@ -1148,12 +1251,14 @@ def carry(folder, said):
             if key(entry) in have:
                 receipt['recorded'].append(entry)
                 continue
-            target = entry.get('id') if entry.get('action') == 'ask' else entry.get('pid') or entry.get('path') or entry.get('id')
+            target = (entry.get('id') if entry.get('action') == 'ask' else entry.get('rule') if entry.get('action') == 'rule'
+                      else entry.get('pid') or entry.get('path') or entry.get('id'))
             receipt['recorded'].append(decide(folder, entry['action'], target, why=entry.get('why', ''),
-                                              note=entry.get('note', ''), summary=entry.get('summary', ''),
+                                              note=entry.get('to', '') if entry.get('action') == 'rule' else entry.get('note', ''),
+                                              summary=entry.get('summary', ''),
                                               cause=entry.get('cause', ''), need=entry.get('need', ''),
                                               when=entry.get('when', ''), then=entry.get('then', ''),
-                                              replaces=entry.get('replaces', '')))
+                                              replaces=entry.get('replaces', ''), checked=True))
             have.add(key(entry))
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             receipt['refused'].append(dict(line=line[len(CARRY):][:120], why=(str(error) or type(error).__name__).split('\n')[0][:120]))
@@ -1236,8 +1341,10 @@ def stop_companion(home, entry, table=None, kill=os.kill, sleep=time.sleep):
     return stop_tree(table, entry['pid'], entry['lstart'], kill=kill, sleep=sleep)
 
 
-def move_task(home, cfg, settings, path, activity, pins):
-    """「挪到外接盘」's floor without its idle days: unused, nothing unsaved, a drive that is there and big enough."""
+def move_task(home, cfg, settings, path, activity, pins, unsaved_ok=False):
+    """「挪到外接盘」's floor without its idle days: unused, nothing unsaved, a drive that is there and big enough.
+    `unsaved_ok`: the user said yes to moving it with its unsaved work (task-move): nothing is lost, it only goes
+    to the drive with the rest."""
     task = next((t for t in T.discover(cfg) if str(t.path) == str(path)), None)
     if task is None or task.linked:
         return '已经不在内置盘上了'
@@ -1249,7 +1356,7 @@ def move_task(home, cfg, settings, path, activity, pins):
     reasons = list(T.in_use(activity, task)) + ([T.pin_reason(pins, task)] if T.pin_reason(pins, task) else [])
     if reasons:
         return '；'.join(sorted(set(reasons))[:3])
-    unsaved = auto_tier.unsaved(task, cfg)
+    unsaved = None if unsaved_ok else auto_tier.unsaved(task, cfg)
     if unsaved:
         return unsaved
     if not auto_tier.volume_ready(task.external):
@@ -1492,6 +1599,11 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
     if result['judged']['tight'] and streak >= 2:
         title = 'agent 处理了 {} 次还没缓过来'.format(streak)   # AC-05: the user hears it
+    short = settings.warning_free_gib * GIB - shutil.disk_usage(str(settings.volume)).free
+    if reason in ('disk', 'asked') and short > 0:
+        # Still short of the user's target: what the agent worked out is put to them, loudly (11-10).
+        title = ('离目标还差 {:.0f} GB：agent 出了方案，等你看' if result['asks'] or result['need'] else
+                 '离目标还差 {:.0f} GB：agent 这次没找到能腾的').format(short / GIB)
     brief = notice_words(result, agent_result)
     # AC-11: with a conversation to open, the notice opens it (and offers 「去确认」 when something waits).
     talk = (folder / SESSION).is_file()
@@ -1627,7 +1739,8 @@ def tick(home, cfg, settings, now=None, asked=False, run=subprocess.run, env=Non
     pressure = memory_pressure(run)
     state = load_state(home)
     current = view(watch_state(home), pressure, now)
-    reason = due(state, free, critical, pressure, now, current)
+    reason = due(state, free, critical, pressure, now, current, goal=settings.warning_free_gib * GIB)
+    remind(home, state, free, settings.warning_free_gib * GIB, now)
     if asked:
         reason = None if running(state, now) else 'asked'
     for stale in ('starts', 'capped', 'capped_told'):    # left by builds that counted runs a day

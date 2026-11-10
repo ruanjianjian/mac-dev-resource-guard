@@ -29,6 +29,7 @@ LOSES = {
     'archive-delete': '这个版本的安装包和查崩溃用的符号文件',
     'process-stop': '它这次运行的状态，要用时得重新启动它',
     'path-delete': '里面的全部内容（缓存、日志、构建产物这类下次用到会重新生成，别的就没了）',
+    'task-move': '不丢东西：整个挪到外接盘，原路径留链接；外接盘拔掉时用不了，没推送的改动只在外接盘上',
 }
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
@@ -344,6 +345,14 @@ def agent_floor(home, cfg, item, activity, pins, simctl):
         if O.kind_of(command) and O.kind_of(command)[0] != 'agent' or any(word in command for word in O.NEVER):
             return None, '它是 App 本身、数据库、容器、调试器或模拟器'
         return dict(bytes=item['bytes'], reason=item['reason']), None
+    if kind == 'task-move':   # 11-10: an idle task with unsaved work, to the drive with the user's yes
+        task = next((t for t in T.discover(cfg) if str(t.path) == target), None)
+        if task is None or not task.reachable or task.linked:
+            return None, '任务目录不在内置盘上了'
+        reasons = T.in_use(activity, task) + ([T.pin_reason(pins, task)] if T.pin_reason(pins, task) else [])
+        if reasons:
+            return None, '；'.join(sorted(set(reasons))[:3])
+        return dict(bytes=T.size(task.real) or item['bytes'], reason=item['reason']), None
     if kind == 'path-delete':   # 11-10: anything else the agent found; the user said yes, the floor still holds
         path = Path(target)
         if not path.exists() and not path.is_symlink():
@@ -531,6 +540,11 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 simctl(['runtime', 'delete', target])
             elif item['kind'] == 'trash-empty':
                 trash_emptier()
+            elif item['kind'] == 'task-move':
+                import emergency   # here only: it imports this module
+                skipped = emergency.move_task(home, cfg, settings, target, activity, pins, unsaved_ok=True)
+                if skipped:
+                    raise RuntimeError(skipped)
             elif item['kind'] == 'process-stop':
                 import emergency   # here only: it imports this module
                 skipped = emergency.stop_tree(emergency.process_table(), int(target), item['lstart'])

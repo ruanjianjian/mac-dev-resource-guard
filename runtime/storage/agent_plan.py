@@ -38,6 +38,7 @@ RULES = {
     'device-support-delete': dict(title='旧版本的设备支持文件', actions=('ask', 'quiet', 'off'), default='ask'),
     'archive-delete': dict(title='旧的归档', actions=('ask', 'quiet', 'off'), default='ask'),
     'path-delete': dict(title='agent 查到的其他大目录', actions=('ask', 'quiet', 'off'), default='ask'),
+    'task-move': dict(title='有没保存改动的闲置任务挪到外接盘', actions=('ask', 'quiet', 'off'), default='ask'),
 }
 ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管'}
 # learned-yes (11-10): a yes the user gave again and again becomes the rule. 11-05 the user asked that their yes
