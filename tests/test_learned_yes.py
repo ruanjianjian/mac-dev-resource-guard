@@ -284,6 +284,85 @@ class BelowTargetTest(AskFixture):
         self.assertEqual((task / 'app/main.swift').read_text(), 'changed\n')   # the unsaved work came along
 
 
+class WorkDriveTest(AskFixture):
+    """11-10: 「关键是我500gb，你这些也不解决根本问题啊」 → 「那么就按照你的解法推进吧」: the drive is the work disk."""
+
+    def drive(self):
+        plan = agent_plan.load(self.home)
+        plan['rules']['idle-tasks'].update(action='work-drive', set_by='user', why='那么就按照你的解法推进吧')
+        agent_plan.save(self.home, plan)
+
+    def test_any_task_nobody_uses_goes_to_the_drive_unsaved_work_and_all_even_with_space_to_spare(self):
+        import auto_tier
+        cfg = self.cfg()
+        quiet = self.task('quiet-today', 0, dirty=True); age(quiet, 0.1)        # two hours untouched, unsaved work
+        busy = self.task('busy', 0); (busy / 'app/live.txt').write_text('now')
+        held = self.task('held', 0); age(held, 0.1)
+        plenty = lambda: 400 * GIB
+        receipt = self.run_tier(cfg, Activity(open_paths=[(7, str(held / 'app/main.swift'))]), free=plenty)
+        self.assertEqual([a['path'] for a in receipt['actions'] if a['kind'] == 'move'], [])   # 「move」: space is fine
+        self.drive()
+        receipt = self.run_tier(cfg, Activity(open_paths=[(7, str(held / 'app/main.swift'))]), free=plenty)
+        moved = [a for a in receipt['actions'] if a['kind'] == 'move' and a['result'] == 'done']
+        self.assertEqual([Path(a['path']).name for a in moved], ['quiet-today'])
+        self.assertIn('外接盘当工作盘', moved[0]['reason'])
+        self.assertTrue(quiet.is_symlink())
+        self.assertEqual((quiet / 'app/main.swift').read_text(), 'changed\n')       # nothing lost
+        self.assertFalse(busy.is_symlink()); self.assertFalse(held.is_symlink())
+        self.assertFalse(self.root.is_symlink())                                       # two tasks still here
+
+    def test_a_root_left_with_only_links_becomes_a_link_so_new_tasks_are_made_on_the_drive(self):
+        cfg = self.cfg()
+        self.drive()
+        for name in ('a', 'b'):
+            age(self.task(name, 0), 0.2)
+        (self.root / '.DS_Store').write_text('x')
+        receipt = self.run_tier(cfg, Activity(), free=lambda: 400 * GIB)
+        self.assertEqual([a['kind'] for a in receipt['actions'] if a['result'] == 'done'], ['move', 'move', 'root-link'])
+        self.assertTrue(self.root.is_symlink())
+        self.assertEqual(Path(os.path.realpath(self.root)), Path(os.path.realpath(self.external)))
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if not p.name.startswith('.')), ['a', 'b'])
+        import tasks as T
+        self.assertTrue(all(t.linked for t in T.discover(cfg)))                        # on the drive, not moved again
+        (self.root / 'new-task').mkdir()                                                # a new task lands on the drive
+        self.assertTrue((self.external / 'new-task').is_dir())
+        again = self.run_tier(cfg, Activity(), free=lambda: 400 * GIB)
+        self.assertEqual([a for a in again['actions'] if a['result'] == 'done'], [])
+
+    def test_only_the_user_makes_the_drive_the_work_disk(self):
+        with self.assertRaises(ValueError) as refused:
+            agent_plan.set_rule(self.home, 'idle-tasks', 'work-drive', by='agent', why='盘不够')
+        self.assertIn('emergency propose', str(refused.exception))
+        entry = agent_plan.set_rule(self.home, 'idle-tasks', 'work-drive', by='user', words='那么就按照你的解法推进吧')
+        self.assertEqual(agent_plan.rule_words('idle-tasks', entry), '外接盘当工作盘：没人在用就整个挪过去，新任务直接建在外接盘上')
+
+
+class ProposeTest(AskFixture):
+    """11-10: 「资源管理 agent 就应该像你这样—根据实际情况给出新的资源整理方案。而不是现在这样很呆板的」."""
+
+    def test_a_new_way_of_doing_things_is_put_to_the_user_loudly_and_kept_until_answered(self):
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, reason='disk', orphans=[], tasks=[], simulators=[], waiting=[],
+                                                         companions=[], disk=dict(free_gib=10, goal_gib=100))))
+        with self.assertRaises(ValueError):
+            E.decide(folder, 'propose', note='外接盘当工作盘', summary='', why='x')
+        E.decide(folder, 'propose', note='外接盘当工作盘', why='任务目录 173 GB 在内置盘上，外接盘空 1 TB',
+                 summary='任务目录全放外接盘，新任务直接建在那里；能腾约 150 GB；代价是编译稍慢、拔盘时打不开')
+        done = E.decide(folder, 'done', summary='提了一个方案', cause='任务都建在内置盘上')   # a plan counts for the disk
+        self.assertEqual(done['handed'], ['提给用户的方案：外接盘当工作盘'])
+        result = E.apply(self.home, self.cfg(task_roots=[]), self.settings, folder, now=NOW, table={})
+        self.assertEqual(result['proposed'], [dict(title='外接盘当工作盘')])
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual((notice['title'], notice['tab']), ('新的整理方案：外接盘当工作盘', 'emergency'))
+        self.assertIn('能腾约 150 GB', notice['body'])
+        self.assertIn('提了 1 个新方案', E.receipt(E.decisions(folder), dict(received=0, recorded=[], refused=[]), result)['words'])
+        [kept] = E.proposals(self.home, NOW)
+        self.assertEqual(kept['title'], '外接盘当工作盘')
+        state = dict(last=dict(at=NOW - 3 * 3600))
+        self.assertIn('1 个整理方案等你拿主意：外接盘当工作盘', E.remind(self.home, state, 10 * GIB, 100 * GIB, NOW))
+        self.assertEqual(E.proposals(self.home, NOW + E.PROPOSAL_DAYS * 86400), [])   # nobody answered in a week
+
+
 class MainAgentTest(AskFixture):
     def round(self, at, handed=0):
         folder = E.new_folder(self.home, at)

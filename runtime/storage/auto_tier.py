@@ -207,7 +207,7 @@ def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_
         marker = state_root(home) / MOVE_STATE
         if marker.exists():
             receipt['kept'].append(dict(path=str(marker), reason='上次搬迁状态无法判断，保留现场，需人工核对；核对前不再搬迁'))
-        elif free() < settings.warning_free_gib * GIB:
+        elif free() < settings.warning_free_gib * GIB or agent_plan.action(agent_plan.load(home), 'idle-tasks') == 'work-drive':
             try:
                 move_idle_tasks(home, cfg, settings, receipt, collect, free, now)
             finally:
@@ -215,6 +215,35 @@ def run(home, cfg, settings, activity_factory=None, simctl=default_simctl, free_
     receipt['free_after'] = round(free() / GIB, 2)
     write_receipt(home, receipt)
     return receipt
+
+
+def link_roots(cfg, activity):
+    """work-drive: a task root whose every task already lives on the drive becomes a link to the drive's root, so
+    the next task is made there. The old folder held only those links; nothing is copied."""
+    done = []
+    for root in cfg['task_roots']:
+        path, external = Path(root['path']), root.get('external')
+        if external is None or path.is_symlink() or not path.is_dir() or not volume_ready(external):
+            continue
+        external = Path(external)
+        children = [c for c in path.iterdir() if c.name != '.DS_Store']
+        if not children or not all(c.is_symlink() and os.path.realpath(c) == os.path.realpath(external / c.name) for c in children):
+            continue
+        if activity.reasons(path) or not external.is_dir():
+            continue
+        old = path.with_name('.guard-old-' + path.name)
+        try:
+            os.rename(path, old)
+            os.symlink(external, path)
+        except OSError as error:
+            if old.exists() and not path.exists():
+                os.rename(old, path)
+            done.append(dict(kind='root-link', path=str(path), bytes=0, result='failed', reason=str(error)))
+            continue
+        shutil.rmtree(old, ignore_errors=True)   # only links: the tasks themselves stay on the drive
+        done.append(dict(kind='root-link', path=str(path), dest=str(external), bytes=0, result='done',
+                         reason='任务都在外接盘上了：这个目录改成指向外接盘，新任务直接建在那里'))
+    return done
 
 
 def unsaved(task, cfg):
@@ -227,11 +256,19 @@ def unsaved(task, cfg):
     return None
 
 
+WORK_DRIVE_MINUTES = 60   # work-drive: untouched this long and nobody using it, a task goes to the drive
+
+
 def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
-    """Idle, fully pushed task folders whose task root has a drive go there, oldest first, until the target line."""
+    """Idle, fully pushed task folders whose task root has a drive go there, oldest first, until the target line.
+    With 「work-drive」: every task nobody is using and nothing wrote in the last hour, unsaved work and all, every
+    round; then a task root holding only links becomes a link to the drive itself."""
     plan = agent_plan.load(home)
-    if agent_plan.action(plan, 'idle-tasks') != 'move':
+    mode = agent_plan.action(plan, 'idle-tasks')
+    if mode not in ('move', 'work-drive'):
         return   # the plan leaves idle tasks where they are
+    drive = mode == 'work-drive'
+    days = WORK_DRIVE_MINUTES / 1440 if drive else cfg['auto_idle_days']
     pins, pin_errors = StorageManager(settings)._pins(now)
     activity = collect()
     candidates = []
@@ -242,9 +279,9 @@ def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
         if keep:
             receipt['kept'].append(dict(path=str(task.path), reason='先别动：' + (keep.get('why') or '计划里写着')))
             continue
-        reasons, latest = T.idle_check(task, activity, pins, cfg['auto_idle_days'], cfg, now)
+        reasons, latest = T.idle_check(task, activity, pins, days, cfg, now)
         reasons += pin_errors
-        if not reasons and unsaved(task, cfg):
+        if not reasons and not drive and unsaved(task, cfg):
             reasons.append(unsaved(task, cfg))
         if reasons:
             receipt['kept'].append(dict(path=str(task.path), reason='；'.join(reasons)))
@@ -252,10 +289,10 @@ def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
             candidates.append((latest, task))
     current = free()
     for latest, task in sorted(candidates, key=lambda c: c[0]):
-        if current >= settings.target_free_gib * GIB:
+        if not drive and current >= settings.target_free_gib * GIB:
             break
-        reasons, _ = T.idle_check(task, collect(), pins, cfg['auto_idle_days'], cfg, now)
-        if not reasons and unsaved(task, cfg):
+        reasons, _ = T.idle_check(task, collect(), pins, days, cfg, now)
+        if not reasons and not drive and unsaved(task, cfg):
             reasons.append(unsaved(task, cfg))
         if reasons:
             receipt['kept'].append(dict(path=str(task.path), reason='执行前复核：' + '；'.join(reasons)))
@@ -277,7 +314,8 @@ def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
         if shutil.disk_usage(str(probe)).free < bytes_ * 1.1 + GIB:
             receipt['kept'].append(dict(path=str(task.path), reason='外接盘空间不够'))
             continue
-        idle_days = '闲置 {:.1f} 天'.format((now - latest) / T.DAY)
+        idle_days = ('外接盘当工作盘：{:.0f} 分钟没人动'.format((now - latest) / 60) if drive and now - latest < T.DAY
+                     else '闲置 {:.1f} 天'.format((now - latest) / T.DAY))
         try:
             working(home, 'move', task.path.name, bytes_, receipt['free_before'])
             dest = move(home, task)
@@ -287,5 +325,7 @@ def move_idle_tasks(home, cfg, settings, receipt, collect, free, now):
         except (OSError, subprocess.SubprocessError) as error:
             receipt['actions'].append(dict(kind='move', path=str(task.path), bytes=0, result='failed', reason=str(error)))
         current = free()
+    if drive:
+        receipt['actions'] += link_roots(cfg, collect())
     if any(a['result'] == 'failed' for a in receipt['actions']):
         receipt['status'] = 'partial'

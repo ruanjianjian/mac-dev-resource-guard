@@ -25,7 +25,8 @@ class Task:
 
     @property
     def linked(self):
-        return self.path.is_symlink()
+        # On the drive: its own link, or its whole task root is a link to the drive (work-drive).
+        return self.path.is_symlink() or self.root.is_symlink()
 
     @property
     def reachable(self):
