@@ -310,7 +310,8 @@ class SimulatorTest(unittest.TestCase):
         rows = O.describe(table, [p for members in big for p in members], {}, {}, set(), NOW, sizes=sizes, home=self.home)
         lines = [(g['title'], round(g['bytes'] / 2 ** 30, 1)) for g in O.group(rows)]
         self.assertEqual(lines, [('Claude Code ×25', 6.1), ('VTDecoderXPCService', 1.5), ('iOS 模拟器 · iPhone 17 Pro', 1.3)])
-        self.assertEqual(O.tool(table[301]['command']), 'iOS 模拟器画面')
+        self.assertEqual(O.tool(table[301]['command']), 'iOS 模拟器渲染（系统自带）')
+        self.assertTrue(any(w in table[301]['command'] for w in O.NEVER))   # never stopped or asked about
         # A helper the device started a minute ago does not make it 「1 分钟」: the device has been up for 5 hours.
         fresh = {**SIMS, 92: row(92, RUNTIME + '/usr/libexec/assetsd', ppid=90, hours=0.02, mb=900)}
         [sim] = [g for g in O.group(O.describe(fresh, [92, 91], {}, {}, set(), NOW, home=self.home)) if 'iPad' in g['title']]

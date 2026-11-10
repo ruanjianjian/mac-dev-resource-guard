@@ -24,7 +24,8 @@ MINE = os.getuid()
 # Never stopped, whatever its owner: this tool itself, and the user's databases, containers and debuggers
 # (SKILL.md 内存: no killing of those).
 NEVER = ('resource-guard', 'ResourceDashboard', 'dev-memory', 'postgres', 'mongod', 'redis-server', 'mysqld',
-         'docker', 'com.docker', 'qemu', 'lldb', 'debugserver', 'launchd_sim', 'Simulator.app')
+         'docker', 'com.docker', 'qemu', 'lldb', 'debugserver', 'launchd_sim', 'Simulator.app',
+         'CoreSimulator.framework')   # its rendering services: stopping one breaks a running simulator
 
 AGENTS = {'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini CLI', 'aider': 'Aider', 'opencode': 'opencode',
           'cursor-agent': 'Cursor Agent', 'amp': 'Amp', 'goose': 'Goose', 'qwen': 'Qwen Code', 'crush': 'Crush'}
@@ -139,7 +140,9 @@ def kind_of(command):
 def tool(command):
     """What people would call it: the App, the tool (tsc, vite…), or the interpreter with what it runs."""
     if 'SimMetalHost' in command:
-        return 'iOS 模拟器画面'   # one per booted simulator, run by CoreSimulator, not under the device
+        # One per booted simulator, run by CoreSimulator, not under the device. Not 「画面」: 11-09～11-10 the agent read
+        # 「iOS 模拟器画面 ×15」 as the screen streams the user banned and asked 20 runs in a row to close them.
+        return 'iOS 模拟器渲染（系统自带）'
     if 'CoreSimulator' in command or 'SimulatorRuntime' in command or 'launchd_sim' in command:
         return 'iOS 模拟器'
     agent = agent_name(command)
