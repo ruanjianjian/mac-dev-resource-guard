@@ -194,6 +194,96 @@ class FreerAgentTest(AskFixture):
         self.assertNotIn(E.IDLE, prompts[0])
 
 
+class DoneCheckTest(AskFixture):
+    """11-10 17:23: a summary said two services went to the background that never did, and a run 23 GB short of
+    the target never looked at the disk."""
+
+    def material(self, reason='disk', free=27, goal=50):
+        self.made = getattr(self, 'made', 0) + 1
+        folder = E.new_folder(self.home, NOW + self.made)   # a folder of its own for each run
+        (folder / E.MATERIAL).write_text(json.dumps(dict(
+            at=NOW, reason=reason, orphans=[dict(pid=61, lstart='x', cpu_seconds=0)], tasks=[], waiting=[], companions=[],
+            simulators=[dict(id='S1', name='Old', system='iOS 27.0', state='Shutdown', gib=4.0)],
+            disk=dict(free_gib=free, goal_gib=goal, target_gib=goal + 5, danger_gib=25))))
+        return folder
+
+    def test_the_first_done_reads_back_what_was_handed_and_asks_once_when_the_disk_is_still_short(self):
+        folder = self.material()
+        E.decide(folder, 'stop', '61', why='没人管的 vite，9 天没连接')
+        with self.assertRaises(ValueError) as held:
+            E.decide(folder, 'done', summary='关了 vite，两个 node 服务交后台复核', cause='磁盘差 23 GB')
+        words = str(held.exception)
+        self.assertIn('你这轮交回的是：关掉 PID 61', words)
+        self.assertIn('不在这里就都不会发生', words)
+        self.assertIn('内置盘还差 23 GB 到目标', words)
+        self.assertIn('du -xhd1', words)
+        E.decide(folder, 'ask', 'simulator-delete:S1', why='关机 9 天没开过')   # it adds what it meant
+        done = E.decide(folder, 'done', summary='关了 vite，列了一台旧模拟器', cause='磁盘差 23 GB')
+        self.assertEqual(done['handed'], ['关掉 PID 61', '列给用户：Old（iOS 27.0）'])
+
+    def test_it_asks_once_only_and_not_when_there_is_nothing_to_ask(self):
+        folder = self.material()
+        with self.assertRaises(ValueError) as held:
+            E.decide(folder, 'done', summary='都不能动', cause='查了 du')
+        self.assertIn('一个决定都没交回', str(held.exception))
+        self.assertEqual(E.decide(folder, 'done', summary='查了 ~/Library 和任务目录，都在用', cause='查了 du')['handed'], [])
+        fine = self.material(free=80)
+        E.decide(fine, 'stop', '61', why='残留')
+        self.assertEqual(E.decide(fine, 'done', summary='关了残留', cause='内存')['handed'], ['关掉 PID 61'])
+        daily = self.material(reason='daily')
+        self.assertEqual(E.decide(daily, 'done', summary='看过了', cause='一天里磁盘一直紧')['handed'], [])
+
+    def test_a_done_carried_back_in_a_reply_is_not_held(self):
+        folder = self.material()
+        said = 'RG-DECISION {"action": "done", "summary": "都不能动", "cause": "查了 du"}'
+        carried = E.carry(folder, said)
+        self.assertEqual((carried['received'], len(carried['recorded']), carried['refused']), (1, 1, []))
+
+
+class BelowTargetTest(AskFixture):
+    """11-10: 「把内存目标定到100g…没达到目标的话，agent 要自己去想办法出方案，然后强提醒用户去看」."""
+
+    def test_below_the_target_the_agent_comes_every_six_hours_even_above_the_danger_line(self):
+        state = {}
+        goal, critical = 100 * GIB, 25 * GIB
+        self.assertEqual(E.due(state, 60 * GIB, critical, 1, NOW, goal=goal), 'disk')
+        E.mark_fired(state, 'disk', 60 * GIB, critical, NOW)
+        self.assertIsNone(E.due(state, 60 * GIB, critical, 1, NOW + 3600, goal=goal))
+        self.assertEqual(E.due(state, 60 * GIB, critical, 1, NOW + E.SHORT_HOURS * 3600, goal=goal), 'disk')
+        self.assertIsNone(E.due({}, 120 * GIB, critical, 1, NOW, goal=goal))   # at the target: nothing to plan
+
+    def test_a_plan_still_waiting_is_said_again_every_two_hours_until_answered_or_the_disk_is_back(self):
+        goal = 100 * GIB
+        state = dict(last=dict(at=NOW - 3 * 3600, need=''))
+        self.assertIsNone(E.remind(self.home, state, 60 * GIB, goal, NOW))      # nothing waits: nothing to say
+        E.add_asks(self.home, [dict(id='simulator-delete:S1', kind='simulator-delete', title='Old', bytes=4 * GIB, why='关机 9 天')], NOW)
+        self.assertEqual(E.remind(self.home, state, 60 * GIB, goal, NOW), '1 项等你确认，约 4 GB')
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual((notice['title'], notice['tab']), ('离目标还差 40 GB：agent 的方案还等你看', 'pending'))
+        self.assertIsNone(E.remind(self.home, state, 60 * GIB, goal, NOW + 3600))
+        self.assertIsNotNone(E.remind(self.home, state, 60 * GIB, goal, NOW + E.REMIND_HOURS * 3600))
+        self.assertIsNone(E.remind(self.home, state, 120 * GIB, goal, NOW + 9 * 3600))
+        self.assertNotIn('reminded_at', state)
+
+    def test_an_idle_task_with_unsaved_work_can_go_to_the_drive_on_the_users_yes(self):
+        cfg = self.cfg()
+        task = self.task('half-done', 10, dirty=True)
+        self.assertIsNotNone(E.move_task(self.home, cfg, self.settings, task, Activity(), {}, unsaved_ok=False))
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, orphans=[], simulators=[], waiting=[], companions=[],
+                                                         tasks=[dict(path=str(task), on_drive=False, gib=1.0)])))
+        entry = E.decide(folder, 'ask', 'task-move:' + str(task), why='10 天没动，改动没提交，挪走不丢东西')
+        [asked] = E.add_asks(self.home, [entry], NOW)
+        self.assertIn('不丢东西', asked['loses'])
+        self.external.mkdir(parents=True, exist_ok=True)
+        with patch.object(E.auto_tier, 'volume_ready', return_value=True), \
+                patch.object(E.auto_tier, 'external_access', return_value=None):
+            [done] = ask_tier.execute(self.home, cfg, self.settings, [asked['id']], FakeSimctl({}), Activity(), NOW)
+        self.assertEqual(done['outcome'], '已完成', done)
+        self.assertTrue(task.is_symlink())
+        self.assertEqual((task / 'app/main.swift').read_text(), 'changed\n')   # the unsaved work came along
+
+
 class MainAgentTest(AskFixture):
     def round(self, at, handed=0):
         folder = E.new_folder(self.home, at)

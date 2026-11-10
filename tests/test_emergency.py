@@ -80,6 +80,16 @@ class TriggerTest(unittest.TestCase):
         self.assertEqual(E.due(updated, free, CRITICAL, 2, later, looked_at([group('tsc', 2)], 16.0, later)), 'memory')
 
 
+def confirmed_done(folder, **words):
+    """An agent's `done`, said again after the read-back when the first one is held (done_check)."""
+    try:
+        return E.decide(folder, 'done', **words)
+    except ValueError as held:
+        if not str(held).startswith('先别收尾'):
+            raise
+        return E.decide(folder, 'done', **words)
+
+
 def executable(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('#!/bin/sh\nexit 0\n')
@@ -577,7 +587,7 @@ class ApplyTest(AskFixture):
         (folder / E.MATERIAL).write_text(json.dumps(material))
         for target in asks:
             E.decide(folder, 'ask', target.format(task=task), why='PR #3 已合入，改动都推了')
-        E.decide(folder, 'done', summary='列了两项等你确认。', cause='两台模拟器和一个闲置任务占着空间')
+        confirmed_done(folder, summary='列了两项等你确认。', cause='两台模拟器和一个闲置任务占着空间')
         with patch.object(E, 'run_codex', return_value=dict(agent='codex', status=status, thread='t1')), \
                 patch.object(ask_tier, 'launch_app'):
             E.run(self.home, self.cfg(), self.settings, 'disk', folder, 'codex', now=now)
@@ -783,7 +793,7 @@ class InvestigateTest(AskFixture):
                 E.decide(folder, 'lesson', **refused)
         E.decide(folder, 'lesson', when='孤儿列表里有 clusterdns 或 mirrord intproxy', then='保留：是本机共用的 DNS', replaces=dns['id'])
         E.decide(folder, 'lesson', when='截屏流开了一天以上、主人还在', then='列进「等你确认」，不自己关')
-        E.decide(folder, 'done', summary='记了两条', cause='截屏流占着核')
+        confirmed_done(folder, summary='记了两条', cause='截屏流占着核')
         result = E.apply(self.home, self.cfg(), self.settings, folder, now=NOW, table=self.TABLE)
         receipt = E.receipt(E.decisions(folder), dict(received=0, recorded=[], refused=[]), result)
         self.assertEqual((receipt['words'], receipt['learned']), ('记下 2 条经验（1 条是改写旧的）', 2))

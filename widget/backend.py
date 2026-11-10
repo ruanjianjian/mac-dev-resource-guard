@@ -120,7 +120,7 @@ def rows_memory(body):
 KIND_TITLES = {'simulator-delete': '删除模拟器', 'simulator-shutdown': '关闭模拟器', 'task-delete': '删除任务目录',
                'runtime-delete': '删除运行时', 'move': '搬到外接盘', 'prune': '删构建产物', 'tool-cache': '清工具缓存',
                'installer-delete': '删除安装包', 'trash-empty': '清空', 'device-support-delete': '删除',
-               'archive-delete': '删除', 'cache-move': '缓存搬到外接盘', 'process-stop': '关掉程序', 'path-delete': '删除'}
+               'archive-delete': '删除', 'cache-move': '缓存搬到外接盘', 'process-stop': '关掉程序', 'path-delete': '删除', 'task-move': '搬到外接盘'}
 OUTCOMES = {'pending': '待确认', 'failed': '上次失败', 'ignored': '已忽略', 'done': '已完成', 'aborted': '已放弃', 'skipped': '已跳过'}
 TIER_STATUS = {
     'disabled': '自动档未打开：在「接入设置」打开后，空间低于提醒线时会自动搬迁闲置任务目录、删可重新生成的构建产物。',
