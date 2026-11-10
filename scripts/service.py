@@ -376,12 +376,12 @@ def emergency_command(home, a):
     `now`, `status`, `on`, `off` are for people (and their agent in a chat)."""
     what = a.value
     target = a.more[0] if a.more else None
-    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done'):
+    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done', 'rule'):
         folder = emergency.run_folder()
         if what == 'show':
             return emergency.show(folder, home)
-        return emergency.decide(folder, what, target, why=a.why, note=a.note, summary=a.summary, cause=a.cause, need=a.need,
-                                when=a.when, then=a.then, replaces=a.replaces)
+        return emergency.decide(folder, what, target, why=a.why, note=a.decision if what == 'rule' else a.note,
+                                summary=a.summary, cause=a.cause, need=a.need, when=a.when, then=a.then, replaces=a.replaces)
     if what == 'status':
         state = emergency.load_state(home)
         cfg = tiers_config.load(home)
@@ -400,7 +400,7 @@ def emergency_command(home, a):
         return emergency.tick(home, cfg, settings, asked=True) or {'status': 'busy', 'message': '上一次告急处理还没结束'}
     if what == 'run':
         if target not in ('claude', 'codex') or not a.path:
-            raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked --path <这次的目录>')
+            raise ValueError('用法：emergency run claude|codex --reason disk|memory|asked|daily --path <这次的目录>')
         return emergency.run(home, cfg, settings, a.reason or 'asked', a.path, target)
     raise ValueError('emergency 后面接 show / stop / move / ask / lesson / done / now / status / open / login / on / off')
 
@@ -466,6 +466,12 @@ def tick_tiers(home, now):
             try:
                 pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
                 free = shutil.disk_usage(str(settings.volume)).free
+                # learned-yes: a kind the user keeps saying yes to is done without asking, here when the disk is short.
+                agent_plan.learn_yes(home, now)
+                if ask_tier.auto_run(home, cfg, settings, auto_tier.default_simctl, 'simulator-delete', now=now,
+                                     short_bytes=settings.warning_free_gib * GIB - free):
+                    pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
+                    free = shutil.disk_usage(str(settings.volume)).free
                 ask_tier.maybe_notify(home, pending, free, settings.critical_free_gib * GIB, now)
                 (root/'ask-error.json').unlink(missing_ok=True)
             except Exception as error:
@@ -1055,7 +1061,7 @@ def main():
     p.add_argument('--when', default='', help='emergency lesson: the situation the rule is for')
     p.add_argument('--do', dest='then', default='', help='emergency lesson: what to do then, and why')
     p.add_argument('--replaces', default='', help='emergency lesson: the id of the lesson or old note it rewrites')
-    p.add_argument('--reason', choices=['disk', 'memory', 'asked'], help='emergency run: why the agent was started')
+    p.add_argument('--reason', choices=['disk', 'memory', 'asked', 'daily'], help='emergency run: why the agent was started')
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):
         result = plan_command(home, a)
