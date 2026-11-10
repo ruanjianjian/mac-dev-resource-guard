@@ -409,6 +409,71 @@ class ReviewTest(AskFixture):
         self.assertNotIn('run', state)
 
 
+class MemoryCapsTest(AskFixture):
+    """11-10, the main agent's look back + 「都改」: 4–6 simulators open at once took 10–35 GB of a 24 GB Mac;
+    dev servers nobody connected to waited 12 hours; a Flutter compile (4 GB) was never queued."""
+
+    def rule(self, rid, action, **params):
+        plan = agent_plan.load(self.home)
+        plan['rules'][rid].update(action=action, set_by='user', why='都改')
+        plan['rules'][rid]['params'].update(params)
+        agent_plan.save(self.home, plan)
+
+    def test_more_simulators_open_than_the_cap_the_longest_unconnected_ones_are_shut(self):
+        cfg = self.cfg(task_roots=[])
+        devices = [self.device(u, 'Booted', 0, name=u.title()) for u in ('A', 'B', 'C', 'D')]
+        simctl = FakeSimctl({self.IOS: devices})
+        busy = Activity(commands=[(9, 'xcodebuild -destination id=A test')])
+        self.assertEqual(ask_tier.cap_simulators(self.home, cfg, self.settings, simctl, NOW, busy), [])   # off by default
+        self.rule('simulator-cap', 'auto', max_booted=2, quiet_minutes=30)
+        self.assertEqual(ask_tier.cap_simulators(self.home, cfg, self.settings, simctl, NOW, busy), [])   # nobody quiet long enough yet
+        ask_tier.save(self.home, ask_tier.ASK_STATE, {'unattached_since': {'B': NOW - 3600, 'C': NOW - 7200, 'D': NOW - 600}})
+        done = ask_tier.cap_simulators(self.home, cfg, self.settings, simctl, NOW, busy)
+        self.assertEqual([r['id'] for r in done], ['simulator-shutdown:C', 'simulator-shutdown:B'])   # 4 open, cap 2
+        self.assertNotIn(['shutdown', 'A'], simctl.calls)          # someone is connected to it
+        self.assertNotIn(['shutdown', 'D'], simctl.calls)          # quiet only 10 minutes
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual(notice['title'], '同时开着 4 台模拟器，关了 2 台没人连的')
+        self.assertIn('数据都在，要用再开', notice['body'])
+        with self.assertRaises(ValueError):
+            agent_plan.set_rule(self.home, 'simulator-cap', 'auto', by='agent', why='省内存')
+        self.assertEqual(agent_plan.rule_words('simulator-cap', agent_plan.load(self.home)['rules']['simulator-cap']),
+                         '最多同时开 2 台：多出来的，先关没人连满 30 分钟、最久没人用的那台')
+
+    def test_the_watch_applies_the_cap_every_ten_minutes_tight_or_not(self):
+        cfg = self.cfg(task_roots=[])
+        self.rule('simulator-cap', 'auto')
+        seen = []
+        cap = lambda home, cfg, settings, simctl, now=None: seen.append(now) or []
+        W.auto_after(self.home, cfg, self.settings, NOW, cap=cap, free=500 * GIB)
+        W.auto_after(self.home, cfg, self.settings, NOW + 60, cap=cap, free=500 * GIB)
+        W.auto_after(self.home, cfg, self.settings, NOW + W.AUTO_GAP, cap=cap, free=500 * GIB)
+        self.assertEqual(seen, [NOW, NOW + W.AUTO_GAP])
+
+    def test_dev_servers_go_sooner_and_tight_or_not_once_the_user_says_so(self):
+        rule = agent_plan.load(self.home)['rules']['idle-servers']
+        self.assertEqual(agent_plan.rule_words('idle-servers', rule), '内存快紧时，起它的会话已经不在、12 小时没人连的就关掉')
+        agent_plan.set_rule(self.home, 'idle-servers', 'auto', by='user', words='都改', params=dict(quiet_hours=2))
+        rule = agent_plan.load(self.home)['rules']['idle-servers']
+        self.assertEqual(agent_plan.rule_words('idle-servers', rule), '起它的会话已经不在、2 小时没人连的就关掉')
+        table = {500: dict(pid=500, ppid=1, lstart='Tue Nov 10 10:00:00 2026', command='node node_modules/.bin/vite --port 5253',
+                           cpu=1.0, rss=300 * 2 ** 20, age=3 * 3600)}
+        state = dict(served={'500': dict(lstart=table[500]['lstart'], cpu=1.0, clients=0, since=NOW - 3 * 3600)})
+        stops = []
+        with patch.object(W.O, 'owner', return_value=dict(kind='gone')), \
+                patch.object(W.E, 'stop_tree', side_effect=lambda table, pid, lstart, **k: stops.append(pid)):
+            self.assertEqual(W.idle_servers(state, table, None, None, NOW, set(), hours=12), [])
+            [stopped] = W.idle_servers(state, table, None, None, NOW, set(), hours=2)
+        self.assertEqual(stops, [500])
+        self.assertIn('2 小时以上没人连的开发服务', W.words([stopped], [], [], []))
+
+    def test_a_flutter_compile_is_a_heavy_job_the_analysis_server_is_not(self):
+        heavy = lambda command: bool(W.HEAVY.search(command))
+        self.assertTrue(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dartaotruntime /opt/flutter/bin/cache/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot --sdk-root x'))
+        self.assertTrue(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dart /opt/flutter/bin/cache/flutter_tools.snapshot build ios --simulator'))
+        self.assertFalse(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dart language-server --protocol=lsp'))
+
+
 class MainAgentTest(AskFixture):
     def round(self, at, handed=0):
         folder = E.new_folder(self.home, at)

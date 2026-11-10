@@ -26,7 +26,7 @@ class RulesTest(AskFixture):
             'tool-caches': 'move', 'task-builds': 'move', 'xcode-intermediates': 'clean', 'idle-tasks': 'move',
             'simulator-shutdown': 'ask', 'simulator-delete': 'ask', 'runtime-delete': 'ask', 'task-delete': 'ask',
             'installer-delete': 'ask', 'trash-empty': 'ask', 'device-support-delete': 'ask', 'archive-delete': 'ask',
-            'path-delete': 'ask', 'task-move': 'ask'})
+            'path-delete': 'ask', 'task-move': 'ask', 'simulator-cap': 'off', 'idle-servers': 'tight'})
         self.assertTrue(all(rule['set_by'] == 'default' and not rule['locked'] for rule in plan['rules'].values()))
         agent_plan.plan_path(self.home).parent.mkdir(parents=True, exist_ok=True)
         agent_plan.plan_path(self.home).write_text('{broken')

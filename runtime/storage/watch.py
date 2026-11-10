@@ -45,7 +45,9 @@ SESSION_HOURS = 3
 # Build, type-check, bundle and test tools: heavy for a while, then done. Never an App, a database or a debugger.
 HEAVY = re.compile(r'node_modules/\.bin/(?:tsc|vue-tsc|vitest|jest|webpack|next|vite|esbuild|eslint|tsx)\b|^node \((?:vitest|jest)\b'
                    r'|(?:^|/)(?:swift-frontend|swiftc|swift-build|xcodebuild|clang|clang\+\+|cargo|rustc|kotlinc|javac)(?:\s|$)'
-                   r'|GradleWorkerMain|KotlinCompileDaemon|(?:^|/)go (?:build|test|vet)\b')
+                   r'|GradleWorkerMain|KotlinCompileDaemon|(?:^|/)go (?:build|test|vet)\b'
+                   # 11-10: a Flutter compile (dartaotruntime, 4 GB) was never queued; the analysis server is not a build.
+                   r'|frontend_server(?:_aot)?\.dart\.snapshot|flutter_tools\.snapshot (?:build|test|run|assemble)\b')
 
 
 def state_root(home):
@@ -235,14 +237,14 @@ def links(seen, table):
             if int(p) in table and table[int(p)]['lstart'] == v['lstart']}
 
 
-def idle_servers(state, table, kill, sleep, now, managed, own=()):
+def idle_servers(state, table, kill, sleep, now, managed, own=(), hours=SERVER_IDLE_HOURS):
     """Dev servers whose starter is gone and that nobody has connected to, using no CPU of their own, for
     SERVER_IDLE_HOURS: stopped with the job that started them, while memory is getting tight (11-09: two vite
     servers had waited 3 and 9 days with nobody connected). Never a database or a service launchd runs, never one
     whose job still serves someone."""
     stopped, ended = [], set()
     served_ = state.get('served', {})
-    idle = lambda p: str(p) in served_ and now - served_[str(p)]['since'] >= SERVER_IDLE_HOURS * 3600
+    idle = lambda p: str(p) in served_ and now - served_[str(p)]['since'] >= hours * 3600
     for key, entry in served_.items():
         pid, row = int(key), table.get(int(key))
         if (row is None or pid in own or pid in ended or row['lstart'] != entry['lstart'] or not idle(pid)
@@ -257,7 +259,7 @@ def idle_servers(state, table, kill, sleep, now, managed, own=()):
             continue
         if E.stop_tree(table, root, table[root]['lstart'], kill=kill, sleep=sleep) is None:
             ended.update(tree)
-            stopped.append(dict(pid=pid, name=O.tool(row['command']), mb=round(row['rss'] / 2 ** 20), server=True,
+            stopped.append(dict(pid=pid, name=O.tool(row['command']), mb=round(row['rss'] / 2 ** 20), server=True, hours=hours,
                                 why='{}：没人管、{}没人连'.format(O.tool(row['command']), O.span(now - entry['since']))))
     return stopped
 
@@ -343,7 +345,8 @@ def big_sessions(home, now):
 def words(stopped, paused, users, sessions, hot=()):
     parts = []
     for kind, these in (('没人管的陪跑后台', [s for s in stopped if not s.get('server')]),
-                        ('{} 小时以上没人连的开发服务'.format(SERVER_IDLE_HOURS), [s for s in stopped if s.get('server')])):
+                        ('{:g} 小时以上没人连的开发服务'.format(min([s.get('hours', SERVER_IDLE_HOURS) for s in stopped if s.get('server')] or [SERVER_IDLE_HOURS])),
+                         [s for s in stopped if s.get('server')])):
         if these:
             parts.append('关掉了 {} 个{}（{}）'.format(len(these), kind, '、'.join(sorted({s['name'] for s in these}))))
     if paused:
@@ -404,8 +407,10 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
             observe(state, [dict(pid=p, lstart=table[p]['lstart'], cpu_seconds=sum(table[c]['cpu'] for c in E.descendants(table, p) if c in table))
                             for p in companions(table, [os.getpid()], managed) if O.companion(table[p]['command']) in O.SERVERS], now)
             result['stopped'] = leftovers(state, table, kill, sleep, now, managed, where, bool(why), own=[os.getpid()])
-            if why and clients is not None:
-                result['stopped'] += idle_servers(state, table, kill, sleep, now, managed, own=[os.getpid()])
+            rule = agent_plan.load(home)['rules']['idle-servers']   # 11-10: the user can make it always, and sooner
+            if clients is not None and (rule['action'] == 'auto' or rule['action'] == 'tight' and why):
+                result['stopped'] += idle_servers(state, table, kill, sleep, now, managed, own=[os.getpid()],
+                                                  hours=rule['params']['quiet_hours'])
     if why and table is not None:
         result['paused'] = queue(state, table, kill, now, own=[os.getpid()], sizes=sizes)
         quiet = now - state.get('noticed_at', 0) >= NOTICE_GAP
@@ -438,7 +443,7 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
 AUTO_GAP = 600   # learned-yes: what the user's yes covers is looked for at most this often from the minute's watch
 
 
-def auto_after(home, cfg, settings, now, auto_run=None, free=None):
+def auto_after(home, cfg, settings, now, auto_run=None, free=None, cap=None):
     """learned-yes: memory getting tight shuts the open simulators the user's yes covers, a short disk deletes the
     shut-down ones; each kind at most once in AUTO_GAP, and never while someone is cleaning in the panel."""
     import ask_tier, auto_tier
@@ -453,6 +458,8 @@ def auto_after(home, cfg, settings, now, auto_run=None, free=None):
         marks = json.loads(marks_path.read_text())
     except (OSError, ValueError):
         marks = {}
+    if plan['rules']['simulator-cap']['action'] == 'auto':
+        due.append(('simulator-cap', None))   # a cap, tight or not
     todo = [d for d in due if d and plan['rules'][d[0]]['action'] == 'auto' and now - marks.get(d[0], 0) >= AUTO_GAP]
     if not todo:
         return []
@@ -468,7 +475,10 @@ def auto_after(home, cfg, settings, now, auto_run=None, free=None):
             marks[kind] = now
             atomic_json(marks_path, marks)
             try:
-                done += auto_run(home, cfg, settings, auto_tier.default_simctl, kind, now=now, short_bytes=short_bytes)
+                if kind == 'simulator-cap':
+                    done += (cap or ask_tier.cap_simulators)(home, cfg, settings, auto_tier.default_simctl, now=now)
+                else:
+                    done += auto_run(home, cfg, settings, auto_tier.default_simctl, kind, now=now, short_bytes=short_bytes)
             except Exception:   # one unreadable minute never stops the watch
                 continue
     return done

@@ -628,3 +628,44 @@ def auto_run(home, cfg, settings, simctl, kind, now=None, short_bytes=None, acti
             agent_plan.notice(home, '内存紧，按你同意过的关了 {} 个模拟器'.format(len(done)),
                               '开着 {:g} 小时以上没有开发工具连着：{}。数据都在，要用再开。'.format(least, names), tab='memory')
     return done
+
+
+def cap_simulators(home, cfg, settings, simctl, now=None, activity=None):
+    """simulator-cap (11-10, the user: 「都改」): more simulators open than the cap, the extra ones nobody has been
+    connected to for its minutes go, the longest unused first; each rechecked like a yes in 「等你确认」. Their data
+    stays: only what runs now stops. Returns what was shut."""
+    now = time.time() if now is None else now
+    rule = agent_plan.load(home)['rules'].get('simulator-cap') or {}
+    if rule.get('action') != 'auto':
+        return []
+    most, minutes = rule['params']['max_booted'], rule['params']['quiet_minutes']
+    try:
+        listing = json.loads(simctl(['list', 'devices', '--json']))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return []
+    booted = [d for devices in listing.get('devices', {}).values() for d in devices if d.get('state') == 'Booted']
+    if len(booted) <= most:
+        return []
+    activity = activity if activity is not None else Activity.collect(settings.lease_root)
+    if activity.errors:
+        return []
+    stream_hours = agent_plan.load(home)['rules']['simulator-shutdown']['params'].get('stream_hours')
+    ages = process_ages() if stream_hours else {}
+    memory = load(home, ASK_STATE, {})
+    since = memory.setdefault('unattached_since', {})
+    quiet = []
+    for device in booted:
+        if attached(device['udid'], activity, stream_hours, ages):
+            since.pop(device['udid'], None)
+        elif now - since.setdefault(device['udid'], now) >= minutes * 60:
+            quiet.append((since[device['udid']], device))
+    save(home, ASK_STATE, memory)
+    picked = ['simulator-shutdown:' + d['udid'] for _, d in sorted(quiet, key=lambda q: q[0])][:len(booted) - most]
+    if not picked:
+        return []
+    lowered = dict(cfg, ask=dict(cfg['ask'], simulator_unattached_hours=minutes / 60))
+    done = [r for r in execute(home, lowered, settings, picked, simctl, activity, now, source='auto') if r['outcome'] == '已完成']
+    if done:
+        agent_plan.notice(home, '同时开着 {} 台模拟器，关了 {} 台没人连的'.format(len(booted), len(done)),
+                          '{}：没人连满 {:g} 分钟。数据都在，要用再开。'.format('、'.join(r['title'] for r in done), minutes), tab='memory')
+    return done

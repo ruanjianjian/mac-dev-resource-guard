@@ -41,10 +41,15 @@ RULES = {
     'device-support-delete': dict(title='旧版本的设备支持文件', actions=('ask', 'quiet', 'off'), default='ask'),
     'archive-delete': dict(title='旧的归档', actions=('ask', 'quiet', 'off'), default='ask'),
     'path-delete': dict(title='agent 查到的其他大目录', actions=('ask', 'quiet', 'off'), default='ask'),
+    # 11-10 (the main agent's look back, the user: 「都改」): 4–6 simulators open at once took 10–35 GB of a 24 GB Mac.
+    'simulator-cap': dict(title='同时开着的模拟器', actions=('auto', 'off'), default='off',
+                          params={'max_booted': 2, 'quiet_minutes': 30}),
+    'idle-servers': dict(title='没人管、没人连的开发服务', actions=('tight', 'auto', 'off'), default='tight',
+                         params={'quiet_hours': 12}),
     'task-move': dict(title='有没保存改动的闲置任务挪到外接盘', actions=('ask', 'quiet', 'off'), default='ask'),
 }
 ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管',
-                'work-drive': '外接盘当工作盘：没人在用就整个挪过去，新任务直接建在外接盘上'}
+                'work-drive': '外接盘当工作盘：没人在用就整个挪过去，新任务直接建在外接盘上', 'tight': '内存快紧时做'}
 # learned-yes (11-10): a yes the user gave again and again becomes the rule. 11-05 the user asked that their yes
 # 「变成记忆的一部分就能清理了」; still, by 11-10 they had said yes to the same kind of simulator 26 times on 4 days and
 # was asked again each time while the disk ran out. Only these kinds, each with the age the user's yes covered
@@ -283,6 +288,12 @@ def rule_words(rid, entry):
     words = ACTION_WORDS[entry['action']]
     if entry['action'] == 'auto' and rid in LEARNED:
         return '你同意过，' + AUTO_WORDS[rid].format(entry['params'].get(LEARNED[rid][0]) or LEARNED[rid][3])
+    if rid == 'simulator-cap' and entry['action'] == 'auto':
+        return '最多同时开 {:g} 台：多出来的，先关没人连满 {:g} 分钟、最久没人用的那台'.format(
+            entry['params']['max_booted'], entry['params']['quiet_minutes'])
+    if rid == 'idle-servers' and entry['action'] != 'off':
+        return '{}起它的会话已经不在、{:g} 小时没人连的就关掉'.format(
+            '内存快紧时，' if entry['action'] == 'tight' else '', entry['params']['quiet_hours'])
     hours = entry['params'].get('stream_hours')
     if rid == 'simulator-shutdown' and hours:
         words += '（看画面或日志超过 {:g} 小时算没人用）'.format(hours)
@@ -310,6 +321,8 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
             raise ValueError('删模拟器要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
         if new_action == 'work-drive':
             raise ValueError('把外接盘当工作盘要用户自己定：用 emergency propose 把这个方案提给用户')
+        if rid == 'simulator-cap' and new_action == 'auto':
+            raise ValueError('限制同时开着的模拟器台数要用户自己定：用 emergency propose 把这个方案提给用户')
     else:
         _check_user(words)
         _user_reopens(home, plan, '用户自己把「{}」改成{}'.format(spec['title'], ACTION_WORDS[new_action]))

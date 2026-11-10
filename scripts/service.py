@@ -696,7 +696,14 @@ def plan_command(home, a):
     if a.action == 'rule':
         if target in ('lock', 'unlock'):
             return agent_plan.set_lock(home, a.value or '', target == 'lock', words=a.words, by=a.by)
-        params = {'stream_hours': a.stream_hours} if a.stream_hours else None
+        params = {'stream_hours': a.stream_hours} if a.stream_hours else {}
+        for pair in a.param or []:   # --param quiet_hours=2 (11-10: the rules' numbers, not only stream_hours)
+            name, _, value = pair.partition('=')
+            try:
+                params[name.strip()] = float(value)
+            except ValueError:
+                raise ValueError('--param 要写成 名字=数字，比如 quiet_hours=2')
+        params = params or None
         entry = agent_plan.set_rule(home, a.value or '', target, by=a.by, why=a.why, evidence=evidence, params=params, words=a.words)
         if a.by == 'user':   # the user said it in so many words: one of their decisions
             agent_plan.remember(home, 'decision', a.value, decision='set', words=a.words, source='chat',
@@ -1059,6 +1066,7 @@ def main():
     p.add_argument('--kind', choices=agent_plan.KINDS); p.add_argument('--about'); p.add_argument('--path')
     p.add_argument('--note', default=''); p.add_argument('--decision'); p.add_argument('--last', type=int)
     p.add_argument('--stream-hours', type=float, help='rule simulator-shutdown: hours after which a screen or log stream no longer counts as use')
+    p.add_argument('--param', action='append', help='rule: one of its numbers, name=value (repeatable), e.g. quiet_hours=2')
     p.add_argument('--changed', choices=['yes', 'no'], help='review done: did this review change the plan')
     p.add_argument('--summary', default='', help='review done / emergency done: the conclusion, also told to the user')
     p.add_argument('--cause', default='', help='emergency done: why this Mac was tight')
