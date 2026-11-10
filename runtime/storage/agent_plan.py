@@ -23,7 +23,10 @@ RULES = {
     'tool-caches': dict(title='各开发工具的缓存', actions=('move', 'off'), default='move'),
     'task-builds': dict(title='任务里的构建产物', actions=('move', 'off'), default='move'),
     'xcode-intermediates': dict(title='7 天没用的 Xcode 编译中间缓存', actions=('clean', 'off'), default='clean'),
-    'idle-tasks': dict(title='闲置且改动都已推送的任务', actions=('move', 'off'), default='move'),
+    # 「work-drive」 (11-10, the user: a 500 GB disk cannot hold the work; 「按照你的解法推进吧」): the drive is where the
+    # work lives — any task nobody is using goes there, unsaved work and all, and a root left with only links
+    # becomes a link itself, so new tasks are made on the drive. Only the user sets it.
+    'idle-tasks': dict(title='闲置且改动都已推送的任务', actions=('move', 'work-drive', 'off'), default='move'),
     'simulator-shutdown': dict(title='开着却没人用的模拟器', actions=('ask', 'auto', 'quiet', 'off'), default='ask',
                                # A simulator held only by a screen or log stream this many hours counts as unused;
                                # with 「auto」, one open this many hours with nobody connected is shut when memory is tight.
@@ -40,7 +43,8 @@ RULES = {
     'path-delete': dict(title='agent 查到的其他大目录', actions=('ask', 'quiet', 'off'), default='ask'),
     'task-move': dict(title='有没保存改动的闲置任务挪到外接盘', actions=('ask', 'quiet', 'off'), default='ask'),
 }
-ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管'}
+ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管',
+                'work-drive': '外接盘当工作盘：没人在用就整个挪过去，新任务直接建在外接盘上'}
 # learned-yes (11-10): a yes the user gave again and again becomes the rule. 11-05 the user asked that their yes
 # 「变成记忆的一部分就能清理了」; still, by 11-10 they had said yes to the same kind of simulator 26 times on 4 days and
 # was asked again each time while the disk ran out. Only these kinds, each with the age the user's yes covered
@@ -304,6 +308,8 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
         _check_agent(entry, spec['title'], why, plan)
         if new_action == 'auto' and rid == 'simulator-delete':
             raise ValueError('删模拟器要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
+        if new_action == 'work-drive':
+            raise ValueError('把外接盘当工作盘要用户自己定：用 emergency propose 把这个方案提给用户')
     else:
         _check_user(words)
         _user_reopens(home, plan, '用户自己把「{}」改成{}'.format(spec['title'], ACTION_WORDS[new_action]))

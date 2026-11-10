@@ -59,6 +59,8 @@ ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-s
 # 11-10 (the user set the target to 100 GB): 「没达到目标的话，agent 要自己去想办法出方案，然后强提醒用户去看」.
 SHORT_HOURS = 6        # below the user's target, above the danger line or not: the agent works out a plan this often
 REMIND_HOURS = 2       # its plan waiting and the disk still short: the user is told again this often
+PROPOSALS = 'proposals.json'   # the agents' new ways of doing things, for the user to decide (11-10)
+PROPOSAL_DAYS = 7      # one nobody answered is dropped after this
 # What the agent reads beside the material: the raw facts its sandbox may not read itself (Codex's keeps ps, top
 # and simctl from it), taken by the background as the run starts.
 SNAPSHOTS = (('ps.txt', ['/bin/ps', '-axww', '-o', 'pid,ppid,user,rss,%cpu,etime,lstart,command']),
@@ -114,6 +116,11 @@ STEPS = (
     '在 done --summary 里逐个写清每个大头为什么不能动、要谁做什么。',
     '内置盘没到用户的目标（disk.goal_gib）就要出一份够数的方案：先想能放到外接盘的（disk.external_free_gib 是外接盘'
     '还空多少，挪过去不丢东西），再想能删的；凑不够也照实说还差多少、还能怎么办。你交回的方案后台会提醒用户去看。',
+    # 11-10, the user: 「资源管理 agent 就应该…根据实际情况给出新的资源整理方案。而不是现在这样很呆板的」.
+    '像顾问一样先算账：df 看还剩多少、离目标差多少；du 看主目录里谁最大（~、~/Library、任务目录、模拟器、临时目录），'
+    '分成必须留在内置盘的、能挪到外接盘的、能删的三类。规则凑不够数时，想想是不是做法本身有问题（比如任务都建在内置盘上、'
+    '某个程序一直在攒副本、同一种东西删了又长回来），这种要改做法的，用 `emergency propose --note "标题" --summary '
+    '"要怎么改、能腾多少、代价是什么" --why "算账的依据"` 提给用户；proposals 是已经提过、还没答复的，别重复提。',
     '底线，后台会拒绝：正在用的、有没提交或没推送改动的、被用户保护的不动；App 本身、数据库、容器、调试器不关；'
     '会丢东西的只能列给用户。',
     '学到了以后也用得上的经验，记成一条规则：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；'
@@ -133,6 +140,9 @@ DAILY_STEPS = (
     '说「等后台复核」「排队」的事后台真做了没有（看 done）。',
     '用户反复同意、从没忽略的同一类事，后台会自己改成「你同意过，直接做」（plan_changes 里 by 是 learned）；'
     '看它改得对不对，不对就写进 --need 告诉用户。',
+    '再看这段时间为什么总是紧：规则是不是凑不够数、同一种东西是不是删了又长回来。有更好的做法（比如外接盘当工作盘、'
+    '改某个工具的缓存位置），用 `emergency propose --note "标题" --summary "要怎么改、能腾多少、代价" --why "依据"` '
+    '提给用户；proposals 里已经提过的别重复。',
     '以后用得上的写成经验：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`；已有的那条不对，'
     '加 `--replaces <id>` 改写。old_notes 是以前的流水笔记，不是规则：有用的改写成规则（带 --replaces）。',
     '最后 `emergency done --cause "这段时间为什么紧（或不紧）" --summary "子 agent 做得怎样、记了什么经验"`。'
@@ -262,9 +272,12 @@ def remind(home, state, free, goal, now):
         return None
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
     waiting = [i for i in pending['items'] if i['state'] in ('pending', 'failed') and not i.get('quiet') and not i.get('unreachable')]
-    if not waiting and not last.get('need'):
+    ideas = proposals(home, now)
+    if not waiting and not last.get('need') and not ideas:
         return None
     body = ('{} 项等你确认，约 {:.0f} GB'.format(len(waiting), sum(i.get('bytes') or 0 for i in waiting) / GIB) if waiting else '')
+    if ideas:
+        body += ('；' if body else '') + '{} 个整理方案等你拿主意：{}'.format(len(ideas), '、'.join(p['title'] for p in ideas[:2]))
     if last.get('need'):
         body += ('；' if body else '') + 'agent 说要你做：' + last['need']
     agent_plan.notice(home, '离目标还差 {:.0f} GB：agent 的方案还等你看'.format((goal - free) / GIB), body[:300],
@@ -868,6 +881,7 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         lessons=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then']) for m in agent_plan.lessons(home)],
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
+        proposals=[dict(title=p['title'], plan=p['plan'][:300]) for p in proposals(home, now)],
         steps=list(STEPS))
 
 
@@ -977,7 +991,7 @@ def judge(home, reason, settings, now=None, free=None, samples=None, swap=None):
 
 def receipt(made, carried, result):
     """agent-investigates AC-04: what came back, what was written down, what was done and what was skipped."""
-    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask', 'rule')]
+    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')]
     ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘', '已改')]
     later = [d for d in result['done'] if d['result'] == HANDED_WORDS]
     skipped = [d for d in result['done'] if d not in ok and d not in later]
@@ -989,7 +1003,8 @@ def receipt(made, carried, result):
         parts.append('交回 {} 条决定，照做 {} 条'.format(len(handed), len(ok))
                      + ('，{} 条交给资源看板自己去挪'.format(len(later)) if later else '')
                      + ('，跳过 {} 条（{}）'.format(len(skipped), '；'.join(sorted({d['result'] for d in skipped}))[:120]) if skipped else '')
-                     + ('，{} 条列进「等你确认」'.format(len(result['asks'])) if result['asks'] else ''))
+                     + ('，{} 条列进「等你确认」'.format(len(result['asks'])) if result['asks'] else '')
+                     + ('，提了 {} 个新方案'.format(len(result.get('proposed') or [])) if result.get('proposed') else ''))
     learned = result.get('learned', [])
     if learned:
         fresh = sum(1 for m in learned if not m.get('replaces'))
@@ -1043,6 +1058,8 @@ def said(entry):
         return '挪走 ' + Path(entry.get('path') or '').name
     if entry['action'] == 'rule':
         return '把规则 {} 改成 {}'.format(entry.get('rule'), entry.get('to'))
+    if entry['action'] == 'propose':
+        return '提给用户的方案：' + str(entry.get('title'))
     return '列给用户：' + str(entry.get('title') or entry.get('id'))
 
 
@@ -1054,12 +1071,12 @@ def done_check(folder, found):
     folder = Path(folder)
     if found.get('reason') == 'daily' or (folder / CHECKED).exists():
         return None
-    made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule')]
+    made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')]
     disk = found.get('disk') or {}
     goal = disk.get('goal_gib') or disk.get('target_gib')
     short = goal - disk['free_gib'] if goal and isinstance(disk.get('free_gib'), (int, float)) else 0
     gaps = []
-    if short > 0 and not any(e['action'] == 'move' or e.get('kind') in DISK_KINDS for e in made):
+    if short > 0 and not any(e['action'] in ('move', 'propose') or e.get('kind') in DISK_KINDS for e in made):
         gaps.append('内置盘还差 {:.0f} GB 到目标，你这轮没有交回任何腾磁盘的决定（move，或 ask simulator-delete、task-delete、'
                     'path-delete）。用 du 查查是什么在占，比如 `du -xhd1 ~ ~/Library ~/Library/Developer 2>/dev/null | sort -h | tail -20`；'
                     '能挪的挪，能删的列给用户；确实没有，就在 summary 里写清查了哪里、为什么都不能动。'.format(short))
@@ -1129,6 +1146,10 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
         if note not in spec['actions']:
             raise ValueError('「{}」只能设成：{}（用 --decision 写）'.format(spec['title'], '、'.join(spec['actions'])))
         entry.update(rule=str(target), to=note, why=why)
+    elif action == 'propose':
+        if not (note.strip() and summary.strip() and why.strip()):
+            raise ValueError('方案要有标题、内容和依据：--note "标题" --summary "要怎么改、能腾多少、代价" --why "算账的依据"')
+        entry.update(title=note.strip()[:80], plan=summary.strip(), why=why.strip())
     elif action == 'lesson':
         when, then, replaces = when.strip(), then.strip(), replaces.strip()
         if not (when and then):
@@ -1158,7 +1179,7 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
     except OSError:   # the Codex App ran this turn read-only (CH-08)
         raise ValueError(UNWRITABLE + CARRY + line)
     if action == 'done':   # what the background will do, said back once more
-        return dict(entry, handed=[said(e) for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule')])
+        return dict(entry, handed=[said(e) for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')])
     return entry
 
 
@@ -1445,6 +1466,31 @@ def maybe_asks(home, folder, settings, now, free=None):
     return add_asks(home, picked, now, prefix='后台补列：')
 
 
+def proposals(home, now=None):
+    """The agents' proposals nobody answered yet, newest first; older than PROPOSAL_DAYS they drop."""
+    now = time.time() if now is None else now
+    try:
+        found = json.loads((state_root(home) / PROPOSALS).read_text()).get('items', [])
+    except (OSError, ValueError):
+        found = []
+    return [p for p in found if p.get('status') == 'open' and now - p.get('at', 0) < PROPOSAL_DAYS * 86400]
+
+
+def add_proposals(home, entries, folder, now):
+    """A new way of doing things, put to the user loudly: it changes how the disk is used, so the user decides,
+    with their agent in a chat (11-10)."""
+    if not entries:
+        return []
+    kept = {p['title']: p for p in proposals(home, now)}
+    for entry in entries:
+        kept[entry['title']] = dict(id='p{}'.format(int(now * 1000) % 10 ** 9 + len(kept)), at=now, title=entry['title'],
+                                    plan=entry['plan'], why=entry['why'], folder=str(folder), status='open')
+    atomic_json(state_root(home) / PROPOSALS, dict(items=list(kept.values())))
+    for entry in entries:
+        agent_plan.notice(home, '新的整理方案：' + entry['title'], entry['plan'][:280], tab='emergency')
+    return [dict(title=e['title']) for e in entries]
+
+
 def add_asks(home, entries, now, prefix='agent：'):
     """The agent's asks join 「等你确认」, marked as its own, with its reasons (AC-07)."""
     pending = ask_tier.load(home, ask_tier.PENDING, ask_tier.empty_pending())
@@ -1492,6 +1538,7 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
             done.append(dict(entry, result='已改'))
         except (OSError, ValueError) as error:
             done.append(dict(entry, result=str(error).split('\n')[0][:120]))
+    proposed = add_proposals(home, [e for e in made if e['action'] == 'propose'], folder, now)
     asks = add_asks(home, settle_asks(home, [e for e in made if e['action'] == 'ask'], table), now)
     learned = []
     for entry in (e for e in made if e['action'] == 'lesson' and e.get('when')):
@@ -1500,7 +1547,7 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
         except (OSError, ValueError):
             pass
     last = next((e for e in reversed(made) if e['action'] == 'done'), {})
-    return dict(done=done, asks=[dict(id=a['id'], title=a['title'], bytes=a['bytes']) for a in asks],
+    return dict(done=done, asks=[dict(id=a['id'], title=a['title'], bytes=a['bytes']) for a in asks], proposed=proposed,
                 summary=last.get('summary', ''), cause=last.get('cause', ''), need=last.get('need', ''),
                 learned=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then'], replaces=m.get('replaces')) for m in learned])
 
@@ -1602,7 +1649,7 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     short = settings.warning_free_gib * GIB - shutil.disk_usage(str(settings.volume)).free
     if reason in ('disk', 'asked') and short > 0:
         # Still short of the user's target: what the agent worked out is put to them, loudly (11-10).
-        title = ('离目标还差 {:.0f} GB：agent 出了方案，等你看' if result['asks'] or result['need'] else
+        title = ('离目标还差 {:.0f} GB：agent 出了方案，等你看' if result['asks'] or result['need'] or result.get('proposed') else
                  '离目标还差 {:.0f} GB：agent 这次没找到能腾的').format(short / GIB)
     brief = notice_words(result, agent_result)
     # AC-11: with a conversation to open, the notice opens it (and offers 「去确认」 when something waits).
@@ -1690,6 +1737,7 @@ def daily_material(home, settings, now):
         lessons=[dict(id=m['id'], when=m['rule']['when'], then=m['rule']['then']) for m in agent_plan.lessons(home)],
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
+        proposals=[dict(title=p['title'], plan=p['plan'][:300]) for p in proposals(home, now)],
         orphans=[], companions=[], tasks=[], simulators=[], waiting=[], steps=list(DAILY_STEPS))
 
 

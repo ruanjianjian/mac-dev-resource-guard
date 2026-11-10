@@ -376,7 +376,7 @@ def emergency_command(home, a):
     `now`, `status`, `on`, `off` are for people (and their agent in a chat)."""
     what = a.value
     target = a.more[0] if a.more else None
-    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done', 'rule'):
+    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done', 'rule', 'propose'):
         folder = emergency.run_folder()
         if what == 'show':
             return emergency.show(folder, home)
