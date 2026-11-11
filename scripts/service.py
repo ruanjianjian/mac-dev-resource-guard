@@ -453,6 +453,8 @@ def tick_tiers(home, now):
     except ValueError as error:
         atomic_json(root/'tiers-last.json', dict(at=now, interval_minutes=30))
         auto_tier.write_receipt(home, dict(empty, status='config_error', config_error=str(error)))
+        import watch
+        watch.config_trouble(home, error, now)   # 11-11: 17 hours of 「设置有误」 nobody heard about
         return 'config_error'
     atomic_json(root/'tiers-last.json', dict(at=now, interval_minutes=cfg['check_interval_minutes']))
     dashboard = root/'dashboard'/'operation.lock'

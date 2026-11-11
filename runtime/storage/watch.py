@@ -366,7 +366,10 @@ def tick(home, now=None, run=subprocess.run, table=None, kill=os.kill, sleep=tim
     """One minute of watching (AC-01～05). Never raises for a slow Mac: what cannot be read is skipped this minute."""
     now = time.time() if now is None else now
     home = Path(home)
-    cfg = tiers_config.load(home)
+    try:
+        cfg = tiers_config.load(home)
+    except tiers_config.ConfigError:
+        cfg = {}   # 11-11: a broken storage setting stopped this watch for 17 hours; memory does not depend on it
     state = load(home)
     if table is None:
         try:
@@ -484,11 +487,28 @@ def auto_after(home, cfg, settings, now, auto_run=None, free=None, cap=None):
     return done
 
 
+def config_trouble(home, error, now):
+    """The settings cannot be read: said once a day, so the background never stops quietly (11-11)."""
+    path = state_root(home) / 'config-trouble.json'
+    try:
+        told = json.loads(path.read_text())
+    except (OSError, ValueError):
+        told = {}
+    day = time.strftime('%Y-%m-%d', time.localtime(now))
+    if told.get('day') != day or told.get('error') != str(error):
+        agent_plan.notice(home, '资源看板的设置有误，后台整理停了', '{}。让你的 agent 看一下，或在「帮你管着」里改回来。'.format(error)[:300])
+        atomic_json(path, dict(day=day, error=str(error), at=now))
+
+
 def emergency_after(home, now):
     """AC-05: whatever is still tight after the minute's own work goes to the agent, by the emergency rules."""
     import portable_config
     settings = portable_config.configure(home)
-    cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    try:
+        cfg = tiers_config.load(home, owned=[settings.cache_roots[0], settings.state_root, state_root(home)])
+    except tiers_config.ConfigError as error:
+        config_trouble(home, error, now)
+        return None
     auto_after(home, cfg, settings, now)
     lock = state_root(home) / 'emergency.lock'
     with lock.open('a') as handle:

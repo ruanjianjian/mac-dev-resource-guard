@@ -105,19 +105,24 @@ def load(home, owned=()):
         label = 'task_roots[{}]'.format(i)
         if not isinstance(entry, dict) or set(entry) - {'path', 'external'} or 'path' not in entry:
             raise ConfigError(label + ' 只能包含 path 和 external')
-        root = Path(str(entry['path']))
-        if not root.is_absolute() or not root.is_dir():
-            raise ConfigError(label + '.path 必须是已存在的绝对路径：' + str(root))
-        root = root.resolve()
+        given = Path(str(entry['path']))
+        external = entry.get('external')
+        external = Path(str(external)) if external is not None else None
+        if external is not None and not external.is_absolute():
+            raise ConfigError(label + '.external 必须是绝对路径')
+        # work-drive (11-11): a root that became a link to its drive is the drive being the work disk, not an
+        # overlap; it stays a link when the drive is unplugged. Read as resolved, it looked like its own drive
+        # folder, every load failed, and both background jobs stopped for 17 hours.
+        linked = external is not None and given.is_symlink() and os.path.realpath(given) == os.path.realpath(external)
+        if not given.is_absolute() or not (linked or given.is_dir()):
+            raise ConfigError(label + '.path 必须是已存在的绝对路径：' + str(given))
+        root = given if linked else given.resolve()
         if _too_broad(root, home, owned):
             raise ConfigError(label + '.path 范围过大：' + str(root))
-        external = entry.get('external')
         if external is not None:
-            external = Path(str(external))
-            if not external.is_absolute():
-                raise ConfigError(label + '.external 必须是绝对路径')
             # The drive may be unplugged now, so only reject what is wrong on its face.
-            if _too_broad(external, home, owned) or external == root or root in external.parents or external in root.parents:
+            if _too_broad(external, home, owned) or not linked and (
+                    external == root or root in external.parents or external in root.parents):
                 raise ConfigError(label + '.external 范围过大或与任务根重叠：' + str(external))
         roots.append({'path': root, 'external': external})
     cfg['task_roots'] = roots
