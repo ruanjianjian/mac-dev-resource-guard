@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import time
 import unittest
 from unittest.mock import patch
@@ -503,6 +504,65 @@ class MemoryCapsTest(AskFixture):
         self.assertTrue(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dartaotruntime /opt/flutter/bin/cache/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot --sdk-root x'))
         self.assertTrue(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dart /opt/flutter/bin/cache/flutter_tools.snapshot build ios --simulator'))
         self.assertFalse(heavy('/opt/flutter/bin/cache/dart-sdk/bin/dart language-server --protocol=lsp'))
+
+
+class ToolEnvTest(AskFixture):
+    """11-11: several sessions' vitest runs, 10 workers each, filled 24 GB; the user: 「这也应该是agent做的智能决策才可以」
+    「不要写死」. Which tool to limit and how far is the agent's call; only system, path and secret variables are not."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self.launchctl = lambda *a: self.calls.append(a) or subprocess.CompletedProcess(a, 0, '', '')
+
+    def test_the_agent_sets_and_lifts_a_tool_limit_with_its_reason_and_the_user_hears_it(self):
+        import toolcaches
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(at=NOW, reason='memory', orphans=[], tasks=[], simulators=[], waiting=[], companions=[])))
+        for bad in ('PATH', 'DYLD_INSERT_LIBRARIES', 'GITHUB_TOKEN', 'lower'):
+            with self.assertRaises(ValueError, msg=bad):
+                E.decide(folder, 'env', bad, why='x', note='3')
+        E.decide(folder, 'env', 'VITEST_MAX_THREADS', why='vitest 2.1.9 读它；三个会话同时跑测试各开 10 个', note='3')
+        E.decide(folder, 'env', 'VITEST_MAX_FORKS', why='同上，forks 池', note='3')
+        with patch.object(toolcaches, 'default_launchctl', self.launchctl):
+            result = E.apply(self.home, self.cfg(task_roots=[]), self.settings, folder, now=NOW, table={})
+        self.assertEqual([d['result'] for d in result['done']], ['已改', '已改'])
+        zshenv = (self.home / '.zshenv').read_text()
+        self.assertIn('export VITEST_MAX_THREADS="3"', zshenv)
+        self.assertEqual(zshenv.count(toolcaches.BEGIN), 1)
+        self.assertIn(('setenv', 'VITEST_MAX_FORKS', '3'), self.calls)
+        self.assertEqual(subprocess.run(['/bin/zsh', '-c', 'source ~/.zshenv; echo $VITEST_MAX_THREADS'], capture_output=True, text=True,
+                                        env=dict(os.environ, HOME=str(self.home))).stdout.strip(), '3')
+        [notice] = [n for n in agent_plan.queued_notices(self.home) if 'VITEST_MAX_THREADS' in n['body']]
+        self.assertIn('没设 → 3', notice['body'])
+        self.assertIn('把 VITEST_MAX_THREADS 设成 3', E.said(E.decisions(folder)[0]))
+        toolcaches.set_env(self.home, 'VITEST_MAX_THREADS', None, why='内存一周都宽松', launchctl=self.launchctl)
+        self.assertNotIn('VITEST_MAX_THREADS', (self.home / '.zshenv').read_text())
+        self.assertIn('VITEST_MAX_FORKS', (self.home / '.zshenv').read_text())
+        self.assertIn(('unsetenv', 'VITEST_MAX_THREADS'), self.calls)
+
+    def test_the_xcode_cache_line_and_the_tool_variables_live_in_one_block(self):
+        import toolcaches
+        toolcaches.set_env(self.home, 'CARGO_BUILD_JOBS', '4', by='user', words='cargo 也限一下', launchctl=self.launchctl)
+        toolcaches.enable_xcode_cache(self.home, self.launchctl)
+        text = (self.home / '.zshenv').read_text()
+        self.assertEqual(text.count(toolcaches.BEGIN), 1)
+        self.assertIn('XCODE_XCCONFIG_FILE', text); self.assertIn('export CARGO_BUILD_JOBS="4"', text)
+        toolcaches.disable_xcode_cache(self.home, self.launchctl)
+        text = (self.home / '.zshenv').read_text()
+        self.assertNotIn('XCODE_XCCONFIG_FILE', text); self.assertIn('CARGO_BUILD_JOBS', text)
+        toolcaches.set_env(self.home, 'CARGO_BUILD_JOBS', None, by='user', words='不用了', launchctl=self.launchctl)
+        self.assertNotIn(toolcaches.BEGIN, (self.home / '.zshenv').read_text())
+
+    def test_a_server_missing_from_one_minutes_read_keeps_its_quiet_clock(self):
+        table = {500: dict(pid=500, ppid=1, lstart='L', command='node server.ts', cpu=1.0, rss=1, age=10)}
+        state = dict(served={'500': dict(lstart='L', cpu=1.0, clients=0, since=NOW - 3 * 3600)})
+        W.served(state, table, {}, NOW)                       # this minute's lsof did not see it
+        self.assertEqual(state['served']['500']['since'], NOW - 3 * 3600)
+        W.served(state, table, {500: 0}, NOW + 60)
+        self.assertEqual(state['served']['500']['since'], NOW - 3 * 3600)
+        W.served(state, {}, {}, NOW + 120)                    # gone for real
+        self.assertNotIn('500', state['served'])
 
 
 class MainAgentTest(AskFixture):
