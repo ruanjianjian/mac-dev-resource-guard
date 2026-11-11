@@ -118,6 +118,13 @@ class EarlyTest(WatchFixture):
         self.assertIsNone(result['early'])
         self.assertEqual(len(self.notices), 1)
 
+    def test_a_setting_that_cannot_be_read_never_stops_the_watch(self):
+        # 11-11: one bad task root made every minute's tiers_config.load fail; the watch stopped for 17 hours.
+        bad = W.tiers_config.settings_path(self.home); bad.write_text('{broken')
+        result = self.tick(NOW, Readings(pressure=1, share=0.6), {})
+        self.assertTrue(result['on'])
+        self.assertEqual(len(W.load(self.home)['samples']), 1)
+
     def test_the_agent_comes_after_five_minutes_of_it(self):
         for minute in range(6):
             self.tick(NOW + minute * 60, Readings(pressure=1, share=0.85), {})

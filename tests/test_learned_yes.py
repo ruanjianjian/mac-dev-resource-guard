@@ -331,6 +331,37 @@ class WorkDriveTest(AskFixture):
         again = self.run_tier(cfg, Activity(), free=lambda: 400 * GIB)
         self.assertEqual([a for a in again['actions'] if a['result'] == 'done'], [])
 
+    def test_the_next_rounds_read_a_linked_root_as_on_the_drive_even_with_the_drive_unplugged(self):
+        # 11-11: once the root was a link, every load of the settings failed (「与任务根重叠」) and both background
+        # jobs stopped for 17 hours; read as resolved, it also looked like a folder of tasks on the internal disk.
+        import tasks as T, tiers_config
+        self.cfg()
+        self.drive()
+        age(self.task('only', 0), 0.2)
+        self.run_tier(self.cfg(), Activity(), free=lambda: 400 * GIB)
+        self.assertTrue(self.root.is_symlink())
+        cfg = tiers_config.load(self.home, owned=[self.settings.cache_roots[0], self.settings.state_root])
+        self.assertEqual(cfg['task_roots'][0]['path'], self.root)                   # kept as the link, not resolved
+        self.assertTrue(all(t.linked for t in T.discover(cfg)))
+        again = self.run_tier(cfg, Activity(), free=lambda: 400 * GIB)
+        self.assertEqual(again['status'], 'managed-caches')
+        unplugged = self.external.with_name('unplugged')
+        os.rename(self.external, unplugged)                                         # the drive is gone: a dangling link
+        try:
+            cfg = tiers_config.load(self.home, owned=[self.settings.cache_roots[0], self.settings.state_root])
+            self.assertEqual(cfg['task_roots'][0]['path'], self.root)
+            self.assertEqual(T.discover(cfg), [])
+        finally:
+            os.rename(unplugged, self.external)
+
+    def test_a_setting_that_cannot_be_read_is_said_once_a_day_and_stops_nothing_else(self):
+        import tiers_config
+        bad = tiers_config.settings_path(self.home); bad.parent.mkdir(parents=True, exist_ok=True); bad.write_text('{broken')
+        self.assertIsNone(W.emergency_after(self.home, NOW))
+        self.assertIsNone(W.emergency_after(self.home, NOW + 60))
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual(notice['title'], '资源看板的设置有误，后台整理停了')
+
     def test_only_the_user_makes_the_drive_the_work_disk(self):
         with self.assertRaises(ValueError) as refused:
             agent_plan.set_rule(self.home, 'idle-tasks', 'work-drive', by='agent', why='盘不够')
