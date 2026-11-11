@@ -228,6 +228,12 @@ def served(state, table, clients, now):
         before = state.get('served', {}).get(str(pid))
         still = before and before['lstart'] == row['lstart'] and not count and cpu - before['cpu'] <= E.ORPHAN_CPU_SECONDS
         fresh[str(pid)] = dict(lstart=row['lstart'], cpu=cpu, clients=count, since=before['since'] if still else now)
+    # 11-11: a server missing from one minute's lsof (busy Mac, slow answer) started its quiet clock over and never
+    # reached the user's 2 hours; one still running as itself keeps its clock until it is read again.
+    for key, before in state.get('served', {}).items():
+        row = table.get(int(key))
+        if key not in fresh and row is not None and row['lstart'] == before['lstart']:
+            fresh[key] = before
     state['served'] = fresh
     return links(state, table)
 

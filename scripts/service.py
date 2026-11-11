@@ -376,11 +376,11 @@ def emergency_command(home, a):
     `now`, `status`, `on`, `off` are for people (and their agent in a chat)."""
     what = a.value
     target = a.more[0] if a.more else None
-    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done', 'rule', 'propose'):
+    if what in ('show', 'stop', 'move', 'ask', 'lesson', 'done', 'rule', 'propose', 'env'):
         folder = emergency.run_folder()
         if what == 'show':
             return emergency.show(folder, home)
-        return emergency.decide(folder, what, target, why=a.why, note=a.decision if what == 'rule' else a.note,
+        return emergency.decide(folder, what, target, why=a.why, note=a.decision if what in ('rule', 'env') else a.note,
                                 summary=a.summary, cause=a.cause, need=a.need, when=a.when, then=a.then, replaces=a.replaces)
     if what == 'status':
         state = emergency.load_state(home)
@@ -1057,7 +1057,7 @@ def update_now(home, fetch=None, run=subprocess.run):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('action', choices=['activate', 'tick-storage', 'integrate', 'plan', 'target', 'agent-app', 'mole-guard', 'prune', 'enable', 'update',
-                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency', 'watch'])
+                                                                    'memory', 'rules', 'rule', 'keep', 'setting', 'review', 'emergency', 'watch', 'env'])
     p.add_argument('value', nargs='?', help='target: GB to keep free; agent-app: claude or codex; mole-guard: remove; rule/setting: its name')
     p.add_argument('more', nargs='*', help='rule: new action, lock or unlock; setting: new value, lock or unlock; keep: the path')
     p.add_argument('--json', action='store_true', help='plan: print the plan as JSON (the default)')
@@ -1080,6 +1080,17 @@ def main():
     p.add_argument('--project', type=Path); a=p.parse_args(); home=Path.home()
     if a.action in ('memory', 'rules', 'rule', 'keep', 'setting', 'review'):
         result = plan_command(home, a)
+    elif a.action == 'env':   # 11-11: the variables set for the user's dev tools (the agent's, or the user's own)
+        if not a.value:
+            result = dict(env=toolcaches.managed_env(home))
+        else:
+            value = a.more[0] if a.more else None
+            if value is None:
+                raise ValueError('用法：env <变量名> <值|off> --why "依据"（用户自己说的：--by user --words "原话"）')
+            result = toolcaches.set_env(home, a.value, None if value == 'off' else value, by=a.by, why=a.why, words=a.words)
+            if a.by == 'user':
+                agent_plan.remember(home, 'decision', 'tool-env', decision='set', words=a.words, source='chat',
+                                    note='用户要求把 {} 设成 {}'.format(a.value, value))
     elif a.action == 'emergency':
         result = emergency_command(home, a)
     elif a.action == 'watch':

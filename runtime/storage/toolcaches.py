@@ -324,6 +324,68 @@ def xcode_conflict(home, launchctl=default_launchctl):
     return None
 
 
+ENV_FILE = '.config/dev-resource-guard/env.json'
+# 11-11, the user: 「这也应该是agent做的智能决策才可以」「不要写死」. Which tool to limit and how far is the agent's
+# call (several sessions' vitest runs, 10 workers each, filled 24 GB); only these are never its to set.
+ENV_NAME = re.compile(r'^[A-Z][A-Z0-9_]{1,63}$')
+ENV_NEVER = re.compile(r'^(?:PATH|HOME|SHELL|USER|LOGNAME|TMPDIR|PWD|TERM|LANG|LC_\w+|DYLD_\w*|LD_\w*|SSH_\w*|SUDO_\w*|'
+                       r'XCODE_XCCONFIG_FILE|\w*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)\w*)$')
+
+
+def managed_env(home):
+    """The variables set for the user's tools, each with who set it and why."""
+    try:
+        found = json.loads((Path(home) / ENV_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in found.items() if isinstance(v, dict) and ENV_NAME.match(k) and not ENV_NEVER.match(k)}
+
+
+def write_block(home):
+    """The one marked block in the shell files: the Xcode cache line when it is on, then the managed variables."""
+    home = Path(home)
+    lines = ['export {}="{}"'.format(ENV, xcconfig_path(home))] if xcode_cache_on(home) else []
+    lines += ['export {}="{}"'.format(name, str(entry['value']).replace('"', '')) for name, entry in sorted(managed_env(home).items())]
+    for rc in shell_files(home):
+        text = _strip_block(rc.read_text()) if rc.exists() else ''
+        if lines:
+            rc.write_text((text + '\n\n' if text else '') + '{}\n{}\n{}\n'.format(BEGIN, '\n'.join(lines), END))
+        elif rc.exists() and text != rc.read_text().strip('\n'):
+            rc.write_text(text + '\n' if text else '')
+
+
+def set_env(home, name, value, by='agent', why='', words='', launchctl=None):
+    """Set (or with value None, take away) one variable for every new terminal, agent command and App."""
+    if not ENV_NAME.match(str(name or '')) or ENV_NEVER.match(name):
+        raise ValueError('{} 不能由资源看板设：只能是开发工具读来定并发、内存的变量，系统、路径和密钥类的不行'.format(name))
+    if value is not None and (len(str(value)) > 200 or '\n' in str(value)):
+        raise ValueError('值太长或带换行')
+    if by == 'agent' and not str(why or '').strip():
+        raise ValueError('要写明依据：哪个工具读它、为什么要设')
+    if by != 'agent' and not str(words or '').strip():
+        raise ValueError('用户亲口要求的改动要带上原话（--words "…"）')
+    launchctl = launchctl or default_launchctl   # looked up now, so a test's stand-in is the one used
+    home = Path(home)
+    found = managed_env(home)
+    before = found.get(name, {}).get('value')
+    if value is None:
+        found.pop(name, None)
+    else:
+        found[name] = dict(value=str(value), set_by=by, why=why or words, at=time.time())
+    path = home / ENV_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(path, found)
+    write_block(home)
+    if value is None:
+        launchctl('unsetenv', name)
+    else:
+        launchctl('setenv', name, str(value))
+    if before != (None if value is None else str(value)):
+        agent_plan._changed(home, by, 'env', name, '开发工具的环境变量 ' + name, before or '没设', '没设' if value is None else str(value),
+                            why or words, ())
+    return found.get(name)
+
+
 def enable_xcode_cache(home, launchctl=default_launchctl):
     home = Path(home)
     conflict = xcode_conflict(home, launchctl)
@@ -335,27 +397,19 @@ def enable_xcode_cache(home, launchctl=default_launchctl):
     path.write_text('// Managed by 资源看板 (mac-dev-resource-guard). 关闭请在看板里操作。\n'
                     'COMPILATION_CACHE_ENABLE_CACHING = YES\n'
                     'COMPILATION_CACHE_CAS_PATH = {}\n'.format(cas))
-    line = 'export {}="{}"'.format(ENV, path)
-    for rc in shell_files(home):
-        text = _strip_block(rc.read_text()) if rc.exists() else ''
-        rc.write_text((text + '\n\n' if text else '') + '{}\n{}\n{}\n'.format(BEGIN, line, END))
+    write_block(home)
     launchctl('setenv', ENV, str(path))
 
 
 def disable_xcode_cache(home, launchctl=default_launchctl):
     """Settings off for new terminals and apps; the file stays (empty) so shells opened earlier still build."""
     home = Path(home)
-    for rc in shell_files(home):
-        if rc.exists():
-            text = rc.read_text()
-            stripped = _strip_block(text)
-            if stripped != text.strip('\n'):
-                rc.write_text(stripped + '\n' if stripped else '')
-    if launchctl('getenv', ENV).stdout.strip() == str(xcconfig_path(home)):
-        launchctl('unsetenv', ENV)
     path = xcconfig_path(home)
     if path.exists():
         path.write_text('// 资源看板已关闭 Xcode 编译缓存；保留空文件，已打开的终端照常构建。\n')
+    write_block(home)   # the managed variables, if any, stay
+    if launchctl('getenv', ENV).stdout.strip() == str(xcconfig_path(home)):
+        launchctl('unsetenv', ENV)
 
 
 def xcode_cache_on(home):
@@ -371,3 +425,6 @@ def ensure_env(home, launchctl=default_launchctl):
     path = str(xcconfig_path(home))
     if xcode_cache_on(home) and launchctl('getenv', ENV).stdout.strip() != path and not xcode_conflict(home, launchctl):
         launchctl('setenv', ENV, path)
+    for name, entry in managed_env(home).items():
+        if launchctl('getenv', name).stdout.strip() != str(entry['value']):
+            launchctl('setenv', name, str(entry['value']))

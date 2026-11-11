@@ -23,6 +23,7 @@ import uuid
 
 from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
+import toolcaches
 import ask_tier
 import auto_tier
 import checkup
@@ -117,6 +118,10 @@ STEPS = (
     'process-stop（主人还在的进程）、path-delete（你查到的任何大目录或大文件：缓存、日志、旧构建、容器数据……'
     '写清是什么、为什么能删、删了会怎样）；`emergency rule <规则> --decision <做法> --why` 改计划；'
     '`emergency lesson` 记经验。',
+    '正在干活的进程不能关，但能让它们以后少占：很多开发工具读环境变量来定开几个进程、用多少内存（比如测试框架的 worker 数、'
+    '编译的并发数）。判断值得限，就 `emergency env <变量名> --decision <值> --why "哪个工具、哪个版本读它（看过它的源码或文档）、'
+    '为什么设这个数"`，新开的终端和 agent 命令马上生效；内存长时间宽松了就 `--decision off` 撤掉。tool_env 是现在设着的，'
+    'cpus 是这台 Mac 的核数；decisions 里有用户说过的偏好。',
     '还紧就一定要交回决定：能做的做，不能做的列给用户点头；什么都不交回，这一轮就白来了。确实没有能动的，'
     '在 done --summary 里逐个写清每个大头为什么不能动、要谁做什么。',
     '内置盘没到用户的目标（disk.goal_gib）就要出一份够数的方案：先想能放到外接盘的（disk.external_free_gib 是外接盘'
@@ -163,6 +168,8 @@ REVIEW_STEPS = (
     'rounds 和 user_decisions 是这段时间的回执和用户的决定。',
     '找「占了内存却不必要」的：说清是什么、出在哪些任务、大概占多少、持续多久、为什么不必要（比如没人用还开着、同样的服务'
     '开了好几套、编译测试并发太多、常驻却很少用）。必要的也说一句为什么必要，别全算成浪费。',
+    '开发工具的并发和内存上限你可以直接调：`emergency env <变量名> --decision <值|off> --why "哪个工具读它、为什么这个数"`'
+    '（先确认这个工具这个版本真的读它），内存宽松了就撤掉；tool_env 是现在设着的。',
     '再出新方案：agent 能改的规则用 `emergency rule <规则> --decision <做法> --why` 直接改；要改做法、要用户拍板的用 '
     '`emergency propose --note "标题" --summary "要怎么改、能省多少、代价" --why "证据"`，一个做法一条。',
     '学到以后也用得上的，记成经验：`emergency lesson --when "遇到什么情况" --do "该怎么做、为什么"`。',
@@ -903,6 +910,7 @@ def collect(home, cfg, settings, reason, now=None, activity=None, simctl=auto_ti
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         proposals=[dict(title=p['title'], plan=p['plan'][:300]) for p in proposals(home, now)],
+        tool_env=toolcaches.managed_env(home), cpus=os.cpu_count(),
         steps=list(STEPS))
 
 
@@ -1012,7 +1020,7 @@ def judge(home, reason, settings, now=None, free=None, samples=None, swap=None):
 
 def receipt(made, carried, result):
     """agent-investigates AC-04: what came back, what was written down, what was done and what was skipped."""
-    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')]
+    handed = [e for e in made if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose', 'env')]
     ok = [d for d in result['done'] if d['result'] in ('已关掉', '已挪到外接盘', '已改')]
     later = [d for d in result['done'] if d['result'] == HANDED_WORDS]
     skipped = [d for d in result['done'] if d not in ok and d not in later]
@@ -1081,6 +1089,8 @@ def said(entry):
         return '把规则 {} 改成 {}'.format(entry.get('rule'), entry.get('to'))
     if entry['action'] == 'propose':
         return '提给用户的方案：' + str(entry.get('title'))
+    if entry['action'] == 'env':
+        return '把 {} 设成 {}'.format(entry.get('name'), entry.get('to') or '不设')
     return '列给用户：' + str(entry.get('title') or entry.get('id'))
 
 
@@ -1092,7 +1102,7 @@ def done_check(folder, found):
     folder = Path(folder)
     if found.get('reason') in ('daily', 'review') or (folder / CHECKED).exists():
         return None
-    made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')]
+    made = [e for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose', 'env')]
     disk = found.get('disk') or {}
     goal = disk.get('goal_gib') or disk.get('target_gib')
     short = goal - disk['free_gib'] if goal and isinstance(disk.get('free_gib'), (int, float)) else 0
@@ -1121,7 +1131,7 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
     folder = Path(folder)
     found = material(folder)
     entry = dict(at=time.time(), action=action)
-    if action in ('stop', 'move', 'ask', 'rule') and not why.strip():
+    if action in ('stop', 'move', 'ask', 'rule', 'env') and not why.strip():
         raise ValueError('要写依据：--why "…"')
     if action == 'stop':
         orphan = next((o for o in found['orphans'] if str(o['pid']) == str(target)), None)
@@ -1167,6 +1177,13 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
         if note not in spec['actions']:
             raise ValueError('「{}」只能设成：{}（用 --decision 写）'.format(spec['title'], '、'.join(spec['actions'])))
         entry.update(rule=str(target), to=note, why=why)
+    elif action == 'env':
+        name, value = str(target or '').strip(), note.strip()
+        if not toolcaches.ENV_NAME.match(name) or toolcaches.ENV_NEVER.match(name):
+            raise ValueError('{} 不能设：只能是开发工具读来定并发、内存的变量'.format(name))
+        if not value:
+            raise ValueError('要写值：--decision <值>，撤掉写 --decision off')
+        entry.update(name=name, to=None if value == 'off' else value, why=why)
     elif action == 'propose':
         if not (note.strip() and summary.strip() and why.strip()):
             raise ValueError('方案要有标题、内容和依据：--note "标题" --summary "要怎么改、能腾多少、代价" --why "算账的依据"')
@@ -1200,7 +1217,7 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
     except OSError:   # the Codex App ran this turn read-only (CH-08)
         raise ValueError(UNWRITABLE + CARRY + line)
     if action == 'done':   # what the background will do, said back once more
-        return dict(entry, handed=[said(e) for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose')])
+        return dict(entry, handed=[said(e) for e in decisions(folder) if e['action'] in ('stop', 'move', 'ask', 'rule', 'propose', 'env')])
     return entry
 
 
@@ -1559,6 +1576,12 @@ def apply(home, cfg, settings, folder, now=None, table=None, activity_factory=No
             done.append(dict(entry, result='已改'))
         except (OSError, ValueError) as error:
             done.append(dict(entry, result=str(error).split('\n')[0][:120]))
+    for entry in (e for e in made if e['action'] == 'env'):
+        try:
+            toolcaches.set_env(home, entry['name'], entry['to'], by='agent', why=entry['why'])
+            done.append(dict(entry, result='已改'))
+        except (OSError, ValueError) as error:
+            done.append(dict(entry, result=str(error).split('\n')[0][:120]))
     proposed = add_proposals(home, [e for e in made if e['action'] == 'propose'], folder, now)
     asks = add_asks(home, settle_asks(home, [e for e in made if e['action'] == 'ask'], table), now)
     learned = []
@@ -1786,6 +1809,7 @@ def daily_material(home, settings, now, question='', cfg=None):
         old_notes=[dict(id=m['id'], note=(m.get('note') or '')[:200]) for m in agent_plan.old_notes(home)][-20:],
         rules=[dict(id=r['id'], action=r['action'], words=r['words']) for r in agent_plan.describe(home)['rules']],
         proposals=[dict(title=p['title'], plan=p['plan'][:300]) for p in proposals(home, now)],
+        tool_env=toolcaches.managed_env(home), cpus=os.cpu_count(),
         orphans=[], companions=[], tasks=[], simulators=[], waiting=[], steps=list(REVIEW_STEPS if question else DAILY_STEPS))
 
 
