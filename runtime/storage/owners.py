@@ -424,28 +424,36 @@ def verdict(row, who, where, agents, quiet_cpu, now, home=None):
 def serving(run=subprocess.run):
     """{pid: clients connected now} for each process waiting for connections on a TCP port, or None when it cannot
     be read. Whether a dev server is used shows here, not in who started it (11-09: of four vite servers that read
-    「没人管了」, two were open in a browser and two had had nobody connected for days)."""
+    「没人管了」, two were open in a browser and two had had nobody connected for days).
+    One that also answers over UDP on a port it listens on (a local DNS forwarder, QUIC) is left out: its UDP
+    clients leave no connection to count, so it would always read 「没人连」 (11-16: a dev DNS forwarder every
+    project resolved through was stopped three times as an idle server)."""
     try:
-        out = run(['/usr/sbin/lsof', '-nP', '-iTCP', '-sTCP:LISTEN,ESTABLISHED', '-FpnT'], capture_output=True, text=True,
-                  errors='surrogateescape', timeout=20).stdout
+        out = run(['/usr/sbin/lsof', '-nP', '-iTCP', '-sTCP:LISTEN,ESTABLISHED', '-iUDP', '-FpPnT'], capture_output=True,
+                  text=True, errors='surrogateescape', timeout=20).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    ports, links, pid, name = {}, {}, None, None
+    ports, links, udp, pid, name, proto = {}, {}, {}, None, None, None
     for line in out.splitlines():
         tag, value = line[:1], line[1:]
         if tag == 'p' and value.isdigit():
-            pid, name = int(value), None
+            pid, name, proto = int(value), None, None
         elif tag == 'f':
-            name = None
+            name, proto = None, None
+        elif tag == 'P':
+            proto = value
         elif tag == 'n':
             name = value
-        elif tag == 'T' and pid is not None and name:
+            if proto == 'UDP' and pid is not None and '->' not in value:   # bound and waiting, not a call it made
+                udp.setdefault(pid, set()).add(value.rsplit(':', 1)[-1])
+        elif tag == 'T' and pid is not None and name and proto != 'UDP':
             if value == 'ST=LISTEN':
                 ports.setdefault(pid, set()).add(name.rsplit(':', 1)[-1])
             elif value == 'ST=ESTABLISHED' and '->' in name:
                 links.setdefault(pid, []).append(name.split('->')[0].rsplit(':', 1)[-1])   # its own end
     # A connection it accepted has its own end on a port it listens on; the ones it made itself do not.
-    return {p: sum(1 for local in links.get(p, []) if local in mine) for p, mine in ports.items()}
+    return {p: sum(1 for local in links.get(p, []) if local in mine) for p, mine in ports.items()
+            if not mine & udp.get(p, set())}
 
 
 def link_state(link, now):
