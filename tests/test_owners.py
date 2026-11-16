@@ -165,6 +165,15 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual(O.serving(run), {102: 0, 202: 2})
         self.assertIsNone(O.serving(lambda args, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(args, 20))))
 
+    def test_a_server_that_also_answers_over_udp_is_never_counted_as_idle(self):
+        # 11-16: a local DNS forwarder (TCP and UDP on one port) always read 0 clients: its askers come over UDP.
+        out = ('p300\nf5\nPUDP\nn127.0.0.1:15353\nf6\nPTCP\nn127.0.0.1:15353\nTST=LISTEN\n'
+               'p400\nf5\nPTCP\nn*:5173\nTST=LISTEN\nf9\nPUDP\nn*:61022\n'          # a dev server that also looks up names
+               'f10\nPUDP\nn10.0.0.2:53001->10.0.0.1:53\n'
+               'p500\nf4\nPUDP\nn*:5353\n')                                                # UDP only: never a TCP server
+        run = lambda args, **kw: subprocess.CompletedProcess(args, 0, out, '')
+        self.assertEqual(O.serving(run), {400: 0})
+
 
 class VerdictTest(unittest.TestCase):
     def verdict(self, pid, table=TABLE, where=None, agents=None, quiet=None, now=NOW):
