@@ -1,5 +1,6 @@
 """Task directories under the configured roots: idleness, git state, rebuildable outputs (design C2)."""
 import dataclasses
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,8 @@ PRUNE_NAMES = ('build', '.dart_tool', 'node_modules', 'DerivedData', '.gradle', 
                '.next', '.turbo', '.venv', '.mobile-v')
 IGNORED_FILES = {'.DS_Store'}
 DAY = 86400
+PR_RECHECK = 6 * 3600   # an open PR, or none found, is asked about again after this; merged and closed are final
+GH_PLACES = ('/opt/homebrew/bin', '/usr/local/bin')   # launchd's PATH has neither
 
 
 class Unreadable(OSError):
@@ -111,6 +114,63 @@ def git_changes(repo):
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return 'git 状态读取失败'
     return None
+
+
+def pr_state(repo, memory=None, now=None, run=subprocess.run):
+    """('merged' | 'closed' | 'open', PR number or None) for the work at this checkout's HEAD, or None when it
+    cannot be told. In the default branch already counts as merged without asking anyone; otherwise GitHub is asked
+    (gh, if installed and signed in) for the pull requests that contain HEAD. `memory` keeps the answers."""
+    head = git(repo, 'rev-parse', 'HEAD')
+    head = head.stdout.strip() if head.returncode == 0 else ''
+    if not head:
+        return None
+    if git(repo, 'merge-base', '--is-ancestor', head, 'refs/remotes/origin/HEAD').returncode == 0:
+        return 'merged', None
+    now = time.time() if now is None else now
+    cache = memory.setdefault('pr_state', {}) if memory is not None else {}
+    hit = cache.get(head)
+    if isinstance(hit, list) and len(hit) == 3 and (hit[0] in ('merged', 'closed') or now - hit[2] < PR_RECHECK):
+        return (hit[0], hit[1]) if hit[0] else None
+    remote = git(repo, 'remote', 'get-url', 'origin')
+    gh = shutil.which('gh', path=os.pathsep.join([os.environ.get('PATH', ''), *GH_PLACES]))
+    if not gh or remote.returncode or 'github.com' not in remote.stdout:
+        return None   # only GitHub can say; another host, or no gh, leaves it unknown
+    try:
+        out = run([gh, 'pr', 'list', '--state', 'all', '--search', head, '--json', 'number,state', '--limit', '10'],
+                  cwd=str(repo), capture_output=True, text=True, timeout=30)
+        found = json.loads(out.stdout or '[]') if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        found = None
+    if not isinstance(found, list):
+        return None   # offline or not signed in: not remembered, asked again next time
+    states = {str(p.get('state', '')).lower(): p.get('number') for p in found if isinstance(p, dict)}
+    state = next((s for s in ('merged', 'closed', 'open') if s in states), None)
+    cache[head] = [state, states.get(state), now]
+    return (state, states[state]) if state else None
+
+
+def work_left(repo, memory=None, now=None):
+    """(why it still holds work only here, or None; its PR state). Commits no branch on the remote holds any more
+    but a merged or closed PR does (squash-merged and the branch deleted, 11-16) are saved: GitHub keeps them."""
+    change = git_changes(repo)
+    if change not in (None, '有未推送的提交'):
+        return change, None
+    pr = pr_state(repo, memory, now)
+    if change and not (pr and pr[0] in ('merged', 'closed')):
+        return change, pr
+    return None, pr
+
+
+def pr_words(states):
+    """「PR #12 已合入」 for what the task's repositories' PRs say, or ''."""
+    words = []
+    for state, number in states:
+        name = 'PR #{}'.format(number) if number else '已在主干' if state == 'merged' else 'PR'
+        if state == 'merged':
+            words.append(name if name == '已在主干' else name + ' 已合入')
+        elif state == 'closed':
+            words.append(name + ' 已关闭')
+    return '、'.join(words)
 
 
 def loose_files(task, skipped):

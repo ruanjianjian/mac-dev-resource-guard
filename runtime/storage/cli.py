@@ -38,7 +38,7 @@ def main(argv=None):
     pin = sub.add_parser('pin', help='Protect cache/worktree while awaiting acceptance')
     pin.add_argument('path', type=Path)
     pin.add_argument('--reason', required=True)
-    pin.add_argument('--days', type=int)
+    pin.add_argument('--days', type=int, help='How long it holds (default 7); pin again to extend')
     unpin = sub.add_parser('unpin', help='Release only your own pin')
     unpin.add_argument('path', type=Path)
     xcode = sub.add_parser('xcode', help='Run xcodebuild in a stable, exclusive DerivedData slot')

@@ -56,7 +56,7 @@ GIT_SECONDS = 15              # one git call while gathering the material; slowe
 COLLECT_SECONDS = 180         # the whole material; past this, the rest of the repositories are not looked at
 ORPHAN_HOURS = 24
 ORPHAN_CPU_SECONDS = 2.0      # CPU an orphan may burn between the look and the stop and still count as idle
-ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop', 'path-delete', 'task-move')
+ASK_KINDS = ('simulator-delete', 'simulator-shutdown', 'task-delete', 'process-stop', 'path-delete', 'task-move', 'pin-release')
 # 11-10 (the user set the target to 100 GB): 「没达到目标的话，agent 要自己去想办法出方案，然后强提醒用户去看」.
 SHORT_HOURS = 6        # below the user's target, above the danger line or not: the agent works out a plan this often
 REMIND_HOURS = 2       # its plan waiting and the disk still short: the user is told again this often
@@ -116,7 +116,9 @@ STEPS = (
     '`emergency ask <kind>:<id> --why` 列给用户点头，kind 是 simulator-delete、simulator-shutdown、task-delete、'
     'task-move（有没保存改动、所以后台不挪的闲置任务，整个挪到外接盘，不丢东西）、'
     'process-stop（主人还在的进程）、path-delete（你查到的任何大目录或大文件：缓存、日志、旧构建、容器数据……'
-    '写清是什么、为什么能删、删了会怎样）；`emergency rule <规则> --decision <做法> --why` 改计划；'
+    '写清是什么、为什么能删、删了会怎样）、pin-release（id 是被保护的路径：它护着的活已经做完了，比如 PR 已合入、'
+    '报告已发，只去掉保护标记）；`emergency rule <规则> --decision <做法> --why` 改计划，参数用 `--param 名=值`'
+    '（比如 build-slots 的 max_gib：构建槽合计的上限，按这台的盘和用法定）；'
     '`emergency lesson` 记经验。',
     '正在干活的进程不能关，但能让它们以后少占：很多开发工具读环境变量来定开几个进程、用多少内存（比如测试框架的 worker 数、'
     '编译的并发数）。判断值得限，就 `emergency env <变量名> --decision <值> --why "哪个工具、哪个版本读它（看过它的源码或文档）、'
@@ -1156,6 +1158,8 @@ def decide(folder, action, target=None, why='', note='', summary='', cause='', n
             entry.update(asked_process(found, key), id=target, kind=kind, why=why)
         elif kind == 'path-delete':
             entry.update(asked_path(key), id='path-delete:' + str(Path(key).expanduser()), kind=kind, why=why)
+        elif kind == 'pin-release':
+            entry.update(asked_pin(key), kind=kind, why=why)
         elif kind.startswith('simulator'):
             sim = next((s for s in found['simulators'] if s['id'] == key), None)
             if sim is None:
@@ -1234,6 +1238,20 @@ def asked_path(key, home=None):
     if (path / '.git').exists():
         raise ValueError('{} 是代码仓库：任务用 task-delete，挪走用 move'.format(path))
     return dict(title='{}（在 {}）'.format(path.name, path.parent), bytes=T.size(path) or 0, path=str(path))
+
+
+def asked_pin(key, settings=None):
+    """pin-release (11-16): a pin guarding work the agent sees is done; the user decides. Only one that is there
+    and has not run out; what it covers, measured now."""
+    import portable_config
+    pins, errors = StorageManager(settings or portable_config.configure())._pins(time.time())
+    if errors:
+        raise ValueError('读不到保护标记')
+    path = key if key in pins else str(Path(key).expanduser().resolve())
+    if path not in pins:
+        raise ValueError('没有这个保护标记，或它已到期：{}'.format(key))
+    return dict(id='pin-release:' + path, title=Path(path).name,
+                bytes=(T.size(path) or 0) if os.path.lexists(path) else 0)
 
 
 def asked_process(found, key, table=None):
