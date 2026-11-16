@@ -1,4 +1,5 @@
-"""Bounded cache maintenance. Never deletes source, Products, devices or app data."""
+"""Bounded cache maintenance. Never deletes source, devices or app data; Products only inside a whole build slot
+that no worktree needs any more or that the slot cap retires (reclaim_slots)."""
 from __future__ import annotations
 
 import contextlib
@@ -24,6 +25,10 @@ PROTECTED_CACHE_NAMES = {'products', 'reports', 'report', 'test-results', 'test_
                          'artifacts', '.git', 'node_modules', 'pods', '.env', 'coverage'}
 PROTECTED_CACHE_SUFFIXES = ('.xcresult', '.xctestrun', '.dsym', '.apk', '.ipa', '.mobileprovision',
                             '.p12', '.pfx', '.pem', '.key', '.cer', '.log')
+SLOT_NAME = re.compile(r'[0-9a-f]{64}')
+# 11-16: pins without a date held about 350 GiB for weeks on a Mac left with 28 GiB; a pin now lasts this long unless
+# its owner says otherwise or pins it again.
+DEFAULT_PIN_DAYS = 7
 FD_OPERATIONS_AVAILABLE = ({os.open, os.stat, os.rename, os.unlink, os.rmdir}.issubset(os.supports_dir_fd)
                            and hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_DIRECTORY'))
 
@@ -113,6 +118,32 @@ def scan_tree(path):
                     raise ProtectedCacheContent('special filesystem node: ' + relative)
     return {'device': root.st_dev, 'inode': root.st_ino, 'allocated_bytes': allocated,
             'entry_count': count, 'latest_use': latest}
+
+
+def du_bytes(path):
+    """Allocated bytes under a directory (du), or None when it cannot be read."""
+    try:
+        out = subprocess.run(['/usr/bin/du', '-sk', str(path)], capture_output=True, text=True, timeout=900)
+        return int(out.stdout.split()[0]) * 1024
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+
+def worktree_gone(path):
+    """True only when a slot's worktree is surely gone: never for one on an unplugged drive or behind a link that
+    dangles (a task moved to the drive), whose slot is still its own."""
+    path = Path(path)
+    parts = path.parts
+    if not path.is_absolute() or '..' in parts:
+        return False
+    if len(parts) > 2 and parts[1] == 'Volumes' and not os.path.ismount(os.path.join('/', parts[1], parts[2])):
+        return False
+    if os.path.lexists(str(path)):
+        return False
+    above = path.parent
+    while not os.path.lexists(str(above)):
+        above = above.parent
+    return above.is_dir()
 
 
 def open_directory_fd(path):
@@ -266,7 +297,8 @@ class StorageManager:
         path = Path(path).resolve()
         if not reason.strip():
             raise ValueError('a pin needs a reason')
-        if days is not None and days <= 0:
+        days = DEFAULT_PIN_DAYS if days is None else days
+        if days <= 0:
             raise ValueError('pin days must be positive')
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.state_root / 'pins.lock', 'a') as lock:
@@ -275,7 +307,19 @@ class StorageManager:
             if str(path) in pins and pins[str(path)]['owner'] != owner:
                 raise ValueError('pin belongs to another session; keep it')
             pins[str(path)] = {'reason': reason, 'owner': owner, 'created': time.time(),
-                               'expires': time.time() + days * 86400 if days is not None else None}
+                               'expires': time.time() + days * 86400}
+            atomic_json(self.pins_path, pins)
+
+    def release_pin(self, path):
+        """Take a pin off at the user's yes in 「等你确认」, whoever set it. Nothing is deleted."""
+        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(self.state_root / 'pins.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            pins = json.loads(self.pins_path.read_text()) if self.pins_path.exists() else {}
+            key = str(path) if str(path) in pins else str(Path(path).resolve())
+            if key not in pins:
+                raise ValueError('这个保护标记已经不在了')
+            pins.pop(key)
             atomic_json(self.pins_path, pins)
 
     def unpin(self, path, owner):
@@ -546,6 +590,131 @@ class StorageManager:
             elif result['after_free_bytes'] < self.settings.warning_free_gib * GIB:
                 result['status'] = 'attention'
             atomic_json(self.state_root / 'last-maintenance.json', result)
+        return result
+
+    def slots(self):
+        """The managed build slots: (key, folder, manifest or None)."""
+        found = []
+        for root in self.settings.cache_roots:
+            folder = Path(root) / 'shared' / 'xcode'
+            try:
+                with os.scandir(str(folder)) as entries:
+                    keys = sorted(e.name for e in entries if SLOT_NAME.fullmatch(e.name) and e.is_dir(follow_symlinks=False))
+            except OSError:
+                continue
+            for key in keys:
+                try:
+                    manifest = json.loads((self.state_root / 'slots' / (key + '.json')).read_text())
+                    manifest = manifest if isinstance(manifest, dict) and manifest.get('key') == key else None
+                except (OSError, ValueError):
+                    manifest = None
+                found.append((key, folder / key, manifest))
+        return found
+
+    @staticmethod
+    def _slot_last(folder, manifest):
+        last = max((manifest or {}).get('last_used') or 0, (manifest or {}).get('last_finished') or 0)
+        try:
+            return last or folder.stat().st_mtime
+        except OSError:
+            return last
+
+    def reclaim_slots(self, cap_bytes=None, min_age=86400, activity_factory=None, now=None, sizer=du_bytes, keep=None):
+        """build-slots (11-16): a slot whose worktree is gone is deleted; with `cap_bytes`, while all slots together
+        are above it, the least recently used go too. Never one being built in, pinned, held open by a process,
+        without a readable manifest, that `keep` (path -> truthy) holds, or (for the cap) used within `min_age`
+        seconds. A slot goes whole, manifest too: the next build of its worktree makes it again (quickly, when the
+        shared compilation cache is on)."""
+        now = time.time() if now is None else now
+        collect = activity_factory or (lambda: Activity.collect(self.settings.lease_root))
+        result = {'schema_version': 1, 'time': now, 'status': 'ok', 'deleted': [], 'kept': [], 'errors': [],
+                  'cap_bytes': cap_bytes}
+        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        receipt = self.state_root / 'last-slots.json'
+        try:
+            measured = json.loads(receipt.read_text()).get('sizes') or {}
+        except (OSError, ValueError, AttributeError):
+            measured = {}
+        with open(self.lock_path, 'a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                result['status'] = 'busy'
+                return result
+            rows, sizes = [], {}
+            for key, folder, manifest in self.slots():
+                worktree = (manifest or {}).get('worktree')
+                last = self._slot_last(folder, manifest)
+                gone = bool(manifest and isinstance(worktree, str) and worktree_gone(worktree))
+                size = None
+                if cap_bytes is not None or gone:
+                    old = measured.get(key)
+                    # Not built in since it was last measured: the size then still holds (du of every slot is slow).
+                    size = old[0] if isinstance(old, list) and len(old) == 2 and old[1] >= last else sizer(folder)
+                    if size is not None:
+                        sizes[key] = [size, now]
+                rows.append(dict(key=key, folder=folder, manifest=manifest, worktree=worktree, last=last, gone=gone, bytes=size))
+            total = sum(r['bytes'] or 0 for r in rows) if cap_bytes is not None else None
+            activity = None
+            for row in [r for r in rows if r['gone']] + sorted((r for r in rows if not r['gone']), key=lambda r: r['last']):
+                if not row['gone'] and not (total is not None and total > cap_bytes):
+                    break
+                why = '它的工作区已经不在了' if row['gone'] else '构建槽合计超过上限，它最久没用'
+                if row['manifest'] is None:
+                    result['kept'].append({'path': str(row['folder']), 'reason': 'managed slot manifest missing or invalid'})
+                    continue
+                if not row['gone'] and now - row['last'] < min_age:
+                    result['kept'].append({'path': str(row['folder']), 'reason': 'used within retention window'})
+                    continue
+                if keep and any(keep(p) for p in (str(row['folder']), row['worktree']) if isinstance(p, str)):
+                    result['kept'].append({'path': str(row['folder']), 'reason': 'kept by the plan'})
+                    continue
+                activity = activity or collect()
+                with self._slot_lock(row['key']) as acquired:
+                    if not acquired:
+                        result['kept'].append({'path': str(row['folder']), 'reason': 'build slot is locked'})
+                        continue
+                    try:
+                        with open(self.state_root / 'pins.lock', 'a') as pin_lock:
+                            fcntl.flock(pin_lock, fcntl.LOCK_EX)
+                            pins, pin_errors = self._pins(now)
+                            reasons = pin_errors + self._pin_reasons(pins, row['folder'], row['folder'], row['worktree'])
+                            reasons += activity.reasons(row['folder'], row['worktree'])
+                            manifest_path = self.state_root / 'slots' / (row['key'] + '.json')
+                            if self._slot_last(row['folder'], json.loads(manifest_path.read_text())) != row['last']:
+                                reasons.append('built in since it was looked at')
+                            if reasons:
+                                result['kept'].append({'path': str(row['folder']), 'reason': '; '.join(sorted(set(reasons)))})
+                                continue
+                            parent_fd = open_directory_fd(row['folder'].parent)
+                            try:
+                                identity = os.stat(row['key'], dir_fd=parent_fd, follow_symlinks=False)
+                                if not stat.S_ISDIR(identity.st_mode):
+                                    raise RuntimeError('slot is not a directory')
+                                quarantine = '.dev-storage-purge-' + row['key'] + '-' + uuid.uuid4().hex
+                                os.rename(row['key'], quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                            except BaseException:
+                                os.close(parent_fd)
+                                raise
+                        manifest_path.unlink()
+                        entry = {'path': str(row['folder']), 'worktree': row['worktree'], 'why': why,
+                                 'directory_accounting_bytes': row['bytes'] or 0}
+                        self._log({'event': 'slot_delete_started', 'time': time.time(), **entry})
+                        try:
+                            remove_tree_at(parent_fd, quarantine, (identity.st_dev, identity.st_ino))
+                        finally:
+                            os.close(parent_fd)
+                        result['deleted'].append(entry)
+                        sizes.pop(row['key'], None)
+                        if total is not None:
+                            total -= row['bytes'] or 0
+                        self._log({'event': 'slot_delete_complete', 'time': time.time(), **entry})
+                    except (OSError, ValueError, RuntimeError) as error:
+                        result['errors'].append({'path': str(row['folder']), 'reason': str(error)})
+                        break   # a partial or unknown deletion stops the run, never blindly retry
+            result.update(count=len(rows) - len(result['deleted']), total_bytes=total, sizes=sizes,
+                          status='error' if result['errors'] else 'ok')
+            atomic_json(receipt, result)
         return result
 
     def _log(self, value):

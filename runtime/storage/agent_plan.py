@@ -23,6 +23,11 @@ RULES = {
     'tool-caches': dict(title='各开发工具的缓存', actions=('move', 'off'), default='move'),
     'task-builds': dict(title='任务里的构建产物', actions=('move', 'off'), default='move'),
     'xcode-intermediates': dict(title='7 天没用的 Xcode 编译中间缓存', actions=('clean', 'off'), default='clean'),
+    # 11-16: one build slot per worktree, never collected — 380 GiB of them on a 2 TB Mac with 28 GiB left. A slot
+    # whose worktree is gone goes; above max_gib in all (0: a tenth of the disk) the least recently used go, never
+    # one used within min_hours. The agent sets the cap from what it sees on this Mac.
+    'build-slots': dict(title='各任务的 Xcode 构建槽', actions=('clean', 'off'), default='clean',
+                        params={'max_gib': 0, 'min_hours': 24}),
     # 「work-drive」 (11-10, the user: a 500 GB disk cannot hold the work; 「按照你的解法推进吧」): the drive is where the
     # work lives — any task nobody is using goes there, unsaved work and all, and a root left with only links
     # becomes a link itself, so new tasks are made on the drive. Only the user sets it.
@@ -35,7 +40,10 @@ RULES = {
                              # with 「auto」: shut down and unused this many days, it goes when the disk is short.
                              params={'min_days': 0}),
     'runtime-delete': dict(title='没有模拟器在用的运行时', actions=('ask', 'quiet', 'off'), default='ask'),
-    'task-delete': dict(title='闲置很久的任务', actions=('ask', 'quiet', 'off'), default='ask'),
+    'task-delete': dict(title='闲置很久的任务', actions=('ask', 'auto', 'quiet', 'off'), default='ask',
+                        # with 「auto」 (learned only): idle this many days and its PRs merged or closed, it goes when
+                        # the disk is short of the target.
+                        params={'min_days': 0}),
     'installer-delete': dict(title='下载里的大安装包', actions=('ask', 'quiet', 'off'), default='ask'),
     'trash-empty': dict(title='废纸篓', actions=('ask', 'quiet', 'off'), default='ask'),
     'device-support-delete': dict(title='旧版本的设备支持文件', actions=('ask', 'quiet', 'off'), default='ask'),
@@ -47,7 +55,12 @@ RULES = {
     'idle-servers': dict(title='没人管、没人连的开发服务', actions=('tight', 'auto', 'off'), default='tight',
                          params={'quiet_hours': 12}),
     'task-move': dict(title='有没保存改动的闲置任务挪到外接盘', actions=('ask', 'quiet', 'off'), default='ask'),
+    # 11-16: pins set before they had a date kept done work for weeks; one this many days old is listed for the user
+    # to take off (only the mark goes; what it covered is then handled by the other rules).
+    'pin-release': dict(title='没写到期日的旧保护标记', actions=('ask', 'quiet', 'off'), default='ask',
+                        params={'min_days': 7}),
 }
+SLOT_SHARE = 0.1   # build-slots without a cap the agent set: a tenth of the disk
 ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管',
                 'work-drive': '外接盘当工作盘：没人在用就整个挪过去，新任务直接建在外接盘上', 'tight': '内存快紧时做'}
 # learned-yes (11-10): a yes the user gave again and again becomes the rule. 11-05 the user asked that their yes
@@ -56,9 +69,12 @@ ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问'
 # (read from what they were shown), never below the floor; one 「忽略」 of that kind and it is never learned.
 LEARN_DAYS = 3
 LEARNED = {'simulator-delete': ('min_days', re.compile(r'关机 ?(\d+(?:\.\d+)?) ?天'), 1, 7),
-           'simulator-shutdown': ('min_hours', re.compile(r'开着 ?(\d+(?:\.\d+)?) ?小时'), 4, 4)}
+           'simulator-shutdown': ('min_hours', re.compile(r'开着 ?(\d+(?:\.\d+)?) ?小时'), 4, 4),
+           # 11-16: with no drive to move them to, a task done with is retired instead.
+           'task-delete': ('min_days', re.compile(r'闲置 ?(\d+(?:\.\d+)?) ?天'), 3, 7)}
 AUTO_WORDS = {'simulator-delete': '磁盘不够时直接删关机 {:g} 天以上没开过的',
-              'simulator-shutdown': '内存紧时直接关开着 {:g} 小时以上没人连的'}
+              'simulator-shutdown': '内存紧时直接关开着 {:g} 小时以上没人连的',
+              'task-delete': '磁盘不够时直接收闲置 {:g} 天以上、改动都已推送、PR 已合入或关闭的任务'}
 # Switches and numbers the user sets in 「帮你管着」; the agent may change them unless locked (RAW-07).
 SETTINGS = {'target': '空间目标', 'caches': '共享构建缓存', 'clean': '自动清理', 'external': '外接盘',
             'update': '自动更新', 'ask': '等你确认'}
@@ -291,6 +307,12 @@ def rule_words(rid, entry):
     if rid == 'simulator-cap' and entry['action'] == 'auto':
         return '最多同时开 {:g} 台：多出来的，先关没人连满 {:g} 分钟、最久没人用的那台'.format(
             entry['params']['max_booted'], entry['params']['quiet_minutes'])
+    if rid == 'build-slots' and entry['action'] == 'clean':
+        cap = entry['params'].get('max_gib')
+        return '工作区不在了就删；合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
+            ' {:g} GB '.format(cap) if cap else '磁盘的十分之一', entry['params']['min_hours'])
+    if rid == 'pin-release' and entry['action'] != 'off':
+        return words + '（标记满 {:g} 天、没写到期日的）'.format(entry['params']['min_days'])
     if rid == 'idle-servers' and entry['action'] != 'off':
         return '{}起它的会话已经不在、{:g} 小时没人连的就关掉'.format(
             '内存快紧时，' if entry['action'] == 'tight' else '', entry['params']['quiet_hours'])
@@ -317,8 +339,8 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
             raise ValueError('{} 必须是正数'.format(key))
     if by == 'agent':
         _check_agent(entry, spec['title'], why, plan)
-        if new_action == 'auto' and rid == 'simulator-delete':
-            raise ValueError('删模拟器要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
+        if new_action == 'auto' and rid in ('simulator-delete', 'task-delete'):
+            raise ValueError('删模拟器、收任务要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
         if new_action == 'work-drive':
             raise ValueError('把外接盘当工作盘要用户自己定：用 emergency propose 把这个方案提给用户')
         if rid == 'simulator-cap' and new_action == 'auto':

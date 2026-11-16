@@ -30,7 +30,9 @@ LOSES = {
     'process-stop': '它这次运行的状态，要用时得重新启动它',
     'path-delete': '里面的全部内容（缓存、日志、构建产物这类下次用到会重新生成，别的就没了）',
     'task-move': '不丢东西：整个挪到外接盘，原路径留链接；外接盘拔掉时用不了，没推送的改动只在外接盘上',
+    'pin-release': '不删东西，只去掉保护标记；之后它按别的规则处理（闲置的任务会列出来问你，或按你同意过的直接收）',
 }
+PIN_SIZE_DAYS = 1   # how long the size of what an old pin covers is reused before du looks again
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
 # Watching, not using: an agent's screen stream or a log stream it left running (10-30: five simulators held
@@ -125,27 +127,30 @@ def runtime_label(identifier, version=None):
     return '{} {}'.format(platform, version or name.split('-', 1)[-1].replace('-', '.'))
 
 
-def task_blocker(task, cfg, activity, pins, now):
-    """Why a task directory cannot even be proposed for deletion, or None."""
+def task_blocker(task, cfg, activity, pins, now, memory=None):
+    """(why a task directory cannot even be proposed for deletion or None, its latest write, its repositories' PR
+    states). Commits only a merged or closed PR still holds count as saved (tasks.work_left)."""
     reasons, latest = T.idle_check(task, activity, pins, cfg['ask']['task_idle_days'], cfg, now)
     if reasons:
-        return '；'.join(reasons), latest
+        return '；'.join(reasons), latest, []
     skipped = T.skip_names(cfg)
     loose = T.loose_files(task, skipped)
     if loose:
-        return '有不在代码仓库里的文件：' + '、'.join(loose[:3]), latest
+        return '有不在代码仓库里的文件：' + '、'.join(loose[:3]), latest, []
     repos = T.repositories(task.real, skipped)
     if not repos:
-        return '没有代码仓库', latest
+        return '没有代码仓库', latest, []
+    states = []
     for repo in repos:
-        change = T.git_changes(repo)
+        change, pr = T.work_left(repo, memory, now)
         if change:
-            return '{}：{}'.format(repo.name, change), latest
+            return '{}：{}'.format(repo.name, change), latest, []
+        states.append(pr)
         if (repo / '.git').is_dir():
             listed = T.git(repo, 'worktree', 'list', '--porcelain')
             if listed.returncode or listed.stdout.count('worktree ') > 1:
-                return '{} 还有别的工作区依赖它'.format(repo.name), latest
-    return None, latest
+                return '{} 还有别的工作区依赖它'.format(repo.name), latest, []
+    return None, latest, states
 
 
 def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
@@ -158,8 +163,9 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
                                        loses=LOSES[kind], fingerprint=fingerprint, **extra)
 
     other_candidates(home, activity, now, add, kinds=kinds)
+    pin_days = agent_plan.load(home)['rules']['pin-release']['params']['min_days']
     if kinds is not None and not kinds & {'simulator-shutdown', 'simulator-delete', 'runtime-delete'}:
-        return _tasks(cfg, activity, pins, now, add, only, found)
+        return _tasks(cfg, activity, pins, now, add, only, found, memory, pin_days)
     listing = json.loads(simctl(['list', 'devices', '--json']))
     stream_hours = agent_plan.load(home)['rules']['simulator-shutdown']['params'].get('stream_hours')
     ages = process_ages() if stream_hours else {}
@@ -204,21 +210,50 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
             add('runtime-delete', runtime.get('identifier', key), 'iOS 运行时 ' + runtime_label(identifier, runtime.get('version'))
                 if '.iOS-' in identifier else '运行时 ' + runtime_label(identifier, runtime.get('version')),
                 runtime.get('sizeBytes'), '没有任何模拟器在用', 'runtime:' + identifier)
-    return _tasks(cfg, activity, pins, now, add, only, found)
+    return _tasks(cfg, activity, pins, now, add, only, found, memory, pin_days)
 
 
-def _tasks(cfg, activity, pins, now, add, only, found):
+def _tasks(cfg, activity, pins, now, add, only, found, memory=None, pin_days=7):
+    if only is None or any(key.startswith('pin-release:') for key in only):
+        _old_pins(pins, now, add, only, memory, pin_days)
     for task in T.discover(cfg):
-        if not task.reachable or only is not None and 'task-delete:' + str(task.path) not in only:
+        if not task.reachable or only is not None and 'task-delete:' + str(task.path) not in only and 'task-delete:' not in only:
             continue
-        blocker, latest = task_blocker(task, cfg, activity, pins, now)
+        blocker, latest, states = task_blocker(task, cfg, activity, pins, now, memory)
         if blocker is None:
             where = '（在外接盘上）' if task.linked else ''
+            # done: every repository's work is in the default branch or in a merged or closed PR (learned 「auto」 only
+            # takes these, 11-16).
+            done = bool(states) and all(s and s[0] in ('merged', 'closed') for s in states)
+            prs = T.pr_words([s for s in states if s])
             add('task-delete', str(task.path), task.path.name + where, T.size(task.real),
-                '闲置 {:.0f} 天，改动都已提交并推送'.format((now - latest) / T.DAY), 'latest:{:.0f}'.format(latest))
+                '闲置 {:.0f} 天，改动都已提交并推送{}'.format((now - latest) / T.DAY, '，' + prs if prs else ''),
+                'latest:{:.0f}'.format(latest), done=done)
     # In `only`, 「kind:」 stands for every one of that kind (learned-yes looks at all of one kind).
     return found if only is None else {key: value for key, value in found.items()
                                        if key in only or key.split(':', 1)[0] + ':' in only}
+
+
+def _old_pins(pins, now, add, only, memory, days):
+    """pin-release (11-16): pins made before they had a date, older than the rule's days, or on a path that is gone;
+    the user takes them off in one go. What each covers is measured at most once a day."""
+    sizes = memory.setdefault('pin_sizes', {}) if memory is not None else {}
+    for path, value in pins.items():
+        if only is not None and 'pin-release:' + path not in only and 'pin-release:' not in only:
+            continue
+        if not isinstance(value, dict) or value.get('expires') is not None:
+            continue
+        created = value.get('created') if isinstance(value.get('created'), (int, float)) else 0
+        exists = os.path.lexists(path)
+        if exists and now - created < days * T.DAY:
+            continue
+        hit = sizes.get(path)
+        if exists and not (isinstance(hit, list) and len(hit) == 2 and now - hit[1] < PIN_SIZE_DAYS * T.DAY):
+            hit = sizes[path] = [T.size(path) or 0, now]
+        age = '标记了 {:.0f} 天、没写到期日'.format((now - created) / T.DAY) if created else '没写到期日'
+        add('pin-release', path, Path(path).name, hit[0] if exists else 0,
+            '{}：{}'.format(age if exists else '标记的目录已经不在了', str(value.get('reason', ''))[:80]),
+            'created:{:.0f}'.format(created), owner=str(value.get('owner', ''))[:40])
 
 
 def other_candidates(home, activity, now, add, mounted=None, kinds=None):
@@ -298,6 +333,8 @@ def refresh(home, cfg, settings, simctl, activity=None, now=None):
                 del items[key]
             elif item['kind'] == 'path-delete' and not Path(key.split(':', 1)[1]).exists():
                 del items[key]
+            elif item['kind'] == 'pin-release' and key.split(':', 1)[1] not in pins:
+                del items[key]
             continue
         path = Path(key.split(':', 1)[1])
         # A moved task whose drive is unplugged stays listed but cannot run (ask AC-09).
@@ -367,6 +404,10 @@ def agent_floor(home, cfg, item, activity, pins, simctl):
         if time.time() - path.lstat().st_mtime < 86400:
             return None, '最近一天还在改，先不删'
         return dict(bytes=T.size(path) or item['bytes'], reason=item['reason']), None
+    if kind == 'pin-release':   # 11-16: the agent saw the work it guards is done (its PR merged, say)
+        if target not in pins:
+            return None, '这个保护标记已经不在了或已到期'
+        return dict(bytes=item['bytes'], reason=item['reason']), None
     if kind.startswith('simulator'):
         try:
             listing = json.loads(simctl(['list', 'devices', '--json']))
@@ -396,7 +437,7 @@ def agent_floor(home, cfg, item, activity, pins, simctl):
     if not repos:
         return None, '没有代码仓库'
     for repo in repos:
-        change = T.git_changes(repo)
+        change, _ = T.work_left(repo)
         if change:
             return None, '{}：{}'.format(repo.name, change)
         if (repo / '.git').is_dir():
@@ -467,7 +508,7 @@ def remove_task(path, cfg, archive=None):
             if registered is None:
                 raise RuntimeError('找不到 {} 的工作区登记'.format(repo.name))
             result = T.git(main, 'worktree', 'remove', registered)
-            if result.returncode and 'submodule' in (result.stderr or '') and T.git_changes(repo) is None:
+            if result.returncode and 'submodule' in (result.stderr or '') and T.work_left(repo)[0] is None:
                 # git will not remove a worktree that has submodules unless forced; this one is clean and pushed.
                 result = T.git(main, 'worktree', 'remove', '--force', registered)
             if result.returncode:
@@ -540,6 +581,8 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 simctl(['runtime', 'delete', target])
             elif item['kind'] == 'trash-empty':
                 trash_emptier()
+            elif item['kind'] == 'pin-release':
+                StorageManager(settings).release_pin(target)
             elif item['kind'] == 'task-move':
                 import emergency   # here only: it imports this module
                 skipped = emergency.move_task(home, cfg, settings, target, activity, pins, unsaved_ok=True)
@@ -567,6 +610,12 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
         save(home, PENDING, pending)
     pending['items'] = [i for i in pending['items'] if i['state'] != 'done' and i['id'] not in gone]
     save(home, PENDING, pending)
+    if any(r['outcome'] == '已完成' and r['id'].startswith('task-delete:') for r in results):
+        try:   # build-slots: the retired tasks' build slots go now, not at the next cache round
+            if agent_plan.action(plan, 'build-slots') == 'clean':
+                StorageManager(settings).reclaim_slots(activity_factory=lambda: activity, now=now)
+        except (OSError, ValueError, RuntimeError):
+            pass
     return results
 
 
@@ -590,7 +639,8 @@ def remember_choice(home, item, decision, source='confirm'):
         pass   # memory is a record; it never stops the cleanup the user asked for
 
 
-AUTO_PARAM = {'simulator-delete': ('min_days', 'simulator_unused_days'), 'simulator-shutdown': ('min_hours', 'simulator_unattached_hours')}
+AUTO_PARAM = {'simulator-delete': ('min_days', 'simulator_unused_days'), 'simulator-shutdown': ('min_hours', 'simulator_unattached_hours'),
+              'task-delete': ('min_days', 'task_idle_days')}
 
 
 def auto_run(home, cfg, settings, simctl, kind, now=None, short_bytes=None, activity=None):
@@ -611,7 +661,10 @@ def auto_run(home, cfg, settings, simctl, kind, now=None, short_bytes=None, acti
     found = candidates(home, lowered, activity, pins, simctl, now, dict(load(home, ASK_STATE, {})), only={kind + ':'})
     plan = agent_plan.load(home)
     picked, total = [], 0
-    for item in sorted((f for k, f in found.items() if f['kind'] == kind and not left_alone(plan, k, f)), key=lambda f: -f['bytes']):
+    # A task goes unasked only when its work is in the default branch or a merged or closed PR (11-16).
+    found = {k: f for k, f in found.items() if f['kind'] == kind and not left_alone(plan, k, f)
+             and (kind != 'task-delete' or f.get('done'))}
+    for item in sorted(found.values(), key=lambda f: -f['bytes']):
         if short_bytes is not None and total >= short_bytes:
             break
         picked.append(item['id'])
@@ -624,6 +677,10 @@ def auto_run(home, cfg, settings, simctl, kind, now=None, short_bytes=None, acti
         if kind == 'simulator-delete':
             agent_plan.notice(home, '按你同意过的，删了 {} 个模拟器'.format(len(done)),
                               '关机 {:g} 天以上没开过，腾出约 {:.0f} GB：{}'.format(least, sum(r.get('bytes') or 0 for r in done) / GIB, names))
+        elif kind == 'task-delete':
+            agent_plan.notice(home, '按你同意过的，收了 {} 个做完的任务'.format(len(done)),
+                              '闲置 {:g} 天以上，改动都已推送，PR 已合入或关闭；腾出约 {:.0f} GB：{}。要用时重新拉代码。'.format(
+                                  least, sum(r.get('bytes') or 0 for r in done) / GIB, names))
         else:
             agent_plan.notice(home, '内存紧，按你同意过的关了 {} 个模拟器'.format(len(done)),
                               '开着 {:g} 小时以上没有开发工具连着：{}。数据都在，要用再开。'.format(least, names), tab='memory')

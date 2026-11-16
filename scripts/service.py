@@ -308,7 +308,7 @@ def activate(home):
         return receipt
 
 
-FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存'}
+FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存', 'build-slots': '构建槽'}
 
 
 def tick_storage(home, now=None):
@@ -475,10 +475,11 @@ def tick_tiers(home, now):
                 free = shutil.disk_usage(str(settings.volume)).free
                 # learned-yes: a kind the user keeps saying yes to is done without asking, here when the disk is short.
                 agent_plan.learn_yes(home, now)
-                if ask_tier.auto_run(home, cfg, settings, auto_tier.default_simctl, 'simulator-delete', now=now,
-                                     short_bytes=settings.warning_free_gib * GIB - free):
-                    pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
-                    free = shutil.disk_usage(str(settings.volume)).free
+                for kind in ('simulator-delete', 'task-delete'):
+                    if ask_tier.auto_run(home, cfg, settings, auto_tier.default_simctl, kind, now=now,
+                                         short_bytes=settings.warning_free_gib * GIB - free):
+                        pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
+                        free = shutil.disk_usage(str(settings.volume)).free
                 ask_tier.maybe_notify(home, pending, free, settings.critical_free_gib * GIB, now)
                 (root/'ask-error.json').unlink(missing_ok=True)
             except Exception as error:
@@ -768,20 +769,45 @@ def tick_caches(home, now, launchctl=toolcaches.default_launchctl):
     return actions or None
 
 
+def slot_cap(home, rule, settings):
+    """build-slots: the cap the agent set, or a tenth of the disk (agent_plan.SLOT_SHARE)."""
+    gib = rule['params'].get('max_gib') or 0
+    return int(gib * GIB) if gib > 0 else int(shutil.disk_usage(str(settings.volume)).total * agent_plan.SLOT_SHARE)
+
+
 def clean_caches(home):
-    """1.3 cleanup of the managed slots and the existing Xcode caches."""
+    """1.3 cleanup of the managed slots and the existing Xcode caches; then (11-16) whole build slots no worktree
+    needs any more, and the least used ones above the slot cap."""
     try:
         cfg = tiers_config.load(home)
     except ValueError as error:
         receipt = dict(at=time.time(), status='error', error=str(error), results=[])
         atomic_json(state_root(home)/'automatic-storage.json', receipt)
         return receipt
-    if not cfg['auto_enabled'] or agent_plan.action(agent_plan.load(home), 'xcode-intermediates') != 'clean':
+    rules = agent_plan.load(home)
+    families = [('managed', lambda: StorageManager(configure(home))), ('existing-xcode', lambda: common.manager(home))]
+    families = families if agent_plan.action(rules, 'xcode-intermediates') == 'clean' else []
+    slots_on = agent_plan.action(rules, 'build-slots') == 'clean'
+    if not cfg['auto_enabled'] or not (families or slots_on):
         receipt = dict(at=time.time(), status='disabled', results=[])
         atomic_json(state_root(home)/'automatic-storage.json', receipt)
         return receipt
     results = []
-    for name, build in [('managed', lambda: StorageManager(configure(home))), ('existing-xcode', lambda: common.manager(home))]:
+
+    def protected_activity(manager):
+        activity = common.activity(manager.settings.lease_root)
+        try:
+            enabled = tiers_config.load(home)['auto_enabled']
+        except ValueError:
+            enabled = False
+        if not enabled or (state_root(home)/'storage-paused').exists():
+            activity.errors.append('automatic maintenance paused or configuration invalid')
+        if agent_plan.load(home)['version'] != rules['version']:
+            # The plan changed while cleaning (a new 「先别动」, say): stop here, the next round plans again.
+            activity.errors.append('plan changed during cleanup')
+        return activity
+
+    for name, build in families:
         if (state_root(home)/'storage-paused').exists(): break
         started = time.time()
         # Each family stands alone: a failure is recorded for the dashboard, never hides the other.
@@ -789,30 +815,28 @@ def clean_caches(home):
             manager = build()
             manager.settings.normal_days = manager.settings.pressure_days = manager.settings.critical_days = 7
             plan = manager.plan(activity=common.activity(manager.settings.lease_root))
-            rules = agent_plan.load(home)
             for candidate in plan.get('candidates', []):
                 keep = agent_plan.kept(rules, candidate['path'])
                 if keep and candidate.get('decision') == 'eligible':
                     candidate.update(decision='kept', reasons=['先别动：' + (keep.get('why') or '计划里写着')])
-            def protected_activity():
-                activity = common.activity(manager.settings.lease_root)
-                try:
-                    enabled = tiers_config.load(home)['auto_enabled']
-                except ValueError:
-                    enabled = False
-                if not enabled or (state_root(home)/'storage-paused').exists():
-                    activity.errors.append('automatic maintenance paused or configuration invalid')
-                if agent_plan.load(home)['version'] != rules['version']:
-                    # The plan changed while cleaning (a new 「先别动」, say): stop here, the next round plans again.
-                    activity.errors.append('plan changed during cleanup')
-                return activity
-            result = manager.apply(plan, activity_factory=protected_activity, manual=True)
+            result = manager.apply(plan, activity_factory=lambda: protected_activity(manager), manual=True)
             results.append(dict(family=name, started=started, eligible_bytes=plan['eligible_accounting_bytes'], result=result))
         except common.CacheUnavailable as reason:
             results.append(dict(family=name, started=started, skipped=str(reason)))
         except Exception as error:
             results.append(dict(family=name, started=started, error=str(error) or type(error).__name__))
         atomic_json(state_root(home)/'automatic-storage.json', dict(at=time.time(), status='running', results=results))
+    if slots_on and not (state_root(home)/'storage-paused').exists():
+        started = time.time()
+        try:
+            manager = StorageManager(configure(home))
+            rule = rules['rules']['build-slots']
+            result = manager.reclaim_slots(cap_bytes=slot_cap(home, rule, manager.settings), min_age=rule['params']['min_hours'] * 3600,
+                                           activity_factory=lambda: protected_activity(manager),
+                                           keep=lambda path: agent_plan.kept(rules, path))
+            results.append(dict(family='build-slots', started=started, result=result))
+        except Exception as error:
+            results.append(dict(family='build-slots', started=started, error=str(error) or type(error).__name__))
     errors = []
     for r in results:
         if r.get('error'):

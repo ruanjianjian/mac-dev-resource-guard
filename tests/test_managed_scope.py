@@ -93,6 +93,7 @@ class ManagedScopeTests(TierFixture):
                 seen.append((self.settings.normal_days, self.settings.pressure_days, self.settings.critical_days))
                 return {'eligible_accounting_bytes': 0}
             def apply(self, *a, **k): return {'status': 'complete', 'errors': [], 'deleted': []}
+            def reclaim_slots(self, **k): return {'status': 'ok', 'errors': [], 'deleted': [], 'kept': []}
         with patch.object(service, 'StorageManager', Manager), \
              patch.object(service.common, 'manager', return_value=Manager(self.settings)), \
              patch.object(service.common, 'activity', return_value=None):

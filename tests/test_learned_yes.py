@@ -169,7 +169,7 @@ class FreerAgentTest(AskFixture):
         with self.assertRaises(ValueError):
             E.decide(folder, 'rule', 'task-delete', why='x', note='clean')   # not one of its choices
         result = E.apply(self.home, self.cfg(task_roots=[]), self.settings, folder, now=NOW, table={})
-        self.assertEqual([d['result'] for d in result['done']], ['已改', '删模拟器要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会'])
+        self.assertEqual([d['result'] for d in result['done']], ['已改', '删模拟器、收任务要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会'])
         self.assertEqual(agent_plan.load(self.home)['rules']['simulator-shutdown']['action'], 'auto')
         told = E.receipt(E.decisions(folder), dict(received=0, recorded=[], refused=[]), result)
         self.assertEqual((told['handed'], told['done']), (2, 1))
