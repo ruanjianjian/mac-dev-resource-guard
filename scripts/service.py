@@ -18,7 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'runtime/storage'))
-from storage import GIB, StorageManager, atomic_json
+from storage import GIB, Activity, StorageManager, atomic_json
 from portable_config import configure
 import agent_plan
 import ask_tier
@@ -308,7 +308,8 @@ def activate(home):
         return receipt
 
 
-FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存', 'build-slots': '构建槽'}
+FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存', 'build-slots': '构建槽',
+            'xcode-projects': 'Xcode 默认编译目录'}
 
 
 def tick_storage(home, now=None):
@@ -794,8 +795,8 @@ def clean_caches(home):
         return receipt
     results = []
 
-    def protected_activity(manager):
-        activity = common.activity(manager.settings.lease_root)
+    def protected_activity(manager, collect=common.activity):
+        activity = collect(manager.settings.lease_root)
         try:
             enabled = tiers_config.load(home)['auto_enabled']
         except ValueError:
@@ -832,11 +833,25 @@ def clean_caches(home):
             manager = StorageManager(configure(home))
             rule = rules['rules']['build-slots']
             result = manager.reclaim_slots(cap_bytes=slot_cap(home, rule, manager.settings), min_age=rule['params']['min_hours'] * 3600,
-                                           activity_factory=lambda: protected_activity(manager),
+                                           # 11-17: not common.activity — its 「any compile running」 kept every
+                                           # slot on an acceptance Mac that always builds. A slot is built in
+                                           # under its own lock; the lock, open files and command lines guard it.
+                                           activity_factory=lambda: protected_activity(manager, Activity.collect),
                                            keep=lambda path: agent_plan.kept(rules, path))
             results.append(dict(family='build-slots', started=started, result=result))
         except Exception as error:
             results.append(dict(family='build-slots', started=started, error=str(error) or type(error).__name__))
+        started = time.time()
+        try:   # 11-17: Xcode's own DerivedData of projects that are gone (a Runner-… for every Flutter checkout)
+            manager = StorageManager(configure(home))
+            root = common.standard_root(Path(home).resolve(), manager.settings)
+            result = manager.reclaim_derived(root, activity_factory=lambda: protected_activity(manager, Activity.collect),
+                                             keep=lambda path: agent_plan.kept(rules, path))
+            results.append(dict(family='xcode-projects', started=started, result=result))
+        except common.CacheUnavailable as reason:
+            results.append(dict(family='xcode-projects', started=started, skipped=str(reason)))
+        except Exception as error:
+            results.append(dict(family='xcode-projects', started=started, error=str(error) or type(error).__name__))
     errors = []
     for r in results:
         if r.get('error'):

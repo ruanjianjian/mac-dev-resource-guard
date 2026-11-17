@@ -153,7 +153,7 @@ class AutomaticTests(unittest.TestCase):
             result=service.tick_storage(self.home)
         self.assertEqual(result['status'],'complete')
         skipped=[r for r in result['results'] if r.get('skipped')]
-        self.assertEqual([r['family'] for r in skipped],['existing-xcode']); self.assertIn('不存在',skipped[0]['skipped'])
+        self.assertEqual([r['family'] for r in skipped],['existing-xcode','xcode-projects']); self.assertIn('不存在',skipped[0]['skipped'])
 
     def test_invalid_config_still_writes_error_receipt(self):
         p=self.home/'.config/dev-resource-guard/config.json';p.parent.mkdir(parents=True);p.write_text('{"cache_root":"/"}')

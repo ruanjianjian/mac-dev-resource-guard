@@ -187,6 +187,54 @@ class CleanRoundTests(unittest.TestCase):
         slots = next(r for r in receipt['results'] if r['family'] == 'build-slots')
         self.assertEqual(len(slots['result']['deleted']), 1)
 
+    def test_a_compile_elsewhere_does_not_hold_up_slots(self):
+        """11-17: an acceptance Mac always has some xcodebuild running; that kept every slot (0 of 74 freed)."""
+        import common
+        busy = common.CommonActivity(commands=[(7, 'xcodebuild -scheme Elys build')])
+        self.assertTrue(busy.reasons(self.folder), 'the standard caches still wait for any compile')
+        with patch.object(service.common, 'activity', return_value=busy), \
+             patch.object(service.Activity, 'collect', return_value=Activity(commands=[(7, 'xcodebuild -scheme Elys build')])):
+            receipt = service.clean_caches(self.home)
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(len(next(r for r in receipt['results'] if r['family'] == 'build-slots')['result']['deleted']), 1)
+
+    def test_a_compile_using_the_slot_keeps_it(self):
+        using = Activity(commands=[(7, 'xcodebuild -derivedDataPath {} build'.format(self.folder / 'DerivedData'))])
+        with patch.object(service.common, 'activity', return_value=using), \
+             patch.object(service.Activity, 'collect', return_value=using):
+            service.clean_caches(self.home)
+        self.assertTrue(self.folder.exists())
+
+    def project(self, name, workspace):
+        import plistlib
+        folder = self.home / 'Library/Developer/Xcode/DerivedData' / name
+        (folder / 'Build/Intermediates.noindex').mkdir(parents=True)
+        (folder / 'info.plist').write_bytes(plistlib.dumps({'WorkspacePath': str(workspace)}))
+        return folder
+
+    def test_xcode_folders_of_gone_projects_go_whole(self):
+        """11-17: a Runner-… per Flutter checkout in Xcode's own DerivedData grew 48 GiB in four hours."""
+        gone = self.project('Runner-gone', self.home / 'work/old-lane/ElysMobileApp/ios/Runner.xcworkspace')
+        live_tree = self.home / 'work/live/ios/Runner.xcworkspace'; live_tree.mkdir(parents=True)
+        live = self.project('Runner-live', live_tree)
+        shared = self.home / 'Library/Developer/Xcode/DerivedData/CompilationCache.noindex'; shared.mkdir()
+        unplugged = self.project('Runner-drive', '/Volumes/NoSuchDrive-guard-test/task/Runner.xcworkspace')
+        with patch.object(service.common, 'activity', return_value=Activity()), \
+             patch.object(service.Activity, 'collect', return_value=Activity(commands=[(7, 'xcodebuild -scheme Elys build')])):
+            receipt = service.clean_caches(self.home)
+        self.assertFalse(gone.exists())
+        for kept in (live, shared, unplugged):
+            self.assertTrue(kept.exists(), kept)
+        projects = next(r for r in receipt['results'] if r['family'] == 'xcode-projects')
+        self.assertEqual([d['path'] for d in projects['result']['deleted']], [str(gone)])
+
+    def test_xcode_folder_of_a_gone_project_still_open_stays(self):
+        gone = self.project('Runner-open', self.home / 'work/old/Runner.xcworkspace')
+        held = Activity(open_paths=[(9, str(gone / 'Build/Intermediates.noindex/x.o'))])
+        with patch.object(service.common, 'activity', return_value=held), patch.object(service.Activity, 'collect', return_value=held):
+            service.clean_caches(self.home)
+        self.assertTrue(gone.exists())
+
     def test_rule_off_leaves_slots_alone(self):
         agent_plan.set_rule(self.home, 'build-slots', 'off', by='user', words='构建槽别动')
         receipt = self.round()
