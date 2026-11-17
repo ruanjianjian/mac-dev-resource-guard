@@ -187,6 +187,24 @@ class CleanRoundTests(unittest.TestCase):
         slots = next(r for r in receipt['results'] if r['family'] == 'build-slots')
         self.assertEqual(len(slots['result']['deleted']), 1)
 
+    def test_a_compile_elsewhere_does_not_hold_up_slots(self):
+        """11-17: an acceptance Mac always has some xcodebuild running; that kept every slot (0 of 74 freed)."""
+        import common
+        busy = common.CommonActivity(commands=[(7, 'xcodebuild -scheme Elys build')])
+        self.assertTrue(busy.reasons(self.folder), 'the standard caches still wait for any compile')
+        with patch.object(service.common, 'activity', return_value=busy), \
+             patch.object(service.Activity, 'collect', return_value=Activity(commands=[(7, 'xcodebuild -scheme Elys build')])):
+            receipt = service.clean_caches(self.home)
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(len(next(r for r in receipt['results'] if r['family'] == 'build-slots')['result']['deleted']), 1)
+
+    def test_a_compile_using_the_slot_keeps_it(self):
+        using = Activity(commands=[(7, 'xcodebuild -derivedDataPath {} build'.format(self.folder / 'DerivedData'))])
+        with patch.object(service.common, 'activity', return_value=using), \
+             patch.object(service.Activity, 'collect', return_value=using):
+            service.clean_caches(self.home)
+        self.assertTrue(self.folder.exists())
+
     def test_rule_off_leaves_slots_alone(self):
         agent_plan.set_rule(self.home, 'build-slots', 'off', by='user', words='构建槽别动')
         receipt = self.round()
