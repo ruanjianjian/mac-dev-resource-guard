@@ -308,7 +308,8 @@ def activate(home):
         return receipt
 
 
-FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存', 'build-slots': '构建槽'}
+FAMILIES = {'managed': '固定构建缓存', 'existing-xcode': '已有 Xcode 缓存', 'build-slots': '构建槽',
+            'xcode-projects': 'Xcode 默认编译目录'}
 
 
 def tick_storage(home, now=None):
@@ -840,6 +841,17 @@ def clean_caches(home):
             results.append(dict(family='build-slots', started=started, result=result))
         except Exception as error:
             results.append(dict(family='build-slots', started=started, error=str(error) or type(error).__name__))
+        started = time.time()
+        try:   # 11-17: Xcode's own DerivedData of projects that are gone (a Runner-… for every Flutter checkout)
+            manager = StorageManager(configure(home))
+            root = common.standard_root(Path(home).resolve(), manager.settings)
+            result = manager.reclaim_derived(root, activity_factory=lambda: protected_activity(manager, Activity.collect),
+                                             keep=lambda path: agent_plan.kept(rules, path))
+            results.append(dict(family='xcode-projects', started=started, result=result))
+        except common.CacheUnavailable as reason:
+            results.append(dict(family='xcode-projects', started=started, skipped=str(reason)))
+        except Exception as error:
+            results.append(dict(family='xcode-projects', started=started, error=str(error) or type(error).__name__))
     errors = []
     for r in results:
         if r.get('error'):

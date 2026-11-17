@@ -26,7 +26,8 @@ RULES = {
     # 11-16: one build slot per worktree, never collected — 380 GiB of them on a 2 TB Mac with 28 GiB left. A slot
     # whose worktree is gone goes; above max_gib in all (0: a tenth of the disk) the least recently used go, never
     # one used within min_hours. The agent sets the cap from what it sees on this Mac.
-    'build-slots': dict(title='各任务的 Xcode 构建槽', actions=('clean', 'off'), default='clean',
+    # 11-17: also Xcode's own DerivedData folder of a project that is gone (a Runner-… per Flutter checkout).
+    'build-slots': dict(title='各任务的 Xcode 构建槽和编译目录', actions=('clean', 'off'), default='clean',
                         params={'max_gib': 0, 'min_hours': 24}),
     # 「work-drive」 (11-10, the user: a 500 GB disk cannot hold the work; 「按照你的解法推进吧」): the drive is where the
     # work lives — any task nobody is using goes there, unsaved work and all, and a root left with only links
@@ -309,7 +310,7 @@ def rule_words(rid, entry):
             entry['params']['max_booted'], entry['params']['quiet_minutes'])
     if rid == 'build-slots' and entry['action'] == 'clean':
         cap = entry['params'].get('max_gib')
-        return '工作区不在了就删；合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
+        return '工作区不在了，它的构建槽和 Xcode 编译目录就删；构建槽合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
             ' {:g} GB '.format(cap) if cap else '磁盘的十分之一', entry['params']['min_hours'])
     if rid == 'pin-release' and entry['action'] != 'off':
         return words + '（标记满 {:g} 天、没写到期日的）'.format(entry['params']['min_days'])

@@ -717,6 +717,78 @@ class StorageManager:
             atomic_json(receipt, result)
         return result
 
+    def reclaim_derived(self, root, activity_factory=None, now=None, sizer=du_bytes, keep=None):
+        """build-slots (11-17): Xcode's own DerivedData keeps one folder per project path — a Runner-<hash> for every
+        Flutter checkout — and nothing ever removes it; on the acceptance Mac it grew 48 GiB in four hours. A folder
+        whose workspace is gone is deleted whole. Only direct children with an info.plist naming an absolute
+        WorkspacePath (never the shared CompilationCache or ModuleCache); never one pinned, held open, named by a
+        running command, or that `keep` (path -> truthy) holds."""
+        now = time.time() if now is None else now
+        collect = activity_factory or (lambda: Activity.collect(self.settings.lease_root))
+        result = {'schema_version': 1, 'time': now, 'status': 'ok', 'deleted': [], 'kept': [], 'errors': []}
+        root = Path(root)
+        gone = []
+        try:
+            with os.scandir(str(root)) as entries:
+                names = sorted(e.name for e in entries if not e.name.startswith('.') and e.is_dir(follow_symlinks=False))
+        except OSError:
+            return result
+        for name in names:
+            try:
+                workspace = plistlib.loads((root / name / 'info.plist').read_bytes()).get('WorkspacePath')
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                continue
+            if isinstance(workspace, str) and workspace.startswith('/') and worktree_gone(workspace):
+                gone.append((root / name, workspace))
+        if not gone:
+            return result
+        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(self.lock_path, 'a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                result['status'] = 'busy'
+                return result
+            activity = collect()
+            for folder, workspace in gone:
+                if keep and (keep(str(folder)) or keep(workspace)):
+                    result['kept'].append({'path': str(folder), 'reason': 'kept by the plan'})
+                    continue
+                size = sizer(folder)
+                try:
+                    with open(self.state_root / 'pins.lock', 'a') as pin_lock:
+                        fcntl.flock(pin_lock, fcntl.LOCK_EX)
+                        pins, pin_errors = self._pins(now)
+                        reasons = pin_errors + self._pin_reasons(pins, folder, folder, workspace)
+                        reasons += activity.reasons(folder, workspace)
+                        if reasons:
+                            result['kept'].append({'path': str(folder), 'reason': '; '.join(sorted(set(reasons)))})
+                            continue
+                        parent_fd = open_directory_fd(root)
+                        try:
+                            identity = os.stat(folder.name, dir_fd=parent_fd, follow_symlinks=False)
+                            if not stat.S_ISDIR(identity.st_mode):
+                                raise RuntimeError('not a directory')
+                            quarantine = '.dev-storage-purge-' + folder.name + '-' + uuid.uuid4().hex
+                            os.rename(folder.name, quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                        except BaseException:
+                            os.close(parent_fd)
+                            raise
+                    entry = {'path': str(folder), 'worktree': workspace, 'why': '它的项目已经不在了',
+                             'directory_accounting_bytes': size or 0}
+                    self._log({'event': 'derived_delete_started', 'time': time.time(), **entry})
+                    try:
+                        remove_tree_at(parent_fd, quarantine, (identity.st_dev, identity.st_ino))
+                    finally:
+                        os.close(parent_fd)
+                    result['deleted'].append(entry)
+                    self._log({'event': 'derived_delete_complete', 'time': time.time(), **entry})
+                except (OSError, ValueError, RuntimeError) as error:
+                    result['errors'].append({'path': str(folder), 'reason': str(error)})
+                    break
+            result['status'] = 'error' if result['errors'] else 'ok'
+        return result
+
     def _log(self, value):
         with open(self.state_root / 'actions.jsonl', 'a') as f:
             f.write(json.dumps(value, ensure_ascii=False) + '\n')
