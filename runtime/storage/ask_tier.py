@@ -669,6 +669,10 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 StorageManager(settings).release_pin(target)
             elif item['kind'] == 'shared-caches':
                 skipped = shared_caches.remove(fresh[key]['paths'], activity)
+                # Remembered, so a version that comes back (something uses it after all) is never removed again.
+                state = load(home, ASK_STATE, {})
+                shared_caches.note_removed(state, [p for p in fresh[key]['paths'] if p not in skipped and not os.path.lexists(p)])
+                save(home, ASK_STATE, state)
                 if skipped and len(skipped) == len(fresh[key]['paths']):
                     raise RuntimeError('都有程序在用，没有删：' + skipped[0])
             elif item['kind'] == 'task-move':
