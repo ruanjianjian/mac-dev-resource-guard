@@ -760,31 +760,48 @@ class StorageManager:
             atomic_json(receipt, result)
         return result
 
-    def reclaim_derived(self, root, activity_factory=None, now=None, sizer=du_bytes, keep=None):
-        """build-slots (11-17): Xcode's own DerivedData keeps one folder per project path — a Runner-<hash> for every
-        Flutter checkout — and nothing ever removes it; on the acceptance Mac it grew 48 GiB in four hours. A folder
-        whose workspace is gone is deleted whole. Only direct children with an info.plist naming an absolute
-        WorkspacePath (never the shared CompilationCache or ModuleCache); never one pinned, held open, named by a
-        running command, or that `keep` (path -> truthy) holds."""
+    def reclaim_derived(self, root, activity_factory=None, now=None, sizer=du_bytes, keep=None, cap_bytes=None,
+                        min_age=86400):
+        """build-slots: Xcode's own DerivedData keeps one folder per project path — a Runner-<hash> for every Flutter
+        checkout — and nothing ever removes it. A folder whose workspace is gone is deleted whole (11-17: it grew
+        48 GiB in four hours on the acceptance Mac); and (11-18: 152 GiB of live ones) with `cap_bytes`, while the
+        folders together are above it, the least recently used go too, never one used within `min_age` seconds.
+        Only direct children with an info.plist naming an absolute WorkspacePath (never the shared CompilationCache
+        or ModuleCache); never one pinned, held open, named by a running command, or that `keep` (path -> truthy)
+        holds. Sizes are measured again only after a folder was used since its last measuring."""
         now = time.time() if now is None else now
         collect = activity_factory or (lambda: Activity.collect(self.settings.lease_root))
-        result = {'schema_version': 1, 'time': now, 'status': 'ok', 'deleted': [], 'kept': [], 'errors': []}
+        result = {'schema_version': 1, 'time': now, 'status': 'ok', 'deleted': [], 'kept': [], 'errors': [],
+                  'cap_bytes': cap_bytes}
         root = Path(root)
-        gone = []
+        receipt = self.state_root / 'last-derived.json'
+        try:
+            measured = json.loads(receipt.read_text()).get('sizes') or {}
+        except (OSError, ValueError, AttributeError):
+            measured = {}
+        rows = []
         try:
             with os.scandir(str(root)) as entries:
                 names = sorted(e.name for e in entries if not e.name.startswith('.') and e.is_dir(follow_symlinks=False))
         except OSError:
             return result
         for name in names:
+            folder = root / name
             try:
-                workspace = plistlib.loads((root / name / 'info.plist').read_bytes()).get('WorkspacePath')
+                info = plistlib.loads((folder / 'info.plist').read_bytes())
             except (OSError, ValueError, plistlib.InvalidFileException):
                 continue
-            if isinstance(workspace, str) and workspace.startswith('/') and worktree_gone(workspace):
-                gone.append((root / name, workspace))
+            workspace = info.get('WorkspacePath')
+            if not (isinstance(workspace, str) and workspace.startswith('/')):
+                continue
+            used = info.get('LastAccessedDate')
+            try:
+                last = used.timestamp() if hasattr(used, 'timestamp') else folder.stat().st_mtime
+            except (OSError, ValueError, OverflowError):
+                last = 0
+            rows.append(dict(folder=folder, workspace=workspace, gone=worktree_gone(workspace), last=last))
         leftovers = any(n.startswith('.dev-storage-purge-') for n in os.listdir(str(root)))
-        if not gone and not leftovers:
+        if not leftovers and not any(r['gone'] for r in rows) and cap_bytes is None:
             return result
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.lock_path, 'a') as lock:
@@ -794,18 +811,32 @@ class StorageManager:
                 result['status'] = 'busy'
                 return result
             result['swept'] = self._sweep([root], collect, now)
-            activity = collect() if gone else None
-            for folder, workspace in gone:
+            sizes = {}
+            for row in rows:
+                if row['gone'] or cap_bytes is not None:
+                    old = measured.get(row['folder'].name)
+                    row['bytes'] = old[0] if isinstance(old, list) and len(old) == 2 and old[1] >= row['last'] else sizer(row['folder'])
+                    if row['bytes'] is not None:
+                        sizes[row['folder'].name] = [row['bytes'], now]
+            total = sum(r.get('bytes') or 0 for r in rows) if cap_bytes is not None else None
+            activity = None
+            for row in [r for r in rows if r['gone']] + sorted((r for r in rows if not r['gone']), key=lambda r: r['last']):
+                if not row['gone'] and not (total is not None and total > cap_bytes):
+                    break
+                folder, workspace = row['folder'], row['workspace']
+                if not row['gone'] and now - row['last'] < min_age:
+                    result['kept'].append({'path': str(folder), 'reason': 'used within retention window'})
+                    continue
                 if keep and (keep(str(folder)) or keep(workspace)):
                     result['kept'].append({'path': str(folder), 'reason': 'kept by the plan'})
                     continue
-                size = sizer(folder)
+                activity = activity or collect()
                 try:
                     with open(self.state_root / 'pins.lock', 'a') as pin_lock:
                         fcntl.flock(pin_lock, fcntl.LOCK_EX)
                         pins, pin_errors = self._pins(now)
                         reasons = pin_errors + self._pin_reasons(pins, folder, folder, workspace)
-                        reasons += activity.reasons(folder, workspace)
+                        reasons += activity.reasons(folder, None if row['gone'] else workspace)
                         if reasons:
                             result['kept'].append({'path': str(folder), 'reason': '; '.join(sorted(set(reasons)))})
                             continue
@@ -819,18 +850,23 @@ class StorageManager:
                         except BaseException:
                             os.close(parent_fd)
                             raise
-                    entry = {'path': str(folder), 'worktree': workspace, 'why': '它的项目已经不在了',
-                             'directory_accounting_bytes': size or 0}
+                    entry = {'path': str(folder), 'worktree': workspace,
+                             'why': '它的项目已经不在了' if row['gone'] else '构建槽和编译目录合计超过上限，它最久没用',
+                             'directory_accounting_bytes': row.get('bytes') or 0}
                     self._log({'event': 'derived_delete_started', 'time': time.time(), **entry})
                     try:
                         remove_tree_at(parent_fd, quarantine, (identity.st_dev, identity.st_ino))
                     finally:
                         os.close(parent_fd)
                     result['deleted'].append(entry)
+                    sizes.pop(folder.name, None)
+                    if total is not None:
+                        total -= row.get('bytes') or 0
                     self._log({'event': 'derived_delete_complete', 'time': time.time(), **entry})
                 except (OSError, ValueError, RuntimeError) as error:
                     result['errors'].append({'path': str(folder), 'reason': str(error)})
-            result['status'] = 'error' if result['errors'] else 'ok'
+            result.update(status='error' if result['errors'] else 'ok', total_bytes=total, sizes=sizes)
+            atomic_json(receipt, result)
         return result
 
     def _sweep(self, roots, collect, now):

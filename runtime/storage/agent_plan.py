@@ -316,7 +316,7 @@ def rule_words(rid, entry):
             entry['params']['max_booted'], entry['params']['quiet_minutes'])
     if rid == 'build-slots' and entry['action'] == 'clean':
         cap = entry['params'].get('max_gib')
-        return '工作区不在了，它的构建槽和 Xcode 编译目录就删；构建槽合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
+        return '工作区不在了，它的构建槽和 Xcode 编译目录就删；两者合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
             ' {:g} GB '.format(cap) if cap else '磁盘的十分之一', entry['params']['min_hours'])
     if rid == 'task-shipped' and entry['action'] in ('auto', 'ask'):
         return '{}：所有仓库都已合入或关闭、{:g} 小时没人动的任务，整个删掉（笔记、截图一起）'.format(

@@ -845,14 +845,20 @@ def clean_caches(home):
                                            activity_factory=lambda: protected_activity(manager, Activity.collect),
                                            keep=lambda path: agent_plan.kept(rules, path))
             results.append(dict(family='build-slots', started=started, result=result))
+            slots_total = result.get('total_bytes') or 0
         except Exception as error:
             results.append(dict(family='build-slots', started=started, error=str(error) or type(error).__name__))
+            slots_total = None
         started = time.time()
-        try:   # 11-17: Xcode's own DerivedData of projects that are gone (a Runner-… for every Flutter checkout)
+        try:   # Xcode's own DerivedData (a Runner-… for every Flutter checkout): gone projects (11-17), and (11-18) the
+            # least used above what the slots left of the one budget for both.
             manager = StorageManager(configure(home))
             root = common.standard_root(Path(home).resolve(), manager.settings)
+            rule = rules['rules']['build-slots']
+            budget = None if slots_total is None else max(0, slot_cap(home, rule, manager.settings) - slots_total)
             result = manager.reclaim_derived(root, activity_factory=lambda: protected_activity(manager, Activity.collect),
-                                             keep=lambda path: agent_plan.kept(rules, path))
+                                             keep=lambda path: agent_plan.kept(rules, path), cap_bytes=budget,
+                                             min_age=rule['params']['min_hours'] * 3600)
             results.append(dict(family='xcode-projects', started=started, result=result))
         except common.CacheUnavailable as reason:
             results.append(dict(family='xcode-projects', started=started, skipped=str(reason)))
