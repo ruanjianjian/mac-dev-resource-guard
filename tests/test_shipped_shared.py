@@ -191,6 +191,7 @@ class SharedCacheTests(ShippedFixture):
             path = self.home / rel
             path.mkdir(parents=True)
             (path / 'f').write_text('x')
+            age(path, 10)   # downloaded long ago: a fresh one is left alone
             made[rel] = path
         return made
 
@@ -221,6 +222,35 @@ class SharedCacheTests(ShippedFixture):
         for gone in ('fvm/versions/3.24.0', '.pub-cache/hosted/pub.dev/args-2.4.0',
                      'Library/Caches/CocoaPods/Pods/Release/Alamofire/5.6.0-xyz12', '.gradle/wrapper/dists/gradle-7.6-all'):
             self.assertFalse(made[gone].exists(), gone)
+
+    def test_a_lock_file_git_does_not_track_counts_too(self):
+        app = self.flutter_repo()
+        package = app / 'packages/ui'
+        package.mkdir(parents=True)
+        (package / 'pubspec.lock').write_text(PUBSPEC_LOCK.replace('"2.5.0"', '"2.4.0"'))   # ignored, like most packages'
+        self.assertIn(('args', '2.4.0'), S.uses(S.lock_files(app))['pub'])
+
+    def test_a_version_that_comes_back_is_never_removed_again(self):
+        """11-18: 247 pub versions were removed and fetched again every half hour."""
+        self.flutter_repo()
+        made = self.caches()
+        old = made['.pub-cache/hosted/pub.dev/args-2.4.0']
+        ask_tier.execute(self.home, self.cfg_(), self.settings, ['shared-caches:pub'], self.simctl, Activity())
+        self.assertFalse(old.exists())
+        old.mkdir(); (old / 'f').write_text('x'); age(old, 10)   # something fetched it again
+        pending = self.refresh(self.simctl, now=time.time() + 7 * 3600)
+        pub = next((i for i in pending['items'] if i['id'] == 'shared-caches:pub'), None)
+        self.assertTrue(pub is None or str(old) not in pub['paths'])
+        state = json.loads((ask_tier.state_root(self.home) / ask_tier.ASK_STATE).read_text())
+        self.assertIn(str(old), state['shared_caches']['returned'])
+
+    def test_a_version_fetched_recently_waits(self):
+        self.flutter_repo()
+        made = self.caches()
+        fresh = made['.pub-cache/hosted/pub.dev/args-2.4.0']
+        os.utime(fresh, None)
+        pub = next(i for i in self.refresh(self.simctl)['items'] if i['id'] == 'shared-caches:pub')
+        self.assertNotIn(str(fresh), pub['paths'])
 
     def test_no_project_found_lists_nothing(self):
         self.caches()

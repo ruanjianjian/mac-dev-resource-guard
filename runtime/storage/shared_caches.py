@@ -9,10 +9,15 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 
 import tasks as T
 
 REFS_HOURS = 6   # the lock files are read again this often; a confirmation always reads them again
+MIN_AGE_DAYS = 3        # a version downloaded or rewritten this recently was needed just now: left alone
+FORGET_DAYS = 30        # a removed version not back within this long is forgotten
+WALK_DEPTH = 6
+WALK_SKIP = {'node_modules', 'build', 'Pods', 'DerivedData', '.build', 'target', '.symlinks', 'ephemeral'}
 LOCKS = ('pubspec.lock', 'Podfile.lock', '.fvmrc', 'fvm_config.json', 'gradle-wrapper.properties', 'build.gradle',
          'build.gradle.kts')
 NAMES = {'flutter-sdk': 'Flutter SDK', 'pub': 'pub 依赖缓存', 'cocoapods': 'CocoaPods 缓存', 'gradle': 'Gradle'}
@@ -51,8 +56,17 @@ def projects(cfg):
 
 
 def lock_files(repo):
+    """The lock files git tracks, and (11-18) the ones it does not: a package's own pubspec.lock is often ignored, and
+    versions only it used were removed and fetched again every round."""
+    repo = Path(repo)
     out = T.git(repo, 'ls-files', '-z', '--', *['*' + name for name in LOCKS])
-    return [Path(repo) / f for f in out.stdout.split('\0') if f] if out.returncode == 0 else []
+    found = {repo / f for f in out.stdout.split('\0') if f} if out.returncode == 0 else set()
+    for folder, dirs, files in os.walk(str(repo)):
+        if len(Path(folder).relative_to(repo).parts) >= WALK_DEPTH:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if d not in WALK_SKIP and (not d.startswith('.') or d == '.fvm')]
+        found.update(Path(folder) / f for f in files if f in LOCKS)
+    return sorted(found)
 
 
 def uses(paths):
@@ -102,15 +116,16 @@ def _children(folder):
         return []
 
 
-def unused(home, refs):
-    """{family: [paths]} of versions no project uses."""
+def unused(home, refs, keep=(), now=None, min_age=MIN_AGE_DAYS * 86400):
+    """{family: [paths]} of versions no project uses, leaving out `keep` and what changed within `min_age` seconds."""
     home = Path(home)
+    now = time.time() if now is None else now
     found = {}
     for root in (home / 'fvm', home / '.fvm'):
         default = root / 'default'
-        keep = default.resolve().name if default.is_symlink() else None
+        default_name = default.resolve().name if default.is_symlink() else None
         found.setdefault('flutter-sdk', []).extend(
-            str(p) for p in _children(root / 'versions') if p.name not in refs['flutter'] and p.name != keep)
+            str(p) for p in _children(root / 'versions') if p.name not in refs['flutter'] and p.name != default_name)
     pub = Path(os.environ.get('PUB_CACHE') or home / '.pub-cache') / 'hosted'
     for host in _children(pub):
         found.setdefault('pub', []).extend(
@@ -125,17 +140,49 @@ def unused(home, refs):
             found.setdefault('gradle', []).append(str(dist))
     if not refs['gradle_project']:
         found.setdefault('gradle', []).extend(str(p) for p in (gradle / 'caches', gradle / 'daemon') if p.is_dir() and not p.is_symlink())
+    keep = set(keep)
+
+    def old(path):
+        try:
+            return now - os.lstat(path).st_mtime >= min_age
+        except OSError:
+            return False
+    found = {family: [p for p in paths if p not in keep and old(p)] for family, paths in found.items()}
     return {family: paths for family, paths in found.items() if paths}
 
 
-def look(home, cfg):
+def returned(memory, now=None):
+    """Versions that came back after they were removed: something on this Mac uses them though no lock file says so
+    (11-18: 247 pub versions were removed and fetched again every half hour). They are never proposed again."""
+    now = time.time() if now is None else now
+    cache = memory.setdefault('shared_caches', {}) if memory is not None else {}
+    removed = cache.get('removed') if isinstance(cache.get('removed'), dict) else {}
+    back = set(cache.get('returned') or [])
+    for path, at in list(removed.items()):
+        if os.path.lexists(path):
+            back.add(path)
+            removed.pop(path)
+        elif not isinstance(at, (int, float)) or now - at > FORGET_DAYS * 86400:
+            removed.pop(path)
+    cache.update(removed=removed, returned=sorted(back))
+    return back
+
+
+def note_removed(memory, paths, now=None):
+    cache = memory.setdefault('shared_caches', {})
+    removed = cache.get('removed') if isinstance(cache.get('removed'), dict) else {}
+    removed.update({str(p): time.time() if now is None else now for p in paths})
+    cache['removed'] = removed
+
+
+def look(home, cfg, keep=(), now=None):
     """{family: {'paths': [...], 'bytes': n, 'projects': n}} right now."""
     found = projects(cfg)
     if not found:
         return {}
     refs = uses([lock for repo in found for lock in lock_files(repo)])
     return {family: dict(paths=paths, bytes=sum(T.size(p) or 0 for p in paths), projects=len(found))
-            for family, paths in unused(home, refs).items()}
+            for family, paths in unused(home, refs, keep, now).items()}
 
 
 def candidates(home, cfg, activity, now, memory, add, only=None):
@@ -143,15 +190,16 @@ def candidates(home, cfg, activity, now, memory, add, only=None):
     if only is not None and not any(key.startswith('shared-caches:') for key in only):
         return
     cache = memory.setdefault('shared_caches', {}) if memory is not None else {}
+    back = returned(memory, now)
     if only is None and isinstance(cache.get('at'), (int, float)) and now - cache['at'] < REFS_HOURS * 3600:
         items = cache.get('items') or {}
     else:
-        items = look(home, cfg)
+        items = look(home, cfg, back, now)
         cache.update(at=now, items=items)
     for family, item in sorted(items.items()):
         if only is not None and 'shared-caches:' + family not in only and 'shared-caches:' not in only:
             continue
-        paths = [p for p in item['paths'] if os.path.lexists(p) and not activity.reasons(Path(p))]
+        paths = [p for p in item['paths'] if p not in back and os.path.lexists(p) and not activity.reasons(Path(p))]
         if not paths:
             continue
         sample = '、'.join(Path(p).name for p in paths[:3]) + (' 等' if len(paths) > 3 else '')
