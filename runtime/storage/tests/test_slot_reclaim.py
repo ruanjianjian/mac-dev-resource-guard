@@ -6,7 +6,10 @@ import time
 import unittest
 from pathlib import Path
 
-from storage import GIB, Activity, Settings, StorageManager, worktree_gone
+from unittest.mock import patch
+
+import storage
+from storage import GIB, Activity, Settings, StorageManager, open_directory_fd, remove_tree_at, worktree_gone
 
 DAY = 86400
 
@@ -137,6 +140,60 @@ class SlotReclaimTests(unittest.TestCase):
         self.assertEqual(len(self.measured), 2)
         self.reclaim(cap_bytes=100 * GIB)
         self.assertEqual(len(self.measured), 2, 'nothing built since: last sizes still hold')
+
+
+    # 11-18: removing a slot stopped at 「Directory not empty: 'Headers'」 — something kept writing into it — and the
+    # whole round stopped there, leaving the rest and a half-removed folder behind.
+    def test_files_written_during_removal_are_removed_too(self):
+        headers = self.base / 'victim/Build/Headers'
+        headers.mkdir(parents=True)
+        for i in range(50):
+            (headers / 'h{}.h'.format(i)).write_text('x')
+        real_unlink, wrote = os.unlink, []
+
+        def unlink(name, *args, **kwargs):
+            real_unlink(name, *args, **kwargs)
+            if not wrote:   # a build service writes one more header right after the first goes
+                wrote.append(True)
+                (headers / 'late.h').write_text('late')
+        fd = open_directory_fd(self.base)
+        try:
+            with patch.object(storage.os, 'unlink', side_effect=unlink):
+                remove_tree_at(fd, 'victim')
+        finally:
+            os.close(fd)
+        self.assertFalse((self.base / 'victim').exists())
+
+    def test_one_slot_that_fails_does_not_stop_the_rest(self):
+        first = self.slot(1, self.work / 'gone-a/App', 9)
+        second = self.slot(2, self.work / 'gone-b/App', 9)
+        real, calls = storage.remove_tree_at, []
+
+        def flaky(parent_fd, name, expected=None):
+            calls.append(name)
+            if len(calls) == 1:
+                raise OSError(66, 'Directory not empty', 'Headers')
+            return real(parent_fd, name, expected)
+        with patch.object(storage, 'remove_tree_at', side_effect=flaky):
+            result = self.reclaim()
+        self.assertEqual(len(result['errors']), 1)
+        self.assertEqual(len(result['deleted']), 1)
+        self.assertFalse(second.exists(), 'the second slot still went')
+
+    def test_a_half_removed_slot_is_finished_by_the_next_round(self):
+        xcode = self.base / 'DevCache/shared/xcode'
+        old = xcode / ('.dev-storage-purge-' + 'a' * 64 + '-1')
+        (old / 'DerivedData/Build/Headers').mkdir(parents=True)
+        (old / 'DerivedData/Build/Headers/x.h').write_text('x')
+        fresh = xcode / ('.dev-storage-purge-' + 'b' * 64 + '-2')
+        fresh.mkdir(parents=True)
+        long_ago = self.now - 3600
+        for folder, _, files in os.walk(old):
+            os.utime(folder, (long_ago, long_ago))
+        result = self.reclaim()
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists(), 'one being removed right now is left to its own round')
+        self.assertEqual([s['error'] for s in result['swept']], [None])
 
 
 class PinTests(unittest.TestCase):

@@ -163,26 +163,67 @@ def open_directory_fd(path):
         raise
 
 
+REMOVE_PASSES = 4   # 11-18: Xcode's build and index services kept writing into a slot being removed ('Headers')
+
+
 def remove_tree_at(parent_fd, name, expected=None):
-    """Remove only descendants of a held directory descriptor; links are unlinked."""
+    """Remove only descendants of a held directory descriptor; links are unlinked. Each directory is listed
+    before anything in it goes, and listed again when something wrote into it meanwhile (a few passes at most)."""
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         identity = os.fstat(fd)
         if expected is not None and (identity.st_dev, identity.st_ino) != expected:
             raise RuntimeError('cache identity changed during removal')
-        with os.scandir(fd) as entries:
-            for entry in entries:
-                value = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+        for attempt in range(REMOVE_PASSES):
+            with os.scandir(fd) as entries:
+                names = [entry.name for entry in entries]
+            if not names:
+                break
+            for child in names:
+                try:
+                    value = os.stat(child, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 if stat.S_ISDIR(value.st_mode):
-                    remove_tree_at(fd, entry.name, (value.st_dev, value.st_ino))
+                    remove_tree_at(fd, child, (value.st_dev, value.st_ino))
                 else:
-                    os.unlink(entry.name, dir_fd=fd)
+                    try:
+                        os.unlink(child, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
             raise RuntimeError('quarantine identity changed')
     finally:
         os.close(fd)
     os.rmdir(name, dir_fd=parent_fd)
+
+
+def sweep_quarantine(root, now=None, min_age=600, activity=None):
+    """What an earlier removal renamed away but could not finish (`.dev-storage-purge-…` beside the slots or in
+    DerivedData) is already committed to going: it is finished here once nothing has touched it for `min_age`
+    seconds and no process holds anything in it. Returns [(path, error or None)]."""
+    now = time.time() if now is None else now
+    done = []
+    try:
+        with os.scandir(str(root)) as entries:
+            names = sorted(e.name for e in entries if e.name.startswith('.dev-storage-purge-') and e.is_dir(follow_symlinks=False))
+    except OSError:
+        return done
+    for name in names:
+        path = Path(root) / name
+        try:
+            if now - path.lstat().st_mtime < min_age or (activity is not None and activity.reasons(path)):
+                continue
+            parent_fd = open_directory_fd(Path(root))
+            try:
+                remove_tree_at(parent_fd, name)
+            finally:
+                os.close(parent_fd)
+            done.append((str(path), None))
+        except (OSError, RuntimeError) as error:
+            done.append((str(path), str(error)))
+    return done
 
 
 def callers(pid, parents):
@@ -641,6 +682,7 @@ class StorageManager:
             except BlockingIOError:
                 result['status'] = 'busy'
                 return result
+            result['swept'] = self._sweep([Path(r) / 'shared' / 'xcode' for r in self.settings.cache_roots], collect, now)
             rows, sizes = [], {}
             for key, folder, manifest in self.slots():
                 worktree = (manifest or {}).get('worktree')
@@ -710,8 +752,9 @@ class StorageManager:
                             total -= row['bytes'] or 0
                         self._log({'event': 'slot_delete_complete', 'time': time.time(), **entry})
                     except (OSError, ValueError, RuntimeError) as error:
+                        # 11-18: one slot that could not be finished no longer stops the rest; what was renamed
+                        # away is finished by the next round's sweep, never retried blindly here.
                         result['errors'].append({'path': str(row['folder']), 'reason': str(error)})
-                        break   # a partial or unknown deletion stops the run, never blindly retry
             result.update(count=len(rows) - len(result['deleted']), total_bytes=total, sizes=sizes,
                           status='error' if result['errors'] else 'ok')
             atomic_json(receipt, result)
@@ -740,7 +783,8 @@ class StorageManager:
                 continue
             if isinstance(workspace, str) and workspace.startswith('/') and worktree_gone(workspace):
                 gone.append((root / name, workspace))
-        if not gone:
+        leftovers = any(n.startswith('.dev-storage-purge-') for n in os.listdir(str(root)))
+        if not gone and not leftovers:
             return result
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.lock_path, 'a') as lock:
@@ -749,7 +793,8 @@ class StorageManager:
             except BlockingIOError:
                 result['status'] = 'busy'
                 return result
-            activity = collect()
+            result['swept'] = self._sweep([root], collect, now)
+            activity = collect() if gone else None
             for folder, workspace in gone:
                 if keep and (keep(str(folder)) or keep(workspace)):
                     result['kept'].append({'path': str(folder), 'reason': 'kept by the plan'})
@@ -785,9 +830,25 @@ class StorageManager:
                     self._log({'event': 'derived_delete_complete', 'time': time.time(), **entry})
                 except (OSError, ValueError, RuntimeError) as error:
                     result['errors'].append({'path': str(folder), 'reason': str(error)})
-                    break
             result['status'] = 'error' if result['errors'] else 'ok'
         return result
+
+    def _sweep(self, roots, collect, now):
+        """Finish removals an earlier round renamed away but could not complete (see sweep_quarantine)."""
+        swept, activity = [], None
+        for root in roots:
+            try:
+                if not any(n.startswith('.dev-storage-purge-') for n in os.listdir(str(root))):
+                    continue
+            except OSError:
+                continue
+            activity = activity or collect()
+            if activity.errors:
+                break
+            for path, error in sweep_quarantine(root, now, activity=activity):
+                swept.append({'path': path, 'error': error})
+                self._log({'event': 'sweep', 'time': time.time(), 'path': path, 'error': error})
+        return swept
 
     def _log(self, value):
         with open(self.state_root / 'actions.jsonl', 'a') as f:
