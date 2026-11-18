@@ -98,7 +98,6 @@ STREAK = '这是连续第 {n} 次因为{why}叫你：上次处理完，后台看
 NEW = '跟上次（{when}）比，这次新出现的：{what}。先看这些。\n\n'                         # AC-07
 STREAK_HOURS = 12
 WHY = {'disk': '磁盘快满了', 'memory': '内存吃紧', 'asked': '用户让你现在处理一次'}
-QUEUE_POLL_SECONDS = 10       # how often to look whether the Codex App finished the turn it was handed (CH-08)
 CARRY = 'RG-DECISION '        # a decision the agent could not write comes back in its reply after this (CH-08)
 UNWRITABLE = ('这一轮写不进去（只读）。不要申请权限：把下面这一行原样放进你最后的回复，资源看板会照它处理。\n')
 STEPS = (
@@ -481,25 +480,15 @@ def run_claude(home, folder, prompt, env, timeout, popen=subprocess.Popen, main=
         return dict(agent='claude', status='error', reply=(out or '')[-2000:])
 
 
-def queue_codex(home, thread, words, env, run=subprocess.run):
-    """`codex queue`: the Codex App, which has the thread open, runs these words as its next turn. False on a Codex
-    without it."""
-    try:
-        done = run([str(codex_binary(home)), 'queue', '--thread', thread, '--message', words], env=env,
-                   capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
-
-
 def said_in(turn):
     return '\n'.join(item.get('text') or '' for item in (turn or {}).get('items') or [] if item.get('type') == 'agentMessage')
 
 
-def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=subprocess.run, main=False):
+def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, main=False):
     """An emergency gets a Codex thread of its own, archived once its turn is done, so nothing piles up in the
     App (11-10). The main agent (`main`) keeps the one thread the user can open (AC-04, CH-07). Both are sandboxed
-    to the runs' folder (CH-02); once the user has opened the main one, the App owns it until it quits (CH-08)."""
+    to the runs' folder (CH-02). If the desktop owns the main thread, use an archived one-off review with the
+    same background permissions and keep the main thread for the next run."""
     cwd = conversation_root(home)
     process = popen([str(codex_binary(home)), 'app-server'], cwd=str(cwd), env=env, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
@@ -546,6 +535,7 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
         wait(lambda m: m.get('id') == asked)   # an error here only means it stays in the list
 
     thread = None
+    temporary = not main
     try:
         asked = send('initialize', dict(clientInfo=dict(name='resource-guard', title='资源看板', version='1'),
                                         capabilities=dict(experimentalApi=False)))
@@ -564,19 +554,13 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
             resumed = wait(lambda m: m.get('id') == asked)
             if 'error' not in resumed:
                 thread = known['thread']
-            elif 'active writer' in str(resumed['error']) and queue_codex(home, known['thread'], words, env, run=run):
-                thread = known['thread']
-                note_session(folder, agent='codex', thread=thread)
-                while True:   # the App may be busy with the user's own turn first
-                    turn = turn_of(thread, words)
-                    # Read from outside, a turn the App is still running shows as 「interrupted」 with no end time.
-                    if turn and turn.get('completedAt'):
-                        return dict(agent='codex', status='done', thread=thread, turn=turn.get('status'), via='app',
-                                    said=said_in(turn))
-                    if late.wait(QUEUE_POLL_SECONDS):
-                        raise TimeoutError
-        if thread is None:   # an emergency, the main agent's first run, or the user deleted its thread
-            words = (FIRST if main else SUB) + prompt
+            elif 'active writer' in str(resumed['error']):
+                temporary = True
+        if thread is None:
+            if main and temporary:
+                words = '这次用单独一段对话做复盘。以本轮材料里的告急回执、用户决定和经验为准。\n\n' + prompt
+            else:
+                words = (FIRST if main else SUB) + prompt
             params = dict(cwd=str(cwd), approvalPolicy='never', sandbox='workspace-write', ephemeral=False, threadSource='user')
             asked = send('thread/start', params)
             started = wait(lambda m: m.get('id') == asked)
@@ -588,17 +572,33 @@ def run_codex(home, folder, prompt, env, timeout, popen=subprocess.Popen, run=su
             if 'error' in started:
                 return dict(agent='codex', status='error', reply=str(started['error'])[:2000])
             thread = started['result']['thread']['id']
-        if main:
+        if not temporary:
             keep_conversation(home, 'codex', thread=thread)
         note_session(folder, agent='codex', thread=thread)
-        send('thread/name/set', dict(threadId=thread, name=TITLE if main else SUB_TITLE.format(time.strftime('%m-%d %H:%M'))))
+        title = TITLE if main else SUB_TITLE.format(time.strftime('%m-%d %H:%M'))
+        if main and temporary:
+            title = '资源看板 · 临时复盘'
+        send('thread/name/set', dict(threadId=thread, name=title))
+
+        def completed(message):
+            return message.get('method') == 'turn/completed' and (message.get('params') or {}).get('threadId') == thread
+
         asked = send('turn/start', dict(threadId=thread, input=[dict(type='text', text=words, text_elements=[])]))
-        done = wait(lambda m: m.get('method') == 'turn/completed' and (m.get('params') or {}).get('threadId') == thread)
+        started = wait(lambda m: m.get('id') == asked or completed(m))
+        if 'error' in started:
+            if temporary:
+                archive(thread)
+            return dict(agent='codex', status='failed', thread=thread, reply=str(started['error'])[:2000])
+        done = started if completed(started) else wait(completed)
+        turn = (done.get('params') or {}).get('turn') or {}
         said = said_in(turn_of(thread, words))
-        if not main:
+        if temporary:
             archive(thread)
-        return dict(agent='codex', status='done', thread=thread, turn=((done.get('params') or {}).get('turn') or {}).get('status'),
-                    said=said)
+        result = dict(agent='codex', status='done' if turn.get('status') == 'completed' else 'failed',
+                      thread=thread, turn=turn.get('status'), said=said)
+        if turn.get('error'):
+            result['reply'] = str(turn['error'].get('message') or turn['error'])[:2000]
+        return result
     except TimeoutError:
         return dict(agent='codex', status='timeout', thread=thread)
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -1631,6 +1631,8 @@ def notice_words(result, agent_result):
         parts.append('还有 {} 项等你确认，约 {:.0f} GB'.format(len(result['asks']), sum(a['bytes'] for a in result['asks']) / GIB))
     if agent_result.get('status') == 'timeout':
         parts.append('agent 超过 {} 分钟没处理完，已停下'.format(RUN_MINUTES))
+    elif agent_result.get('status') == 'failed':
+        parts.append('agent 这轮执行失败')
     elif agent_result.get('status') == 'error':
         parts.append('agent 没跑起来，点一下交给它')
     body = '；'.join(parts) or (result['summary'] or '这次没找到能安全处理的')
@@ -1711,10 +1713,10 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     result['judged'] = judger(home, reason, settings)
     atomic_json(folder / RESULT, dict(at=time.time(), reason=reason, agent=agent_result, streak=streak, **result))
     title = 'agent 处理了告急' if agent_result.get('status') == 'done' else '告急处理没做完'
-    if result['judged']['tight'] and streak >= 2:
+    if agent_result.get('status') == 'done' and result['judged']['tight'] and streak >= 2:
         title = 'agent 处理了 {} 次还没缓过来'.format(streak)   # AC-05: the user hears it
     short = settings.warning_free_gib * GIB - shutil.disk_usage(str(settings.volume)).free
-    if reason in ('disk', 'asked') and short > 0:
+    if agent_result.get('status') == 'done' and reason in ('disk', 'asked') and short > 0:
         # Still short of the user's target: what the agent worked out is put to them, loudly (11-10).
         title = ('离目标还差 {:.0f} GB：agent 出了方案，等你看' if result['asks'] or result['need'] or result.get('proposed') else
                  '离目标还差 {:.0f} GB：agent 这次没找到能腾的').format(short / GIB)
@@ -1723,10 +1725,11 @@ def _run(home, cfg, settings, reason, folder, runner, now=None, popen=subprocess
     talk = (folder / SESSION).is_file()
     tab = ('emergency-ask' if result['asks'] else 'emergency') if talk else ('pending' if result['asks'] else 'cover')
     agent_plan.notice(home, title, brief, tab=tab)
-    if agent_result.get('status') == 'error':
+    if agent_result.get('status') in ('error', 'failed'):
+        handoff_reason = 'agent 这轮执行失败' if agent_result['status'] == 'failed' else 'agent 没能自己启动'
         atomic_json(state_root(home) / 'agent-request.json',
                     dict(at=time.time(), title={'disk': '磁盘快满了', 'memory': '内存吃紧'}.get(reason, '资源看板告急处理'),
-                         reason='agent 没能自己启动', prompt=space_plan.AGENT_PROMPT))
+                         reason=handoff_reason, prompt=space_plan.AGENT_PROMPT))
     state = load_state(home)
     if agent_result.get('status') == 'error':
         undo_fired(state)
@@ -1764,7 +1767,8 @@ def _after_daily(home, folder, reason, agent_result, result, words=''):
         body = result['summary'] or ('主 agent 没答完：' + str(agent_result.get('status')))
         if result['need']:
             body = '要你做：' + result['need'] + '。' + body
-        agent_plan.notice(home, '主 agent 回答了你的问题', body[:300], tab='emergency')
+        title = '主 agent 回答了你的问题' if agent_result.get('status') == 'done' else '主 agent 没答完'
+        agent_plan.notice(home, title, body[:300], tab='emergency')
     elif result['need']:
         agent_plan.notice(home, '资源看板的主 agent 看了这一天', ('要你做：' + result['need'] + '。' + result['summary'])[:300])
     state = load_state(home)

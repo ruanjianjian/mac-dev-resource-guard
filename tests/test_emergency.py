@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -242,7 +243,8 @@ class RunnerTest(AskFixture):
         self.assertIn('error', refused)   # the server's question is never approved
 
     def test_every_codex_run_continues_the_one_thread(self):
-        sent, owner, turns, queued, fresh = [], {}, {}, [], ['one', 'two', 'three']
+        sent, owner, turns, fresh = [], {}, {}, ['one', 'review', 'replacement']
+        completion = {'status': 'completed'}
 
         class Pipe:
             def __init__(self):
@@ -259,19 +261,14 @@ class RunnerTest(AskFixture):
                     self.queue.append({'id': message['id'], 'result': {'thread': {'id': fresh.pop(0)}}})
                 elif method == 'turn/start':
                     thread = params['threadId']
-                    turns.setdefault(thread, []).append({'status': 'completed', 'completedAt': NOW, 'items': [
+                    self.queue.append({'id': message['id'], 'result': {}})
+                    turns.setdefault(thread, []).append({**completion, 'completedAt': NOW, 'items': [
                         {'type': 'userMessage', 'content': params['input']},
                         {'type': 'agentMessage', 'text': '处理完了'}]})
-                    self.queue.append({'method': 'turn/completed', 'params': {'threadId': thread, 'turn': {'status': 'completed'}}})
+                    self.queue.append({'method': 'turn/completed', 'params': {'threadId': thread, 'turn': completion}})
                 elif method == 'thread/turns/list':
                     listed = turns.get(params['threadId'], [])
                     self.queue.append({'id': message['id'], 'result': {'data': list(reversed(listed))[:params['limit']]}})
-                    for turn in listed:   # the App works through what it was handed, one look at a time;
-                        # from outside, a turn it is still running reads 「interrupted」 with no end time (11-02 22:28)
-                        if turn['status'] == 'interrupted':
-                            turn.update(status='completed', completedAt=NOW)
-                        elif turn['status'] == 'queued':
-                            turn['status'] = 'interrupted'
                 elif 'id' in message:
                     self.queue.append({'id': message['id'], 'result': {}})
             def flush(self):
@@ -290,22 +287,12 @@ class RunnerTest(AskFixture):
             def wait(self, timeout=None):
                 return 0
 
-        def run(command, **kwargs):   # `codex queue`: the App that owns the thread takes the words
-            if 'queue' not in command or owner.get('no-queue'):
-                return subprocess.CompletedProcess(command, 2)
-            thread, words = command[command.index('--thread') + 1], command[command.index('--message') + 1]
-            queued.append((thread, words, kwargs.get('env')))
-            turns.setdefault(thread, []).append({'status': 'queued', 'items': [
-                {'type': 'userMessage', 'content': [{'type': 'text', 'text': words}]},
-                {'type': 'agentMessage', 'text': 'RG-DECISION {"action": "lesson", "when": "只读", "then": "放进回复"}'}]})
-            return subprocess.CompletedProcess(command, 0)
-
         # The threads from before ran inside an old run's folder: not taken over, one new thread is started.
         E.note_session(E.new_folder(self.home, NOW - 86400), agent='codex', thread='old')
         # The one every run continued before 11-10 (no `since`): archived, not continued.
         path = E.state_root(self.home) / E.RUNS / E.CONVERSATION
         path.write_text(json.dumps({'codex': {'thread': 'every-run', 'agent': 'codex', 'at': NOW - 3600}}))
-        go = lambda: E.run_codex(self.home, self.folder, 'p', {E.DIR_ENV: str(self.folder)}, 60, popen=Process, run=run, main=True)
+        go = lambda: E.run_codex(self.home, self.folder, 'p', {E.DIR_ENV: str(self.folder)}, 60, popen=Process, main=True)
         self.assertEqual(go()['thread'], 'one')
         self.assertFalse(any(m.get('method') == 'thread/resume' for m in sent))
         self.assertEqual([m['params']['threadId'] for m in sent if m.get('method') == 'thread/archive'], ['every-run'])
@@ -322,23 +309,44 @@ class RunnerTest(AskFixture):
         named = next(m for m in sent if m.get('method') == 'thread/name/set')['params']
         self.assertEqual((named['threadId'], named['name']), ('one', E.TITLE))
 
-        # The user opened it in the Codex App, which now owns it: the App runs the turn, in the same thread.
+        # The desktop owns the chat and may have any permission preset. The background keeps its own permissions.
         owner['one'] = 'thread one already has an active writer'
         sent.clear()
-        with patch.object(E, 'QUEUE_POLL_SECONDS', 0.01):
-            result = go()
-        self.assertEqual((result['thread'], result['via'], result['turn']), ('one', 'app', 'completed'))
-        self.assertEqual(queued[-1][:2], ('one', 'p' + E.AGAIN))
-        self.assertFalse(any(m.get('method') in ('thread/start', 'turn/start') for m in sent))
-        self.assertIn('RG-DECISION', result['said'])
-        self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 'one')
+        result = go()
+        self.assertEqual((result['thread'], result['turn']), ('review', 'completed'))
+        start = next(m for m in sent if m.get('method') == 'thread/start')['params']
+        self.assertEqual((start['sandbox'], start['approvalPolicy']), ('workspace-write', 'never'))
+        self.assertEqual([m['params']['threadId'] for m in sent if m.get('method') == 'turn/start'], ['review'])
+        self.assertEqual([m['params']['threadId'] for m in sent if m.get('method') == 'thread/archive'], ['review'])
+        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'one')
+        self.assertEqual(json.loads((self.folder / E.SESSION).read_text())['thread'], 'review')
+        owner.pop('one')
+        self.assertEqual(go()['thread'], 'one')
+        owner['one'] = 'no rollout found for thread id one'   # the user deleted it: a new one is kept
+        completion.update(status='failed', error={'message': '当前账号无法使用这个模型'})
+        result = go()
+        self.assertEqual((result['thread'], result['status'], result['turn'], result['reply']),
+                         ('replacement', 'failed', 'failed', '当前账号无法使用这个模型'))
+        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'replacement')
 
-        owner['no-queue'] = True   # a Codex without `codex queue`: a new thread rather than no run at all
-        self.assertEqual(go()['thread'], 'two')
-        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'two')
-        owner['two'] = 'no rollout found for thread id two'   # the user deleted it: a new one is kept
-        self.assertEqual(go()['thread'], 'three')
-        self.assertEqual(E.conversation(self.home, 'codex')['thread'], 'three')
+    def test_a_failed_turn_is_not_reported_as_a_cleanup_success(self):
+        folder = E.new_folder(self.home, NOW)
+        (folder / E.MATERIAL).write_text(json.dumps(dict(simulators=[])))
+        E.save_state(self.home, {'run': {'streak': 2, 'started': NOW}})
+        failed = dict(agent='codex', status='failed', turn='failed', reply='模型不可用')
+        with patch.object(E, 'run_codex', return_value=failed), patch.object(ask_tier, 'launch_app'), \
+                patch.object(E.shutil, 'disk_usage', return_value=SimpleNamespace(total=100 * GIB, used=99 * GIB, free=GIB)):
+            result = E.run(self.home, self.cfg(), self.settings, 'disk', folder, 'codex', now=NOW,
+                           judger=lambda *a: dict(tight=True, words='空间仍紧'))
+        self.assertEqual(result['agent']['status'], 'failed')
+        [notice] = agent_plan.queued_notices(self.home)
+        self.assertEqual(notice['title'], '告急处理没做完')
+        self.assertIn('这轮执行失败', notice['body'])
+        status = E.load_state(self.home)
+        self.assertEqual(status['last']['agent'], 'failed')
+        self.assertNotIn('run', status)
+        handoff = json.loads((E.state_root(self.home) / 'agent-request.json').read_text())
+        self.assertEqual(handoff['reason'], 'agent 这轮执行失败')
 
     def test_a_decision_the_sandbox_would_not_take_comes_back_in_the_reply(self):
         material = dict(orphans=[], tasks=[], simulators=[], waiting=[])
@@ -374,6 +382,7 @@ class RunnerTest(AskFixture):
                              else {'id': message['id'], 'result': {'thread': {'id': 't2'}}})
                     self.queue.append(reply)
                 elif message.get('method') == 'turn/start':
+                    self.queue.append({'id': message['id'], 'result': {}})
                     self.queue.append({'method': 'turn/completed', 'params': {'threadId': 't2', 'turn': {'status': 'completed'}}})
                 elif 'id' in message:
                     self.queue.append({'id': message['id'], 'result': {}})
