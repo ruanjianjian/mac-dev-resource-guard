@@ -235,6 +235,21 @@ class CleanRoundTests(unittest.TestCase):
             service.clean_caches(self.home)
         self.assertTrue(gone.exists())
 
+    def test_xcode_folders_share_the_budget_the_slots_leave(self):
+        """11-18: live Runner-… folders count against the same cap as the slots."""
+        import datetime, plistlib
+        tree = self.home / 'work/live-lane/ios/Runner.xcworkspace'; tree.mkdir(parents=True)
+        old = self.project('Runner-old-lane', tree)
+        (old / 'Build/Intermediates.noindex/big.o').write_bytes(b'x' * 200000)
+        when = datetime.datetime.fromtimestamp(time.time() - 5 * DAY)
+        (old / 'info.plist').write_bytes(plistlib.dumps({'WorkspacePath': str(tree), 'LastAccessedDate': when}))
+        agent_plan.set_rule(self.home, 'build-slots', 'clean', by='user', words='构建槽规则', params={'max_gib': 0.0001})
+        with patch.object(service.common, 'activity', return_value=Activity()), patch.object(service.Activity, 'collect', return_value=Activity()):
+            receipt = service.clean_caches(self.home)
+        self.assertFalse(old.exists(), 'above a ~100 KB budget, a five-day-old live folder goes')
+        projects = next(r for r in receipt['results'] if r['family'] == 'xcode-projects')
+        self.assertEqual(len(projects['result']['deleted']), 1)
+
     def test_rule_off_leaves_slots_alone(self):
         agent_plan.set_rule(self.home, 'build-slots', 'off', by='user', words='构建槽别动')
         receipt = self.round()

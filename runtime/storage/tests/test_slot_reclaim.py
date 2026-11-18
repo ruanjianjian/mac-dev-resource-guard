@@ -196,6 +196,61 @@ class SlotReclaimTests(unittest.TestCase):
         self.assertEqual([s['error'] for s in result['swept']], [None])
 
 
+class DerivedBudgetTests(unittest.TestCase):
+    """11-18: 152 GiB of live Runner-… folders in Xcode's own DerivedData on the acceptance Mac; only gone ones went."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.now = time.time()
+        self.manager = StorageManager(Settings(cache_roots=[self.base / 'DevCache'], state_root=self.base / 'state',
+                                               volume=self.base))
+        self.root = self.base / 'DerivedData'
+        self.root.mkdir()
+        self.sizes = {}
+
+    def project(self, name, used_days_ago, gib=10, live=True):
+        import datetime
+        import plistlib
+        workspace = self.base / 'work' / name / 'ios/Runner.xcworkspace'
+        if live:
+            workspace.mkdir(parents=True)
+        folder = self.root / name
+        folder.mkdir()
+        when = datetime.datetime.fromtimestamp(self.now - used_days_ago * DAY)
+        (folder / 'info.plist').write_bytes(plistlib.dumps({'WorkspacePath': str(workspace), 'LastAccessedDate': when}))
+        self.sizes[name] = gib * GIB
+        return folder
+
+    def reclaim(self, **kwargs):
+        kwargs.setdefault('activity_factory', Activity)
+        return self.manager.reclaim_derived(self.root, now=self.now, sizer=lambda f: self.sizes[f.name], **kwargs)
+
+    def test_above_the_budget_the_least_used_live_folders_go(self):
+        oldest = self.project('Runner-a', 9)
+        older = self.project('Runner-b', 5)
+        recent = self.project('Runner-c', 0.1)
+        result = self.reclaim(cap_bytes=15 * GIB, min_age=DAY)
+        self.assertFalse(oldest.exists())
+        self.assertFalse(older.exists())
+        self.assertTrue(recent.exists(), 'used within a day: stays whatever the budget')
+        self.assertEqual(result['total_bytes'], 10 * GIB)
+        self.assertIn('最久没用', result['deleted'][0]['why'])
+
+    def test_within_the_budget_live_folders_stay(self):
+        folders = [self.project('Runner-a', 9), self.project('Runner-b', 5)]
+        self.reclaim(cap_bytes=100 * GIB)
+        self.assertTrue(all(f.exists() for f in folders))
+        self.reclaim()   # no budget given: only gone projects go, as before
+        self.assertTrue(all(f.exists() for f in folders))
+
+    def test_a_folder_held_open_stays(self):
+        held = self.project('Runner-a', 9)
+        self.reclaim(cap_bytes=0, activity_factory=lambda: Activity(open_paths=[(4, str(held / 'Build/x.o'))]))
+        self.assertTrue(held.exists())
+
+
 class PinTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
