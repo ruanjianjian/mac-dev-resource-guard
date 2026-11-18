@@ -149,12 +149,35 @@ def pr_state(repo, memory=None, now=None, run=subprocess.run):
     return (state, states[state]) if state else None
 
 
+def kept_only_here(repo):
+    """What a full clone keeps that nothing else does (11-18): commits on any local branch no remote has, or stashes.
+    A linked worktree's branches and stashes live in its main repository, which stays, so it has none of its own."""
+    if not (Path(repo) / '.git').is_dir():
+        return None
+    try:
+        # HEAD's own commits are work_left's to judge (a merged PR may hold them); here only the other branches.
+        ahead = git(repo, 'rev-list', '--count', '--branches', '--not', '--remotes', 'HEAD')
+        stash = git(repo, 'stash', 'list')
+        if ahead.returncode or stash.returncode:
+            return 'git 状态读取失败'
+        if int(ahead.stdout.strip() or 0):
+            return '别的本地分支上有未推送的提交'
+        if stash.stdout.strip():
+            return '有 stash 里存着的改动'
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return 'git 状态读取失败'
+    return None
+
+
 def work_left(repo, memory=None, now=None):
     """(why it still holds work only here, or None; its PR state). Commits no branch on the remote holds any more
     but a merged or closed PR does (squash-merged and the branch deleted, 11-16) are saved: GitHub keeps them."""
     change = git_changes(repo)
     if change not in (None, '有未推送的提交'):
         return change, None
+    extra = kept_only_here(repo)
+    if extra:
+        return extra, None
     pr = pr_state(repo, memory, now)
     if change and not (pr and pr[0] in ('merged', 'closed')):
         return change, pr
