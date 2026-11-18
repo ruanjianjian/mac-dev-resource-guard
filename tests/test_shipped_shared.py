@@ -127,6 +127,45 @@ class ShippedTests(ShippedFixture):
         self.assertNotIn('pin-release:' + str(open_task.resolve()), items)
 
 
+class CloneTests(ShippedFixture):
+    """11-18: a full clone loses its other branches and stashes with the folder; a worktree's live on in its main."""
+
+    def clone_task(self, name):
+        app = self.root / name / 'app'
+        app.mkdir(parents=True)
+        git(app, 'init', '-q', '-b', 'main'); (app / 'a.txt').write_text('a'); git(app, 'add', '.'); git(app, 'commit', '-qm', 'init')
+        git(app, 'remote', 'add', 'origin', str(self.remote)); git(app, 'push', '-q', 'origin', 'main:' + name)
+        git(app, 'fetch', '-q', 'origin')
+        return app
+
+    def listed(self):
+        return [i for i in self.ids(self.refresh(self.simctl)) if i.startswith(('task-delete:', 'task-shipped:'))]
+
+    def test_unpushed_work_on_another_branch_keeps_the_clone(self):
+        app = self.clone_task('clone-branch')
+        git(app, 'switch', '-q', '-c', 'side'); (app / 'b.txt').write_text('b'); git(app, 'add', '.'); git(app, 'commit', '-qm', 'side work')
+        git(app, 'switch', '-q', 'main')
+        age(app.parent, 10)
+        self.assertEqual(T.kept_only_here(app), '别的本地分支上有未推送的提交')
+        self.assertEqual(self.listed(), [])
+
+    def test_a_stash_keeps_the_clone(self):
+        app = self.clone_task('clone-stash')
+        (app / 'a.txt').write_text('changed'); git(app, 'stash', '-q')
+        age(app.parent, 10)
+        self.assertEqual(T.kept_only_here(app), '有 stash 里存着的改动')
+        self.assertEqual(self.listed(), [])
+
+    def test_a_clean_clone_and_a_worktree_still_go(self):
+        app = self.clone_task('clone-clean')
+        age(app.parent, 10)
+        self.assertIsNone(T.kept_only_here(app))
+        task = self.worktree_task('worktree-side', 10)
+        git(self.home / 'main', 'branch', 'other-local')   # lives on in the main repository
+        self.assertIsNone(T.kept_only_here(task / 'main'))
+        self.assertEqual(sorted(self.listed()), sorted(['task-delete:' + str(app.parent), 'task-delete:' + str(task)]))
+
+
 class SharedCacheTests(ShippedFixture):
     def flutter_repo(self):
         app = self.root / 'flutter-task' / 'app'
