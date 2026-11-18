@@ -12,6 +12,7 @@ from storage import GIB, Activity, StorageManager, atomic_json
 import agent_plan
 import auto_tier
 import owners as O
+import shared_caches
 import spaces
 import tasks as T
 
@@ -31,7 +32,10 @@ LOSES = {
     'path-delete': '里面的全部内容（缓存、日志、构建产物这类下次用到会重新生成，别的就没了）',
     'task-move': '不丢东西：整个挪到外接盘，原路径留链接；外接盘拔掉时用不了，没推送的改动只在外接盘上',
     'pin-release': '不删东西，只去掉保护标记；之后它按别的规则处理（闲置的任务会列出来问你，或按你同意过的直接收）',
+    'task-shipped': '整个任务目录：代码、笔记、截图、构建产物和它的私有缓存；代码都在 GitHub 上，要用时重新拉',
+    'shared-caches': '这些版本的下载缓存；以后哪个项目又用到，会重新下载',
 }
+SHIPPED = ('merged', 'closed')
 PIN_SIZE_DAYS = 1   # how long the size of what an old pin covers is reused before du looks again
 # The simulator's own processes and the viewer app mention the UDID but are not tools using it.
 NOT_A_TOOL = re.compile(r'Simulator\.app/Contents/MacOS/Simulator|launchd_sim|CoreSimulator/Devices/')
@@ -153,6 +157,32 @@ def task_blocker(task, cfg, activity, pins, now, memory=None):
     return None, latest, states
 
 
+def shipped_blocker(task, cfg, activity, pins, now, memory, hours):
+    """task-shipped (11-18, the user: 「功能都上线了就把开发内容都可以删了。什么都可以删了」): (why it cannot go or None,
+    latest write, PR words). Every repository's work is in the default branch or a merged or closed PR, nothing is
+    left uncommitted, no other worktree hangs on it, nobody uses it, and it is untouched for `hours`. Notes and shots
+    beside the code go with it."""
+    reasons, latest = T.idle_check(task, activity, pins, hours / 24.0, cfg, now)
+    if reasons:
+        return '；'.join(reasons), latest, ''
+    repos = T.repositories(task.real, T.skip_names(cfg))
+    if not repos:
+        return '没有代码仓库', latest, ''
+    states = []
+    for repo in repos:
+        change, pr = T.work_left(repo, memory, now)
+        if change:
+            return '{}：{}'.format(repo.name, change), latest, ''
+        if not (pr and pr[0] in SHIPPED):
+            return '{} 的改动还没合入'.format(repo.name), latest, ''
+        states.append(pr)
+        if (repo / '.git').is_dir():
+            listed = T.git(repo, 'worktree', 'list', '--porcelain')
+            if listed.returncode or listed.stdout.count('worktree ') > 1:
+                return '{} 还有别的工作区依赖它'.format(repo.name), latest, ''
+    return None, latest, T.pr_words(states)
+
+
 def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
     """Everything worth asking about; with `only` (ids), just those, so a confirmation rechecks in seconds."""
     found = {}
@@ -163,9 +193,13 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
                                        loses=LOSES[kind], fingerprint=fingerprint, **extra)
 
     other_candidates(home, activity, now, add, kinds=kinds)
-    pin_days = agent_plan.load(home)['rules']['pin-release']['params']['min_days']
+    rules = agent_plan.load(home)['rules']
+    opts = dict(pin_days=rules['pin-release']['params']['min_days'], shipped_on=rules['task-shipped']['action'] != 'off',
+                shipped_auto=rules['task-shipped']['action'] == 'auto', shipped_hours=rules['task-shipped']['params']['idle_hours'])
+    if (kinds is None or 'shared-caches' in kinds) and rules['shared-caches']['action'] != 'off':
+        shared_caches.candidates(home, cfg, activity, now, memory, add, only)
     if kinds is not None and not kinds & {'simulator-shutdown', 'simulator-delete', 'runtime-delete'}:
-        return _tasks(cfg, activity, pins, now, add, only, found, memory, pin_days)
+        return _tasks(cfg, activity, pins, now, add, only, found, memory, opts)
     listing = json.loads(simctl(['list', 'devices', '--json']))
     stream_hours = agent_plan.load(home)['rules']['simulator-shutdown']['params'].get('stream_hours')
     ages = process_ages() if stream_hours else {}
@@ -210,18 +244,35 @@ def candidates(home, cfg, activity, pins, simctl, now, memory, only=None):
             add('runtime-delete', runtime.get('identifier', key), 'iOS 运行时 ' + runtime_label(identifier, runtime.get('version'))
                 if '.iOS-' in identifier else '运行时 ' + runtime_label(identifier, runtime.get('version')),
                 runtime.get('sizeBytes'), '没有任何模拟器在用', 'runtime:' + identifier)
-    return _tasks(cfg, activity, pins, now, add, only, found, memory, pin_days)
+    return _tasks(cfg, activity, pins, now, add, only, found, memory, opts)
 
 
-def _tasks(cfg, activity, pins, now, add, only, found, memory=None, pin_days=7):
+def _tasks(cfg, activity, pins, now, add, only, found, memory=None, opts=None):
+    opts = dict(dict(pin_days=7, shipped_on=False, shipped_auto=False, shipped_hours=24), **(opts or {}))
     if only is None or any(key.startswith('pin-release:') for key in only):
-        _old_pins(pins, now, add, only, memory, pin_days)
+        _old_pins(pins, now, add, only, memory, opts['pin_days'])
     for task in T.discover(cfg):
-        if not task.reachable or only is not None and 'task-delete:' + str(task.path) not in only and 'task-delete:' not in only:
+        wanted = only is None or any(k in only for k in ('task-delete:' + str(task.path), 'task-delete:',
+                                                           'task-shipped:' + str(task.path), 'task-shipped:'))
+        if not task.reachable or not wanted:
+            continue
+        where = '（在外接盘上）' if task.linked else ''
+        shipped = None
+        if opts['shipped_on']:
+            blocker, latest, prs = shipped_blocker(task, cfg, activity, pins, now, memory, opts['shipped_hours'])
+            if blocker is None:
+                shipped = (task.path.name + where, '{}，闲置 {:.0f} 小时；笔记、截图这些一起删'.format(
+                    prs or '已合入', (now - latest) / 3600), 'latest:{:.0f}'.format(latest))
+        # Set to 「直接收」, a shipped task goes as one; otherwise it is asked about as before (so a learned 「直接做」 on
+        # idle tasks keeps working), and listed as shipped only when the old rule would not list it.
+        if shipped and opts['shipped_auto']:
+            add('task-shipped', str(task.path), shipped[0], T.size(task.real), shipped[1], shipped[2])
             continue
         blocker, latest, states = task_blocker(task, cfg, activity, pins, now, memory)
+        if blocker is not None and shipped:
+            add('task-shipped', str(task.path), shipped[0], T.size(task.real), shipped[1], shipped[2])
+            continue
         if blocker is None:
-            where = '（在外接盘上）' if task.linked else ''
             # done: every repository's work is in the default branch or in a merged or closed PR (learned 「auto」 only
             # takes these, 11-16).
             done = bool(states) and all(s and s[0] in ('merged', 'closed') for s in states)
@@ -235,25 +286,47 @@ def _tasks(cfg, activity, pins, now, add, only, found, memory=None, pin_days=7):
 
 
 def _old_pins(pins, now, add, only, memory, days):
-    """pin-release (11-16): pins made before they had a date, older than the rule's days, or on a path that is gone;
-    the user takes them off in one go. What each covers is measured at most once a day."""
+    """pin-release: pins made before they had a date, older than the rule's days, or on a path that is gone (11-16);
+    and (11-18) any pin, however new, whose code is all in the default branch or in merged or closed PRs — the
+    feature is out, so the work it held is done. The user takes them off in one go. What each covers is measured
+    at most once a day."""
     sizes = memory.setdefault('pin_sizes', {}) if memory is not None else {}
     for path, value in pins.items():
         if only is not None and 'pin-release:' + path not in only and 'pin-release:' not in only:
             continue
-        if not isinstance(value, dict) or value.get('expires') is not None:
+        if not isinstance(value, dict):
             continue
         created = value.get('created') if isinstance(value.get('created'), (int, float)) else 0
         exists = os.path.lexists(path)
-        if exists and now - created < days * T.DAY:
+        old = value.get('expires') is None and (not exists or now - created >= days * T.DAY)
+        shipped = '' if old or not exists else guards_shipped(path, memory, now)
+        if not (old or shipped):
             continue
         hit = sizes.get(path)
         if exists and not (isinstance(hit, list) and len(hit) == 2 and now - hit[1] < PIN_SIZE_DAYS * T.DAY):
             hit = sizes[path] = [T.size(path) or 0, now]
-        age = '标记了 {:.0f} 天、没写到期日'.format((now - created) / T.DAY) if created else '没写到期日'
+        if shipped:
+            why = '它护着的代码已经上线（{}）'.format(shipped)
+        elif not exists:
+            why = '标记的目录已经不在了'
+        else:
+            why = '标记了 {:.0f} 天、没写到期日'.format((now - created) / T.DAY) if created else '没写到期日'
         add('pin-release', path, Path(path).name, hit[0] if exists else 0,
-            '{}：{}'.format(age if exists else '标记的目录已经不在了', str(value.get('reason', ''))[:80]),
+            '{}：{}'.format(why, str(value.get('reason', ''))[:80]),
             'created:{:.0f}'.format(created), owner=str(value.get('owner', ''))[:40])
+
+
+def guards_shipped(path, memory, now):
+    """「PR #12 已合入、…」 when every repository at or under `path` (or the one it sits in) has its work in the default
+    branch or a merged or closed PR; '' otherwise or when that cannot be told."""
+    path = Path(path)
+    repos = T.repositories(path, set(T.PRUNE_NAMES) | {'.git'}) if path.is_dir() else []
+    if not repos:
+        repos = [parent for parent in [path, *path.parents][:8] if (parent / '.git').exists()][:1]
+    states = [T.pr_state(repo, memory, now) for repo in repos]
+    if not states or not all(state and state[0] in SHIPPED for state in states):
+        return ''
+    return T.pr_words(states) or '已合入'
 
 
 def other_candidates(home, activity, now, add, mounted=None, kinds=None):
@@ -522,6 +595,17 @@ def remove_task(path, cfg, archive=None):
         T.remove_tree(real)
 
 
+def drop_task_cache(settings, name, activity):
+    """A retired task's own cache beside the shared ones (<cache root>/tasks/<task name>) goes with it (11-18)."""
+    for root in settings.cache_roots:
+        folder = Path(root) / 'tasks' / name
+        if name and folder.is_dir() and not folder.is_symlink() and not activity.reasons(folder):
+            try:
+                T.remove_tree(folder)
+            except OSError:
+                pass   # the task itself is gone; its cache waits for the next look
+
+
 def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emptier=empty_trash, source='confirm'):
     """Run only the confirmed ids, each re-checked just before (ask AC-02/06/07). Only those ids are looked
     at again, so confirming takes seconds instead of a full scan of every task and simulator. `source` 'auto':
@@ -583,6 +667,10 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                 trash_emptier()
             elif item['kind'] == 'pin-release':
                 StorageManager(settings).release_pin(target)
+            elif item['kind'] == 'shared-caches':
+                skipped = shared_caches.remove(fresh[key]['paths'], activity)
+                if skipped and len(skipped) == len(fresh[key]['paths']):
+                    raise RuntimeError('都有程序在用，没有删：' + skipped[0])
             elif item['kind'] == 'task-move':
                 import emergency   # here only: it imports this module
                 skipped = emergency.move_task(home, cfg, settings, target, activity, pins, unsaved_ok=True)
@@ -601,6 +689,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
                     path.unlink()
             else:
                 remove_task(target, cfg, archive=fresh[key].get('archive'))
+                drop_task_cache(settings, Path(target).name, activity)
             item.update(state='done', result=None, updated=time.time())
             results.append(dict(id=key, title=item['title'], outcome='已完成', reason=item['reason'], bytes=item['bytes']))
             remember_choice(home, item, 'confirmed', source)
@@ -610,7 +699,7 @@ def execute(home, cfg, settings, ids, simctl, activity=None, now=None, trash_emp
         save(home, PENDING, pending)
     pending['items'] = [i for i in pending['items'] if i['state'] != 'done' and i['id'] not in gone]
     save(home, PENDING, pending)
-    if any(r['outcome'] == '已完成' and r['id'].startswith('task-delete:') for r in results):
+    if any(r['outcome'] == '已完成' and r['id'].startswith(('task-delete:', 'task-shipped:')) for r in results):
         try:   # build-slots: the retired tasks' build slots go now, not at the next cache round
             if agent_plan.action(plan, 'build-slots') == 'clean':
                 StorageManager(settings).reclaim_slots(activity_factory=lambda: activity, now=now)
@@ -725,4 +814,31 @@ def cap_simulators(home, cfg, settings, simctl, now=None, activity=None):
     if done:
         agent_plan.notice(home, '同时开着 {} 台模拟器，关了 {} 台没人连的'.format(len(booted), len(done)),
                           '{}：没人连满 {:g} 分钟。数据都在，要用再开。'.format('、'.join(r['title'] for r in done), minutes), tab='memory')
+    return done
+
+
+POLICY_WORDS = {'task-shipped': ('按你定的，收了 {} 个已上线的任务', '代码都在 GitHub 上，要用时重新拉；腾出约 {:.0f} GB：{}'),
+                'shared-caches': ('按你定的，清了共享缓存里 {} 类现在的项目都不用的版本', '以后哪个项目又用到会重新下载；腾出约 {:.0f} GB：{}')}
+
+
+def run_policy(home, cfg, settings, simctl, kind, now=None, activity=None):
+    """A kind the user set to 「直接做」 as a standing rule (11-18: task-shipped, shared-caches): all of it that
+    qualifies goes each round, whatever the free space, each rechecked like a yes in 「等你确认」. Said once."""
+    now = time.time() if now is None else now
+    if (agent_plan.load(home)['rules'].get(kind) or {}).get('action') != 'auto':
+        return []
+    activity = activity if activity is not None else Activity.collect(settings.lease_root)
+    if activity.errors:
+        return []
+    pins, _ = StorageManager(settings)._pins(now)
+    found = candidates(home, cfg, activity, pins, simctl, now, dict(load(home, ASK_STATE, {})), only={kind + ':'})
+    plan = agent_plan.load(home)
+    picked = [k for k, f in found.items() if f['kind'] == kind and not left_alone(plan, k, f)]
+    if not picked:
+        return []
+    done = [r for r in execute(home, cfg, settings, picked, simctl, activity, now, source='auto') if r['outcome'] == '已完成']
+    if done:
+        title, body = POLICY_WORDS[kind]
+        names = '、'.join(r['title'] for r in done[:4]) + (' 等' if len(done) > 4 else '')
+        agent_plan.notice(home, title.format(len(done)), body.format(sum(r.get('bytes') or 0 for r in done) / GIB, names))
     return done

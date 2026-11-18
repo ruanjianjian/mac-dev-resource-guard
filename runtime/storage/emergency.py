@@ -118,7 +118,8 @@ STEPS = (
     'process-stop（主人还在的进程）、path-delete（你查到的任何大目录或大文件：缓存、日志、旧构建、容器数据……'
     '写清是什么、为什么能删、删了会怎样）、pin-release（id 是被保护的路径：它护着的活已经做完了，比如 PR 已合入、'
     '报告已发，只去掉保护标记）；`emergency rule <规则> --decision <做法> --why` 改计划，参数用 `--param 名=值`'
-    '（比如 build-slots 的 max_gib：构建槽合计的上限，按这台的盘和用法定）；'
+    '（比如 build-slots 的 max_gib：构建槽合计的上限，按这台的盘和用法定；shared-caches 是共享缓存里现在的项目都不用的版本，'
+    '看过确实没项目在用就可以改成 auto）；'
     '`emergency lesson` 记经验。',
     '正在干活的进程不能关，但能让它们以后少占：很多开发工具读环境变量来定开几个进程、用多少内存（比如测试框架的 worker 数、'
     '编译的并发数）。判断值得限，就 `emergency env <变量名> --decision <值> --why "哪个工具、哪个版本读它（看过它的源码或文档）、'

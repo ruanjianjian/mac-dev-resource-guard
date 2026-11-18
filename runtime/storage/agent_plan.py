@@ -60,6 +60,12 @@ RULES = {
     # to take off (only the mark goes; what it covered is then handled by the other rules).
     'pin-release': dict(title='没写到期日的旧保护标记', actions=('ask', 'quiet', 'off'), default='ask',
                         params={'min_days': 7}),
+    # 11-18, the user: 「功能都上线了就把开发内容都可以删了。什么都可以删了。只有影响下次做elys其他项目开发的时候的构建进度
+    # 的可以不删。也就是那些共享缓存。共享缓存也不是都不能删，也要经常根据项目的实际情况迭代下」. A task whose every
+    # repository is merged or closed goes whole, notes and all; shared caches keep what today's projects use.
+    'task-shipped': dict(title='已上线的任务（PR 已合入或关闭）', actions=('auto', 'ask', 'quiet', 'off'), default='ask',
+                         params={'idle_hours': 24}),
+    'shared-caches': dict(title='共享缓存里现在的项目都不用的版本', actions=('auto', 'ask', 'quiet', 'off'), default='ask'),
 }
 SLOT_SHARE = 0.1   # build-slots without a cap the agent set: a tenth of the disk
 ACTION_WORDS = {'move': '挪到外接盘', 'clean': '自动清', 'ask': '先问', 'auto': '你同意过，直接做', 'quiet': '只列出、不催', 'off': '不管',
@@ -312,6 +318,12 @@ def rule_words(rid, entry):
         cap = entry['params'].get('max_gib')
         return '工作区不在了，它的构建槽和 Xcode 编译目录就删；构建槽合计超过{}时，先删最久没用的（{:g} 小时内用过的不动）'.format(
             ' {:g} GB '.format(cap) if cap else '磁盘的十分之一', entry['params']['min_hours'])
+    if rid == 'task-shipped' and entry['action'] in ('auto', 'ask'):
+        return '{}：所有仓库都已合入或关闭、{:g} 小时没人动的任务，整个删掉（笔记、截图一起）'.format(
+            '直接收' if entry['action'] == 'auto' else '先问', entry['params']['idle_hours'])
+    if rid == 'shared-caches' and entry['action'] in ('auto', 'ask'):
+        return '{}：Flutter SDK、pub、CocoaPods、Gradle 里现在的项目都不用的版本'.format(
+            '直接清' if entry['action'] == 'auto' else '先问')
     if rid == 'pin-release' and entry['action'] != 'off':
         return words + '（标记满 {:g} 天、没写到期日的）'.format(entry['params']['min_days'])
     if rid == 'idle-servers' and entry['action'] != 'off':
@@ -340,7 +352,7 @@ def set_rule(home, rid, new_action, by='agent', why='', evidence=(), params=None
             raise ValueError('{} 必须是正数'.format(key))
     if by == 'agent':
         _check_agent(entry, spec['title'], why, plan)
-        if new_action == 'auto' and rid in ('simulator-delete', 'task-delete'):
+        if new_action == 'auto' and rid in ('simulator-delete', 'task-delete', 'task-shipped'):
             raise ValueError('删模拟器、收任务要用户自己同意过才能直接做：列给用户点头，同意多了后台会自己学会')
         if new_action == 'work-drive':
             raise ValueError('把外接盘当工作盘要用户自己定：用 emergency propose 把这个方案提给用户')
