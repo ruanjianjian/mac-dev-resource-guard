@@ -481,6 +481,12 @@ def tick_tiers(home, now):
                                          short_bytes=settings.warning_free_gib * GIB - free):
                         pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
                         free = shutil.disk_usage(str(settings.volume)).free
+                # 11-18: what the user made a standing rule (shipped tasks, unused shared-cache versions) goes every
+                # round, short of space or not.
+                for kind in ('task-shipped', 'shared-caches'):
+                    if ask_tier.run_policy(home, cfg, settings, auto_tier.default_simctl, kind, now=now):
+                        pending = ask_tier.refresh(home, cfg, settings, auto_tier.default_simctl, now=now)
+                        free = shutil.disk_usage(str(settings.volume)).free
                 ask_tier.maybe_notify(home, pending, free, settings.critical_free_gib * GIB, now)
                 (root/'ask-error.json').unlink(missing_ok=True)
             except Exception as error:
